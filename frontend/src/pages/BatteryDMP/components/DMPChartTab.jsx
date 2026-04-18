@@ -15,7 +15,7 @@ import { fetchStats, fetchTelemetry } from '../../../api/dmpApi';
 
 const statsKeys = ['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'IM_MAX', 'IM_MIN', 'IM_AVG'];
 
-export default function DMPChartTab({ selection }) {
+export default function DMPChartTab({ stationId, selection }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [telemetry, setTelemetry] = useState([]);
@@ -23,7 +23,7 @@ export default function DMPChartTab({ selection }) {
   const [visibleLines, setVisibleLines] = useState(['VOLT', 'Im']);
 
   useEffect(() => {
-    if (!selection?.cdmc || selection.channel == null) {
+    if (!stationId || !selection?.cdmc || selection.channel == null) {
       setTelemetry([]);
       setStats({});
       setError('');
@@ -35,8 +35,8 @@ export default function DMPChartTab({ selection }) {
     setError('');
 
     Promise.all([
-      fetchTelemetry(selection.cdmc, selection.channel),
-      fetchStats(selection.cdmc, selection.channel),
+      fetchTelemetry(stationId, selection.cdmc, selection.channel),
+      fetchStats(stationId, selection.cdmc, selection.channel),
     ])
       .then(([telemetryRows, statsData]) => {
         if (!mounted) return;
@@ -55,7 +55,7 @@ export default function DMPChartTab({ selection }) {
     return () => {
       mounted = false;
     };
-  }, [selection]);
+  }, [stationId, selection]);
 
   const chartData = useMemo(
     () => telemetry.map((row, index) => ({
@@ -66,6 +66,10 @@ export default function DMPChartTab({ selection }) {
     })),
     [telemetry]
   );
+
+  if (!stationId) {
+    return <Empty description="Select a station to view chart" />;
+  }
 
   if (!selection) {
     return <Empty description="Select a channel to view chart" />;

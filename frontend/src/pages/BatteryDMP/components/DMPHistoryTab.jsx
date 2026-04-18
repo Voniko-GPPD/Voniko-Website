@@ -10,14 +10,14 @@ function format4(value) {
   return num.toFixed(4);
 }
 
-export default function DMPHistoryTab({ selection }) {
+export default function DMPHistoryTab({ stationId, selection }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [telemetry, setTelemetry] = useState([]);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    if (!selection?.cdmc || selection.channel == null) {
+    if (!stationId || !selection?.cdmc || selection.channel == null) {
       setTelemetry([]);
       setError('');
       return;
@@ -27,7 +27,7 @@ export default function DMPHistoryTab({ selection }) {
     setLoading(true);
     setError('');
 
-    fetchTelemetry(selection.cdmc, selection.channel)
+    fetchTelemetry(stationId, selection.cdmc, selection.channel)
       .then((rows) => {
         if (!mounted) return;
         setTelemetry(rows);
@@ -44,7 +44,7 @@ export default function DMPHistoryTab({ selection }) {
     return () => {
       mounted = false;
     };
-  }, [selection]);
+  }, [stationId, selection]);
 
   const filteredRows = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -93,6 +93,10 @@ export default function DMPHistoryTab({ selection }) {
       render: (value) => <span style={monoStyle}>{format4(value)}</span>,
     },
   ];
+
+  if (!stationId) {
+    return <Empty description="Select a station to view history data" />;
+  }
 
   if (!selection) {
     return <Empty description="Select a channel to view history data" />;

@@ -1,91 +1,84 @@
-const API_BASE = '/api/dmp';
+const BASE = '/api/dmp';
 
-function getAuthToken() {
-  // DMP API follows issue requirement (`token`) and keeps backward compatibility (`accessToken`).
-  return localStorage.getItem('token') || localStorage.getItem('accessToken') || '';
-}
-
-async function apiFetch(endpoint, options = {}) {
-  const token = getAuthToken();
-  const headers = {
-    ...(options.headers || {}),
-    Authorization: `Bearer ${token}`,
-  };
-
-  if (!(options.body instanceof FormData) && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json';
-  }
-
-  const response = await fetch(`${API_BASE}${endpoint}`, {
+async function apiFetch(url, options = {}) {
+  const token = localStorage.getItem('token');
+  const res = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     ...options,
-    headers,
   });
-
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`;
-    try {
-      const body = await response.json();
-      message = body.message || body.error || message;
-    } catch {
-      // ignore parse failure
-    }
-    throw new Error(message);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Request failed');
   }
-
-  return response;
+  return res;
 }
 
-export async function fetchBatches() {
-  const response = await apiFetch('/batches', { method: 'GET' });
-  const data = await response.json();
+export async function fetchStations() {
+  const res = await apiFetch(`${BASE}/stations`);
+  const data = await res.json();
+  return data.stations || [];
+}
+
+export async function fetchBatches(stationId) {
+  const res = await apiFetch(`${BASE}/batches?stationId=${encodeURIComponent(stationId)}`);
+  const data = await res.json();
   return data.batches || [];
 }
 
-export async function fetchChannels(batchId) {
-  const response = await apiFetch(`/batches/${encodeURIComponent(batchId)}/channels`, { method: 'GET' });
-  const data = await response.json();
+export async function fetchChannels(stationId, batchId) {
+  const res = await apiFetch(`${BASE}/batches/${batchId}/channels?stationId=${encodeURIComponent(stationId)}`);
+  const data = await res.json();
   return data.channels || [];
 }
 
-export async function fetchTelemetry(cdmc, channel) {
-  const params = new URLSearchParams({ cdmc: String(cdmc), channel: String(channel) });
-  const response = await apiFetch(`/telemetry?${params.toString()}`, { method: 'GET' });
-  const data = await response.json();
+export async function fetchTelemetry(stationId, cdmc, channel) {
+  const params = new URLSearchParams({ stationId, cdmc, channel });
+  const res = await apiFetch(`${BASE}/telemetry?${params.toString()}`);
+  const data = await res.json();
   return data.telemetry || [];
 }
 
-export async function fetchStats(cdmc, channel) {
-  const params = new URLSearchParams({ cdmc: String(cdmc), channel: String(channel) });
-  const response = await apiFetch(`/stats?${params.toString()}`, { method: 'GET' });
-  return response.json();
+export async function fetchStats(stationId, cdmc, channel) {
+  const params = new URLSearchParams({ stationId, cdmc, channel });
+  const res = await apiFetch(`${BASE}/stats?${params.toString()}`);
+  return res.json();
 }
 
-export async function fetchTemplates() {
-  const response = await apiFetch('/templates', { method: 'GET' });
-  const data = await response.json();
+export async function fetchTemplates(stationId) {
+  const res = await apiFetch(`${BASE}/templates?stationId=${encodeURIComponent(stationId)}`);
+  const data = await res.json();
   return data.templates || [];
 }
 
-function triggerBrowserDownload(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-export async function downloadReport({ batchId, cdmc, channel, templateName }) {
-  const response = await apiFetch('/report', {
+export async function downloadReport({ stationId, batchId, cdmc, channel, templateName }) {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`${BASE}/report`, {
     method: 'POST',
-    body: JSON.stringify({ batchId, cdmc, channel, templateName }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ stationId, batchId, cdmc, channel, templateName }),
   });
 
-  const blob = await response.blob();
-  const disposition = response.headers.get('content-disposition') || '';
-  const match = disposition.match(/filename="?([^\";]+)"?/i);
-  const filename = match?.[1] || 'dmp_report.xlsx';
-  triggerBrowserDownload(blob, filename);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Report generation failed');
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const nameMatch = disposition.match(/filename="([^"]+)"/);
+  const filename = nameMatch ? nameMatch[1] : 'DMP_Report.xlsx';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }

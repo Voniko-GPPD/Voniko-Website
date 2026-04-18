@@ -87,12 +87,12 @@ def _watch_dmp_changes_loop() -> None:
             deleted_stems = set(_WATCHED_MDB_MTIME.keys()) - set(current.keys())
             for stem in deleted_stems:
                 _WATCHED_CHANGES.pop(stem, None)
+                _WATCHED_MDB_MTIME.pop(stem, None)
             for stem, mtime in current.items():
                 previous = _WATCHED_MDB_MTIME.get(stem)
                 if previous is None or mtime > previous:
                     _WATCHED_CHANGES[stem] = now
-            _WATCHED_MDB_MTIME.clear()
-            _WATCHED_MDB_MTIME.update(current)
+                _WATCHED_MDB_MTIME[stem] = mtime
         time.sleep(WATCH_INTERVAL_SECONDS)
 
 

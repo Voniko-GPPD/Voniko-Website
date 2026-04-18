@@ -126,7 +126,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     if (!stationId) return () => {};
 
     let active = true;
-    let since = Math.floor(Date.now() / 1000);
+    let since = 0;
 
     const pollChanges = async () => {
       try {
@@ -136,6 +136,12 @@ export default function DMPSidebar({ stationId, onSelect }) {
         const updatedBatches = await fetchBatches(stationId);
         if (!active) return;
         setBatches(updatedBatches);
+        setChannelsByBatch((prev) => {
+          const validBatchIds = new Set(updatedBatches.map((batch) => String(batch.id)));
+          return Object.fromEntries(
+            Object.entries(prev).filter(([batchId]) => validBatchIds.has(String(batchId))),
+          );
+        });
       } catch (err) {
         if (import.meta.env.DEV) {
           console.debug('DMP changes polling failed', err);

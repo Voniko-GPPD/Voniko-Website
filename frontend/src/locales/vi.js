@@ -493,6 +493,7 @@ export default {
   dmpCurrent: 'Dòng điện (A)',
   dmpNoTelemetry: 'Không có dữ liệu đo lường',
   dmpTimeH: 'Thời gian (h)',
+  dmpZoomControl: 'Điều khiển thu phóng',
   dmpSearchTelemetry: 'Tìm kiếm dữ liệu đo lường',
   dmpNoData: 'Không có dữ liệu',
   dmpTotalRows: 'Tổng số dòng: {count}',

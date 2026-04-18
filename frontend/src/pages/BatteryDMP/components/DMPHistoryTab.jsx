@@ -78,7 +78,8 @@ export default function DMPHistoryTab({ stationId, selection }) {
       dataIndex: 'TIM',
       key: 'TIM',
       sorter: (a, b) => Number(a.TIM) - Number(b.TIM),
-      render: (value) => <span style={monoStyle}>{format4(value)}</span>,
+      defaultSortOrder: 'ascend',
+      render: (value) => <span style={monoStyle}>{format4(value)} h</span>,
     },
     {
       title: t('dmpVoltage'),
@@ -127,7 +128,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
           columns={columns}
           dataSource={filteredRows}
           pagination={{ pageSize: 200, showSizeChanger: true }}
-          scroll={{ x: 900, y: 'calc(100vh - 360px)' }}
+          scroll={{ x: 900, y: 500 }}
           size="small"
           summary={() => (
             <Table.Summary.Row>

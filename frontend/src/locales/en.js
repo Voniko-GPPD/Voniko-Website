@@ -493,6 +493,7 @@ export default {
   dmpCurrent: 'Current (A)',
   dmpNoTelemetry: 'No telemetry data',
   dmpTimeH: 'Time (h)',
+  dmpZoomControl: 'Zoom control',
   dmpSearchTelemetry: 'Search telemetry rows',
   dmpNoData: 'No data',
   dmpTotalRows: 'Total rows: {count}',

@@ -493,6 +493,7 @@ export default {
   dmpCurrent: '电流 (A)',
   dmpNoTelemetry: '暂无遥测数据',
   dmpTimeH: '时间 (h)',
+  dmpZoomControl: '缩放控制',
   dmpSearchTelemetry: '搜索遥测数据',
   dmpNoData: '暂无数据',
   dmpTotalRows: '总行数：{count}',

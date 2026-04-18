@@ -308,6 +308,16 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
         )
 
 
+def _build_batch_lookup_params(batch_id: str) -> list[tuple]:
+    candidates = [batch_id]
+    if re.fullmatch(r"\d+", batch_id):
+        try:
+            candidates.append(int(batch_id))
+        except ValueError:
+            pass
+    return [(value,) for value in candidates]
+
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "DMP Battery Data Bridge"}
@@ -315,7 +325,10 @@ def health_check():
 
 @app.get("/batches")
 def get_batches():
-    rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+    try:
+        rows = _read_dmpdata("SELECT id, cdmc, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+    except pyodbc.Error:
+        rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
     for row in rows:
         fdrq = row.get("fdrq")
         if fdrq is None:
@@ -329,7 +342,36 @@ def get_batches():
 
 @app.get("/batches/{batch_id}/channels")
 def get_channels(batch_id: str):
-    rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id=?", (batch_id,))
+    lookup_params = _build_batch_lookup_params(batch_id)
+
+    rows = []
+    for param in lookup_params:
+        rows = _read_dmpdata(
+            "SELECT ps.baty, ps.cdmc FROM para_singl ps INNER JOIN para_pub pp ON ps.id = pp.id WHERE pp.id = ?",
+            param,
+        )
+        if rows:
+            break
+
+    if not rows:
+        for param in lookup_params:
+            rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id = ?", param)
+            if rows:
+                break
+
+    if not rows:
+        cdmc_val = None
+        for param in lookup_params:
+            try:
+                pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
+            except pyodbc.Error:
+                pub_rows = []
+            if pub_rows and pub_rows[0].get("cdmc"):
+                cdmc_val = str(pub_rows[0]["cdmc"])
+                break
+        if cdmc_val:
+            rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
+
     return {"channels": rows}
 
 

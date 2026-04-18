@@ -69,6 +69,22 @@ export default function DMPChartTab({ stationId, selection }) {
     [telemetry]
   );
 
+  const tooltipFormatter = (value, name) => {
+    const num = Number(value);
+    if (name === 'VOLT') {
+      return [`VOLT: ${Number.isFinite(num) ? num.toFixed(4) : '-'}V`, t('dmpVoltage')];
+    }
+    if (name === 'Im') {
+      return [`Im: ${Number.isFinite(num) ? num.toFixed(4) : '-'}mA`, t('dmpCurrent')];
+    }
+    return [value, name];
+  };
+
+  const tooltipLabelFormatter = (label) => {
+    const tim = Number(label);
+    return `TIM: ${Number.isFinite(tim) ? tim.toFixed(4) : '-'}h`;
+  };
+
   if (!stationId) {
     return <Empty description={t('dmpSelectStationToChart')} />;
   }
@@ -109,20 +125,21 @@ export default function DMPChartTab({ stationId, selection }) {
       {chartData.length === 0 ? (
         <Empty description={t('dmpNoTelemetry')} />
       ) : (
-        <div style={{ width: '100%', height: 520 }}>
+        <div style={{ width: '100%', height: 480 }}>
           <ResponsiveContainer>
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} />
-              <YAxis yAxisId="left" orientation="left" />
-              <YAxis yAxisId="right" orientation="right" />
-              <Tooltip />
+              <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} label={{ value: t('dmpTimeH'), position: 'insideBottom', offset: -5 }} />
+              <YAxis yAxisId="left" orientation="left" domain={[0.9, 1.85]} unit="V" label={{ value: 'V', angle: -90, position: 'insideLeft' }} />
+              <YAxis yAxisId="right" orientation="right" unit="mA" label={{ value: 'mA', angle: 90, position: 'insideRight' }} />
+              <Tooltip formatter={tooltipFormatter} labelFormatter={tooltipLabelFormatter} />
               <Legend />
-              {visibleLines.includes('VOLT') && <Line yAxisId="left" type="monotone" dataKey="VOLT" stroke="#1677ff" dot={false} />}
-              {visibleLines.includes('Im') && <Line yAxisId="right" type="monotone" dataKey="Im" stroke="#52c41a" dot={false} />}
+              {visibleLines.includes('VOLT') && <Line yAxisId="left" type="monotone" dataKey="VOLT" stroke="#1677ff" strokeWidth={1.5} dot={false} />}
+              {visibleLines.includes('Im') && <Line yAxisId="right" type="monotone" dataKey="Im" stroke="#ff4d4f" strokeWidth={1.5} dot={false} />}
               <Brush dataKey="index" height={28} stroke="#999" travellerWidth={8} />
             </LineChart>
           </ResponsiveContainer>
+          <div style={{ marginTop: 8, color: 'rgba(0,0,0,0.45)', fontSize: 12 }}>{t('dmpZoomControl')}</div>
         </div>
       )}
     </div>

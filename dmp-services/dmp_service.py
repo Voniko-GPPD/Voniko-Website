@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -15,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 DMP_STATION_NAME: str = os.environ.get("DMP_STATION_NAME", "").strip()
@@ -346,16 +349,24 @@ def get_channels(batch_id: str):
 
     rows = []
     for param in lookup_params:
-        rows = _read_dmpdata(
-            "SELECT ps.baty, ps.cdmc FROM para_singl ps INNER JOIN para_pub pp ON ps.id = pp.id WHERE pp.id = ?",
-            param,
-        )
+        try:
+            rows = _read_dmpdata(
+                "SELECT ps.baty, ps.cdmc FROM para_singl ps INNER JOIN para_pub pp ON ps.id = pp.id WHERE pp.id = ?",
+                param,
+            )
+        except pyodbc.Error as exc:
+            logger.debug("get_channels JOIN query failed for param %r: %s", param, exc)
+            rows = []
         if rows:
             break
 
     if not rows:
         for param in lookup_params:
-            rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id = ?", param)
+            try:
+                rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id = ?", param)
+            except pyodbc.Error as exc:
+                logger.debug("get_channels simple query failed for param %r: %s", param, exc)
+                rows = []
             if rows:
                 break
 
@@ -364,13 +375,18 @@ def get_channels(batch_id: str):
         for param in lookup_params:
             try:
                 pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
-            except pyodbc.Error:
+            except pyodbc.Error as exc:
+                logger.debug("get_channels cdmc lookup failed for param %r: %s", param, exc)
                 pub_rows = []
             if pub_rows and pub_rows[0].get("cdmc"):
                 cdmc_val = str(pub_rows[0]["cdmc"])
                 break
         if cdmc_val:
-            rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
+            try:
+                rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
+            except pyodbc.Error as exc:
+                logger.debug("get_channels cdmc-based query failed for cdmc %r: %s", cdmc_val, exc)
+                rows = []
 
     return {"channels": rows}
 

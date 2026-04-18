@@ -11,7 +11,7 @@ async function apiFetch(url, options = {}) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || err.error || 'Request failed');
+    throw new Error(err.message || err.error || err.detail || 'Request failed');
   }
   return res;
 }
@@ -29,7 +29,7 @@ export async function fetchBatches(stationId) {
 }
 
 export async function fetchChannels(stationId, batchId) {
-  const res = await apiFetch(`${BASE}/batches/${batchId}/channels?stationId=${encodeURIComponent(stationId)}`);
+  const res = await apiFetch(`${BASE}/batches/${encodeURIComponent(batchId)}/channels?stationId=${encodeURIComponent(stationId)}`);
   const data = await res.json();
   return data.channels || [];
 }

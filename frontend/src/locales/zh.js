@@ -507,4 +507,5 @@ export default {
   dmpClickToLoadChannels: '点击加载通道',
   dmpUnknownModel: '未知型号',
   dmpUnknownDate: '未知日期',
+  dmpUnknownPattern: '未知模式',
 };

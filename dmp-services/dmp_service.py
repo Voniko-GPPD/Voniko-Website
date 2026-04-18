@@ -168,8 +168,9 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = ()) -> list[dict]:
             cursor.execute(sql, params) if params else cursor.execute(sql)
         except pyodbc.Error as exc:
             err_str = str(exc)
-            if params and ("HYC00" in err_str or "SQLBindParameter" in err_str):
+            if params and ("HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str):
                 # MS Access ODBC driver doesn't support bound string parameters;
+                # (errors: HYC00, SQLBindParameter, or 07002 "Too few parameters")
                 # fall back to safely inlined parameters.
                 cursor.execute(_inline_params(sql, params))
             else:

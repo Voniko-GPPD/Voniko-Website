@@ -47,7 +47,7 @@ function buildBatchTree(batches, channelsByBatch) {
                 date,
               },
             }))
-            : [{ key: `placeholder:${batch.id}`, title: 'Expand to load channels...', selectable: false, disabled: true }],
+            : [{ key: `placeholder:${batch.id}`, title: 'Click to load channels', selectable: false, disabled: true }],
         };
       }),
     })),

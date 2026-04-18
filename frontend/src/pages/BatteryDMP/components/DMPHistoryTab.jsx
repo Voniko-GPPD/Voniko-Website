@@ -69,7 +69,7 @@ export default function DMPHistoryTab({ selection }) {
       dataIndex: 'baty',
       key: 'baty',
       sorter: (a, b) => Number(a.baty) - Number(b.baty),
-      render: (value) => <span style={monoStyle}>{format4(value)}</span>,
+      render: (value) => <span style={monoStyle}>{value}</span>,
     },
     {
       title: 'Time (h)',
@@ -117,7 +117,7 @@ export default function DMPHistoryTab({ selection }) {
         <Empty description="No data" />
       ) : (
         <Table
-          rowKey={(record, index) => `${record.baty}-${record.TIM}-${record.VOLT}-${record.Im}-${index}`}
+          rowKey={(_record, index) => index}
           columns={columns}
           dataSource={filteredRows}
           pagination={{ pageSize: 200, showSizeChanger: true }}

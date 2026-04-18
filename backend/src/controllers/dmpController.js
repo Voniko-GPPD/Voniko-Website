@@ -14,10 +14,6 @@ function createHttpError(status, message) {
   return error;
 }
 
-function escapeSqlString(value) {
-  return String(value).replace(/'/g, "''");
-}
-
 function getDmpBaseDir() {
   const baseDir = process.env.DMP_MDB_DIR;
   if (!baseDir) {
@@ -47,8 +43,42 @@ function resolveDynamicMdbPath(cdmc) {
     throw createHttpError(400, 'cdmc is required');
   }
 
-  const withExt = trimmed.toLowerCase().endsWith('.mdb') ? trimmed : `${trimmed}.mdb`;
+  const parsed = path.parse(trimmed);
+  if (parsed.dir || parsed.root) {
+    throw createHttpError(400, 'Invalid cdmc');
+  }
+
+  const extension = parsed.ext.toLowerCase();
+  if (extension && extension !== '.mdb') {
+    throw createHttpError(400, 'cdmc must be an .mdb file');
+  }
+
+  const fileStem = parsed.name || parsed.base;
+  if (!/^[A-Za-z0-9_-]+$/.test(fileStem)) {
+    throw createHttpError(400, 'Invalid cdmc');
+  }
+
+  const withExt = `${fileStem}.mdb`;
   return resolveWithinBase(getDmpBaseDir(), withExt);
+}
+
+function validateBatchId(batchId) {
+  const value = String(batchId || '').trim();
+  if (!value) {
+    throw createHttpError(400, 'batchId is required');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw createHttpError(400, 'Invalid batchId');
+  }
+  return value;
+}
+
+function parseChannelNumber(channel) {
+  const value = Number(channel);
+  if (!Number.isInteger(value)) {
+    throw createHttpError(400, 'channel must be an integer');
+  }
+  return value;
 }
 
 function getDmpDataPath() {
@@ -115,15 +145,10 @@ async function getBatches(req, res, next) {
 
 async function getChannels(req, res, next) {
   try {
-    const { batchId } = req.params;
-    if (!batchId) {
-      throw createHttpError(400, 'batchId is required');
-    }
-
-    const escapedBatchId = escapeSqlString(batchId);
+    const batchId = validateBatchId(req.params.batchId);
     const channels = await queryWithShadowCopy(
       getDmpDataPath(),
-      `SELECT baty, cdmc FROM para_singl WHERE id = '${escapedBatchId}'`
+      `SELECT baty, cdmc FROM para_singl WHERE id = '${batchId}'`
     );
 
     res.json({ channels });
@@ -134,15 +159,8 @@ async function getChannels(req, res, next) {
 
 async function getTelemetry(req, res, next) {
   try {
-    const { cdmc, channel } = req.query;
-    if (!channel) {
-      throw createHttpError(400, 'channel is required');
-    }
-
-    const channelNumber = Number(channel);
-    if (!Number.isFinite(channelNumber)) {
-      throw createHttpError(400, 'channel must be numeric');
-    }
+    const { cdmc } = req.query;
+    const channelNumber = parseChannelNumber(req.query.channel);
 
     const telemetry = await queryWithShadowCopy(
       resolveDynamicMdbPath(cdmc),
@@ -157,15 +175,8 @@ async function getTelemetry(req, res, next) {
 
 async function getStats(req, res, next) {
   try {
-    const { cdmc, channel } = req.query;
-    if (!channel) {
-      throw createHttpError(400, 'channel is required');
-    }
-
-    const channelNumber = Number(channel);
-    if (!Number.isFinite(channelNumber)) {
-      throw createHttpError(400, 'channel must be numeric');
-    }
+    const { cdmc } = req.query;
+    const channelNumber = parseChannelNumber(req.query.channel);
 
     const telemetry = await queryWithShadowCopy(
       resolveDynamicMdbPath(cdmc),
@@ -195,21 +206,18 @@ async function getTemplates(req, res, next) {
 
 async function generateReport(req, res, next) {
   try {
-    const { batchId, cdmc, channel, templateName } = req.body || {};
+    const { batchId: rawBatchId, cdmc, channel, templateName } = req.body || {};
 
-    if (!batchId || !cdmc || channel == null || !templateName) {
+    if (!rawBatchId || !cdmc || channel == null || !templateName) {
       throw createHttpError(400, 'batchId, cdmc, channel and templateName are required');
     }
 
-    const channelNumber = Number(channel);
-    if (!Number.isFinite(channelNumber)) {
-      throw createHttpError(400, 'channel must be numeric');
-    }
+    const batchId = validateBatchId(rawBatchId);
+    const channelNumber = parseChannelNumber(channel);
 
-    const escapedBatchId = escapeSqlString(batchId);
     const batchRows = await queryWithShadowCopy(
       getDmpDataPath(),
-      `SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = '${escapedBatchId}'`
+      `SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = '${batchId}'`
     );
 
     if (batchRows.length === 0) {

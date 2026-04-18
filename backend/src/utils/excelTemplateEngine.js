@@ -53,15 +53,18 @@ async function renderExcelTemplate(templatePath, context) {
   await workbook.xlsx.readFile(templatePath);
 
   workbook.eachSheet((sheet) => {
-    for (let rowNumber = 1; rowNumber <= sheet.rowCount; rowNumber += 1) {
+    let rowNumber = 1;
+    while (rowNumber <= sheet.rowCount) {
       const row = sheet.getRow(rowNumber);
       const arrayKey = getRowBoundaryTags(row);
-      if (!arrayKey) continue;
+      if (!arrayKey) {
+        rowNumber += 1;
+        continue;
+      }
 
       const rowsData = Array.isArray(context[arrayKey]) ? context[arrayKey] : [];
       if (rowsData.length === 0) {
         sheet.spliceRows(rowNumber, 1);
-        rowNumber -= 1;
         continue;
       }
 
@@ -74,7 +77,7 @@ async function renderExcelTemplate(templatePath, context) {
         renderArrayRow(expandedRow, rowContext, context);
       });
 
-      rowNumber += rowsData.length - 1;
+      rowNumber += rowsData.length;
     }
 
     sheet.eachRow((row) => {

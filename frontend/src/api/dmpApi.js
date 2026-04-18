@@ -1,6 +1,7 @@
 const API_BASE = '/api/dmp';
 
 function getAuthToken() {
+  // DMP API follows issue requirement (`token`) and keeps backward compatibility (`accessToken`).
   return localStorage.getItem('token') || localStorage.getItem('accessToken') || '';
 }
 

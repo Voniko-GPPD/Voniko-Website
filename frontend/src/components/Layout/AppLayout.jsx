@@ -125,7 +125,7 @@ export default function AppLayout() {
 
   const selectedKey = menuItems.find(item => {
     if (item.key === '/') return location.pathname === '/';
-    return location.pathname.startsWith(item.key);
+    return location.pathname === item.key || location.pathname.startsWith(item.key + '/');
   })?.key || '/';
 
   return (

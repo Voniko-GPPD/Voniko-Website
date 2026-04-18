@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Breadcrumb, Button, Card, Empty, Radio, Space, Spin, notification, Typography } from 'antd';
 import { downloadReport, fetchTemplates } from '../../../api/dmpApi';
+import { useLang } from '../../../contexts/LangContext';
 
 export default function DMPExportTab({ stationId, selection }) {
+  const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
@@ -54,16 +56,16 @@ export default function DMPExportTab({ stationId, selection }) {
         channel: selection.channel,
         templateName,
       });
-      notification.success({ message: 'Report downloaded successfully' });
+      notification.success({ message: t('dmpReportDownloaded') });
     } catch (err) {
-      notification.error({ message: 'Failed to download report', description: err.message });
+      notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
     } finally {
       setDownloading(false);
     }
   };
 
   if (!stationId) {
-    return <Empty description="Select a station to export reports" />;
+    return <Empty description={t('dmpSelectStationToExport')} />;
   }
 
   if (loading) return <Spin />;
@@ -74,21 +76,21 @@ export default function DMPExportTab({ stationId, selection }) {
 
       <Breadcrumb
         items={[
-          { title: `Model: ${selection?.model || '-'}` },
-          { title: `Date: ${selection?.date || '-'}` },
-          { title: `Batch: ${selection?.batchId || '-'}` },
-          { title: `Channel: ${selection?.channel ?? '-'}` },
+          { title: `${t('dmpModel')}: ${selection?.model || '-'}` },
+          { title: `${t('dmpDate')}: ${selection?.date || '-'}` },
+          { title: `${t('dmpBatch')}: ${selection?.batchId || '-'}` },
+          { title: `${t('dmpChannel')}: ${selection?.channel ?? '-'}` },
         ]}
       />
 
       <Alert
         type="info"
         showIcon
-        message="Templates can be customized with {{tags}} as long as the required tags are preserved."
+        message={t('dmpTemplateInfo')}
       />
 
       {templates.length === 0 ? (
-        <Empty description="No templates found" />
+        <Empty description={t('dmpNoTemplates')} />
       ) : (
         <Radio.Group value={templateName} onChange={(event) => setTemplateName(event.target.value)} style={{ width: '100%' }}>
           <Space direction="vertical" style={{ width: '100%' }}>
@@ -107,11 +109,11 @@ export default function DMPExportTab({ stationId, selection }) {
         loading={downloading}
         disabled={!stationId || !selection || !templateName}
       >
-        Download Report
+        {t('dmpDownloadReport')}
       </Button>
 
       <Typography.Text type="secondary">
-        Selected template: {templateName || '-'}
+        {t('dmpSelectedTemplate', { name: templateName || '-' })}
       </Typography.Text>
     </Space>
   );

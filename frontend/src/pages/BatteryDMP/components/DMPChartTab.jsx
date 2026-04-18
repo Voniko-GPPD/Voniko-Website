@@ -12,10 +12,12 @@ import {
   YAxis,
 } from 'recharts';
 import { fetchStats, fetchTelemetry } from '../../../api/dmpApi';
+import { useLang } from '../../../contexts/LangContext';
 
 const statsKeys = ['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'IM_MAX', 'IM_MIN', 'IM_AVG'];
 
 export default function DMPChartTab({ stationId, selection }) {
+  const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [telemetry, setTelemetry] = useState([]);
@@ -68,11 +70,11 @@ export default function DMPChartTab({ stationId, selection }) {
   );
 
   if (!stationId) {
-    return <Empty description="Select a station to view chart" />;
+    return <Empty description={t('dmpSelectStationToChart')} />;
   }
 
   if (!selection) {
-    return <Empty description="Select a channel to view chart" />;
+    return <Empty description={t('dmpSelectChannelToChart')} />;
   }
 
   if (loading) {
@@ -98,14 +100,14 @@ export default function DMPChartTab({ stationId, selection }) {
         value={visibleLines}
         onChange={setVisibleLines}
         options={[
-          { value: 'VOLT', label: 'Voltage (V)' },
-          { value: 'Im', label: 'Current (A)' },
+          { value: 'VOLT', label: t('dmpVoltage') },
+          { value: 'Im', label: t('dmpCurrent') },
         ]}
         style={{ width: 260 }}
       />
 
       {chartData.length === 0 ? (
-        <Empty description="No telemetry data" />
+        <Empty description={t('dmpNoTelemetry')} />
       ) : (
         <div style={{ width: '100%', height: 520 }}>
           <ResponsiveContainer>

@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Input, Spin, Tree } from 'antd';
 import { fetchBatches, fetchChannels } from '../../../api/dmpApi';
+import { useLang } from '../../../contexts/LangContext';
 
-function buildBatchTree(batches, channelsByBatch) {
+function buildBatchTree(batches, channelsByBatch, labels) {
   const modelMap = new Map();
 
   batches.forEach((batch) => {
-    const model = batch.dcxh || 'Unknown Model';
-    const date = batch.fdrq || 'Unknown Date';
+    const model = batch.dcxh || labels.unknownModel;
+    const date = batch.fdrq || labels.unknownDate;
 
     if (!modelMap.has(model)) modelMap.set(model, new Map());
     const dateMap = modelMap.get(model);
@@ -28,7 +29,7 @@ function buildBatchTree(batches, channelsByBatch) {
         const channels = channelsByBatch[batch.id] || [];
         return {
           key: batchKey,
-          title: `Batch ${batch.id}`,
+          title: `${labels.batch} ${batch.id}`,
           selectable: false,
           batchId: batch.id,
           model,
@@ -36,7 +37,7 @@ function buildBatchTree(batches, channelsByBatch) {
           children: channels.length
             ? channels.map((channel) => ({
               key: `channel:${batch.id}:${channel.baty}`,
-              title: `Channel ${channel.baty}`,
+              title: `${labels.channel} ${channel.baty}`,
               isLeaf: true,
               selectable: true,
               selection: {
@@ -47,7 +48,7 @@ function buildBatchTree(batches, channelsByBatch) {
                 date,
               },
             }))
-            : [{ key: `placeholder:${batch.id}`, title: 'Click to load channels', selectable: false, disabled: true }],
+            : [{ key: `placeholder:${batch.id}`, title: labels.clickToLoad, selectable: false, disabled: true }],
         };
       }),
     })),
@@ -71,6 +72,7 @@ function filterTree(nodes, keyword) {
 }
 
 export default function DMPSidebar({ stationId, onSelect }) {
+  const { t } = useLang();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchValue, setSearchValue] = useState('');
@@ -112,7 +114,13 @@ export default function DMPSidebar({ stationId, onSelect }) {
     };
   }, [stationId, onSelect]);
 
-  const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch), [batches, channelsByBatch]);
+  const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch, {
+    unknownModel: t('dmpUnknownModel'),
+    unknownDate: t('dmpUnknownDate'),
+    batch: t('dmpBatch'),
+    channel: t('dmpChannel'),
+    clickToLoad: t('dmpClickToLoadChannels'),
+  }), [batches, channelsByBatch, t]);
   const filteredTreeData = useMemo(() => filterTree(treeData, searchValue), [treeData, searchValue]);
 
   const handleExpand = async (nextExpandedKeys, info) => {
@@ -138,14 +146,14 @@ export default function DMPSidebar({ stationId, onSelect }) {
   };
 
   if (!stationId) {
-    return <Alert type="info" showIcon message="Select a DMP station to browse batches." />;
+    return <Alert type="info" showIcon message={t('dmpSelectStationToBrowse')} />;
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
       <Input.Search
         allowClear
-        placeholder="Search model/date/batch/channel"
+        placeholder={t('dmpSearchPlaceholder')}
         value={searchValue}
         onChange={(event) => setSearchValue(event.target.value)}
       />

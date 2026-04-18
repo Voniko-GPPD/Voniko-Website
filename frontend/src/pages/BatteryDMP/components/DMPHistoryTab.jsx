@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Empty, Input, Spin, Table, Typography } from 'antd';
 import { fetchTelemetry } from '../../../api/dmpApi';
+import { useLang } from '../../../contexts/LangContext';
 
 const monoStyle = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' };
 
@@ -11,6 +12,7 @@ function format4(value) {
 }
 
 export default function DMPHistoryTab({ stationId, selection }) {
+  const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [telemetry, setTelemetry] = useState([]);
@@ -65,28 +67,28 @@ export default function DMPHistoryTab({ stationId, selection }) {
       render: (_value, _record, index) => index + 1,
     },
     {
-      title: 'Channel',
+      title: t('dmpChannel'),
       dataIndex: 'baty',
       key: 'baty',
       sorter: (a, b) => Number(a.baty) - Number(b.baty),
       render: (value) => <span style={monoStyle}>{value}</span>,
     },
     {
-      title: 'Time (h)',
+      title: t('dmpTimeH'),
       dataIndex: 'TIM',
       key: 'TIM',
       sorter: (a, b) => Number(a.TIM) - Number(b.TIM),
       render: (value) => <span style={monoStyle}>{format4(value)}</span>,
     },
     {
-      title: 'Voltage (V)',
+      title: t('dmpVoltage'),
       dataIndex: 'VOLT',
       key: 'VOLT',
       sorter: (a, b) => Number(a.VOLT) - Number(b.VOLT),
       render: (value) => <span style={monoStyle}>{format4(value)}</span>,
     },
     {
-      title: 'Current (A)',
+      title: t('dmpCurrent'),
       dataIndex: 'Im',
       key: 'Im',
       sorter: (a, b) => Number(a.Im) - Number(b.Im),
@@ -95,11 +97,11 @@ export default function DMPHistoryTab({ stationId, selection }) {
   ];
 
   if (!stationId) {
-    return <Empty description="Select a station to view history data" />;
+    return <Empty description={t('dmpSelectStationToHistory')} />;
   }
 
   if (!selection) {
-    return <Empty description="Select a channel to view history data" />;
+    return <Empty description={t('dmpSelectChannelToHistory')} />;
   }
 
   if (loading) {
@@ -113,12 +115,12 @@ export default function DMPHistoryTab({ stationId, selection }) {
         allowClear
         value={search}
         onChange={(event) => setSearch(event.target.value)}
-        placeholder="Search telemetry rows"
+        placeholder={t('dmpSearchTelemetry')}
         style={{ maxWidth: 320 }}
       />
 
       {filteredRows.length === 0 ? (
-        <Empty description="No data" />
+        <Empty description={t('dmpNoData')} />
       ) : (
         <Table
           rowKey={(_record, index) => index}
@@ -130,7 +132,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
           summary={() => (
             <Table.Summary.Row>
               <Table.Summary.Cell index={0} colSpan={5}>
-                <Typography.Text type="secondary">Total rows: {filteredRows.length}</Typography.Text>
+                <Typography.Text type="secondary">{t('dmpTotalRows', { count: filteredRows.length })}</Typography.Text>
               </Table.Summary.Cell>
             </Table.Summary.Row>
           )}

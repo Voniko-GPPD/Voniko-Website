@@ -1,7 +1,2 @@
-/**
- * adodbQuery.js
- *
- * NOTE: MS Access querying has been moved to hardware-services/dmp_service.py
- * using pyodbc. The Node.js backend no longer queries .mdb files directly.
- */
+// MDB querying đã chuyển sang dmp-services/dmp_service.py (dùng pyodbc)
 module.exports = {};

@@ -2,164 +2,133 @@ const express = require('express');
 const axios = require('axios');
 const { authenticateToken } = require('../middleware/auth');
 const { upsertStation, getStations, resolveUrl } = require('../utils/stationRegistry');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
+// POST /api/dmp/register — called by dmp_service.py heartbeat, no auth
 router.post('/register', (req, res) => {
   const { name, url } = req.body || {};
-  if (!name || !url) {
-    return res.status(400).json({ error: 'name and url required' });
-  }
-  try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return res.status(400).json({ error: 'url must be http(s)' });
-    }
-  } catch (_) {
-    return res.status(400).json({ error: 'Invalid url' });
-  }
+  if (!name || !url) return res.status(400).json({ error: 'name and url are required' });
   const id = upsertStation(name, url);
-  return res.json({ id });
+  logger.info('DMP station registered', { id, name, url });
+  res.json({ ok: true, id });
 });
 
+// GET /api/dmp/stations — list all registered DMP stations
 router.get('/stations', authenticateToken, (req, res) => {
   res.json({ stations: getStations() });
 });
 
-function resolveOnlineStationUrl(stationId) {
+// Helper: resolve station URL or return 404
+function getStationUrl(stationId, res) {
   if (!stationId) {
-    throw Object.assign(new Error('stationId is required'), { status: 400 });
+    res.status(400).json({ error: 'stationId is required' });
+    return null;
   }
-
-  const station = getStations().find((entry) => entry.id === stationId);
-  if (!station || !station.online) {
-    throw Object.assign(new Error('Station not found or offline'), { status: 404 });
+  const url = resolveUrl(stationId);
+  if (!url) {
+    res.status(404).json({ error: 'Station not found or offline' });
+    return null;
   }
-
-  const stationUrl = resolveUrl(stationId);
-  if (!stationUrl) {
-    throw Object.assign(new Error('Station not found or offline'), { status: 404 });
-  }
-
-  return stationUrl;
+  return url;
 }
 
-function validateBatchId(batchId) {
-  const value = String(batchId || '').trim();
-  if (!value || !/^[A-Za-z0-9_-]+$/.test(value)) {
-    throw Object.assign(new Error('Invalid batchId'), { status: 400 });
-  }
-  return value;
-}
-
-async function proxyGet(stationUrl, path, queryParams, res, next) {
-  try {
-    const url = `${stationUrl}${path}`;
-    const response = await axios.get(url, { params: queryParams, timeout: 30000 });
-    res.json(response.data);
-  } catch (err) {
-    if (err.response) return res.status(err.response.status).json(err.response.data);
-    return next(err);
-  }
-}
-
-async function proxyPost(stationUrl, path, body, res, next) {
-  try {
-    const url = `${stationUrl}${path}`;
-    const response = await axios.post(url, body, { timeout: 60000 });
-    res.json(response.data);
-  } catch (err) {
-    if (err.response) return res.status(err.response.status).json(err.response.data);
-    return next(err);
-  }
-}
-
+// GET /api/dmp/batches?stationId=
 router.get('/batches', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
   try {
-    const stationUrl = resolveOnlineStationUrl(req.query.stationId);
-    await proxyGet(stationUrl, '/batches', {}, res, next);
+    const r = await axios.get(`${stationUrl}/batches`, { timeout: 30000 });
+    res.json(r.data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
   }
 });
 
+// GET /api/dmp/batches/:batchId/channels?stationId=
 router.get('/batches/:batchId/channels', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
   try {
-    const stationUrl = resolveOnlineStationUrl(req.query.stationId);
-    const safeBatchId = validateBatchId(req.params.batchId);
-    await proxyGet(stationUrl, `/batches/${encodeURIComponent(safeBatchId)}/channels`, {}, res, next);
+    const r = await axios.get(`${stationUrl}/batches/${req.params.batchId}/channels`, { timeout: 30000 });
+    res.json(r.data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
   }
 });
 
+// GET /api/dmp/telemetry?stationId=&cdmc=&channel=
 router.get('/telemetry', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
   try {
-    const { stationId, cdmc, channel } = req.query;
-    const stationUrl = resolveOnlineStationUrl(stationId);
-    await proxyGet(stationUrl, '/telemetry', { cdmc, channel }, res, next);
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
-router.get('/stats', authenticateToken, async (req, res, next) => {
-  try {
-    const { stationId, cdmc, channel } = req.query;
-    const stationUrl = resolveOnlineStationUrl(stationId);
-    await proxyGet(stationUrl, '/stats', { cdmc, channel }, res, next);
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
-router.get('/templates', authenticateToken, async (req, res, next) => {
-  try {
-    const stationUrl = resolveOnlineStationUrl(req.query.stationId);
-    await proxyGet(stationUrl, '/templates', {}, res, next);
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
-router.post('/report', authenticateToken, async (req, res, next) => {
-  try {
-    const {
-      stationId,
-      batchId,
-      batch_id,
-      cdmc,
-      channel,
-      templateName,
-      template_name,
-    } = req.body || {};
-
-    const stationUrl = resolveOnlineStationUrl(stationId);
-    const payload = {
-      batch_id: batch_id || batchId,
-      cdmc,
-      channel,
-      template_name: template_name || templateName,
-    };
-
-    const response = await axios.post(`${stationUrl}/report`, payload, {
-      timeout: 60000,
-      responseType: 'arraybuffer',
+    const r = await axios.get(`${stationUrl}/telemetry`, {
+      params: { cdmc: req.query.cdmc, channel: req.query.channel },
+      timeout: 30000,
     });
+    res.json(r.data);
+  } catch (err) {
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
+  }
+});
 
-    if (response.headers['content-type']) {
-      res.setHeader('Content-Type', response.headers['content-type']);
-    }
-    if (response.headers['content-disposition']) {
-      res.setHeader('Content-Disposition', response.headers['content-disposition']);
-    }
+// GET /api/dmp/stats?stationId=&cdmc=&channel=
+router.get('/stats', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/stats`, {
+      params: { cdmc: req.query.cdmc, channel: req.query.channel },
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
+  }
+});
 
-    res.send(Buffer.from(response.data));
+// GET /api/dmp/templates?stationId=
+router.get('/templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/templates`, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) {
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
+  }
+});
+
+// POST /api/dmp/report — proxy xlsx binary download
+router.post('/report', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/report`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
   } catch (err) {
     if (err.response) {
-      return res.status(err.response.status).json(err.response.data);
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try {
+        return res.status(err.response.status).json(JSON.parse(msg));
+      } catch {
+        return res.status(err.response.status).send(msg);
+      }
     }
-    return next(err);
+    next(err);
   }
 });
 

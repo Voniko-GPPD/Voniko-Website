@@ -156,7 +156,7 @@ def _inline_params(sql: str, params: tuple) -> str:
             # Permit only a conservative character set used by batch/cdmc identifiers
             # and date-like strings when fallback inlining is required by Access ODBC.
             # Includes () , + / # @ which appear in cdmc values and model names.
-            if not re.fullmatch(r"[A-Za-z0-9 _:\.\-\(\),\+/#@]+", value):
+            if not re.fullmatch(r"[A-Za-z0-9 _:.(),%+/#@-]+", value):
                 raise ValueError("Unsafe string parameter for inline SQL fallback")
             escaped = value.replace("'", "''")
             result += f"'{escaped}'"

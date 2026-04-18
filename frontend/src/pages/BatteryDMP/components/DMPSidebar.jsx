@@ -70,7 +70,7 @@ function filterTree(nodes, keyword) {
     .filter(Boolean);
 }
 
-export default function DMPSidebar({ onSelect }) {
+export default function DMPSidebar({ stationId, onSelect }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchValue, setSearchValue] = useState('');
@@ -79,11 +79,21 @@ export default function DMPSidebar({ onSelect }) {
   const [expandedKeys, setExpandedKeys] = useState([]);
 
   useEffect(() => {
+    onSelect?.(null);
+    setBatches([]);
+    setChannelsByBatch({});
+    setExpandedKeys([]);
+
+    if (!stationId) {
+      setLoading(false);
+      return () => {};
+    }
+
     let mounted = true;
     setLoading(true);
     setError('');
 
-    fetchBatches()
+    fetchBatches(stationId)
       .then((result) => {
         if (!mounted) return;
         setBatches(result);
@@ -100,7 +110,7 @@ export default function DMPSidebar({ onSelect }) {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [stationId, onSelect]);
 
   const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch), [batches, channelsByBatch]);
   const filteredTreeData = useMemo(() => filterTree(treeData, searchValue), [treeData, searchValue]);
@@ -108,13 +118,13 @@ export default function DMPSidebar({ onSelect }) {
   const handleExpand = async (nextExpandedKeys, info) => {
     setExpandedKeys(nextExpandedKeys);
     const node = info.node;
-    if (!node?.key?.startsWith('batch:')) return;
+    if (!stationId || !node?.key?.startsWith('batch:')) return;
 
     const batchId = node.batchId;
     if (channelsByBatch[batchId]) return;
 
     try {
-      const channels = await fetchChannels(batchId);
+      const channels = await fetchChannels(stationId, batchId);
       setChannelsByBatch((prev) => ({ ...prev, [batchId]: channels }));
     } catch (err) {
       setError(err.message || 'Failed to load channels');
@@ -126,6 +136,10 @@ export default function DMPSidebar({ onSelect }) {
       onSelect(info.node.selection);
     }
   };
+
+  if (!stationId) {
+    return <Alert type="info" showIcon message="Select a DMP station to browse batches." />;
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>

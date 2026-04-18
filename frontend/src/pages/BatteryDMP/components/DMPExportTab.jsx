@@ -2,19 +2,27 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Breadcrumb, Button, Card, Empty, Radio, Space, Spin, notification, Typography } from 'antd';
 import { downloadReport, fetchTemplates } from '../../../api/dmpApi';
 
-export default function DMPExportTab({ selection }) {
-  const [loading, setLoading] = useState(true);
+export default function DMPExportTab({ stationId, selection }) {
+  const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
   const [templates, setTemplates] = useState([]);
   const [templateName, setTemplateName] = useState('');
 
   useEffect(() => {
+    setTemplates([]);
+    setTemplateName('');
+
+    if (!stationId) {
+      setLoading(false);
+      return () => {};
+    }
+
     let mounted = true;
     setLoading(true);
     setError('');
 
-    fetchTemplates()
+    fetchTemplates(stationId)
       .then((rows) => {
         if (!mounted) return;
         setTemplates(rows);
@@ -32,14 +40,15 @@ export default function DMPExportTab({ selection }) {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [stationId]);
 
   const handleDownload = async () => {
-    if (!selection || !templateName) return;
+    if (!stationId || !selection || !templateName) return;
 
     setDownloading(true);
     try {
       await downloadReport({
+        stationId,
         batchId: selection.batchId,
         cdmc: selection.cdmc,
         channel: selection.channel,
@@ -52,6 +61,10 @@ export default function DMPExportTab({ selection }) {
       setDownloading(false);
     }
   };
+
+  if (!stationId) {
+    return <Empty description="Select a station to export reports" />;
+  }
 
   if (loading) return <Spin />;
 
@@ -92,7 +105,7 @@ export default function DMPExportTab({ selection }) {
         type="primary"
         onClick={handleDownload}
         loading={downloading}
-        disabled={!selection || !templateName}
+        disabled={!stationId || !selection || !templateName}
       >
         Download Report
       </Button>

@@ -30,6 +30,7 @@ WATCH_INTERVAL_SECONDS: int = 5
 _WATCH_LOCK = threading.Lock()
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
+_SCHEMA_TABLE_WHITELIST = {"para_singl", "para_pub", "vidata"}
 
 
 def _get_local_ip() -> str:
@@ -340,19 +341,22 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
 
 
 def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:
-    if not re.fullmatch(r"[A-Za-z0-9_]+", table_name):
-        raise HTTPException(status_code=400, detail="Invalid table name")
+    if table_name.lower() not in _SCHEMA_TABLE_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Table '{table_name}' is not whitelisted for schema lookup",
+        )
     conn_str = (
         r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
         f"DBQ={mdb_path};"
     )
     with pyodbc.connect(conn_str) as conn:
         cursor = conn.cursor()
-        columns = {str(row.column_name).lower() for row in cursor.columns(table=table_name) if getattr(row, "column_name", None)}
-        if columns:
-            return columns
-        cursor.execute(f"SELECT * FROM {table_name} WHERE 1=0")
-        return {str(col[0]).lower() for col in (cursor.description or [])}
+        return {
+            str(row.column_name).lower()
+            for row in cursor.columns(table=table_name)
+            if getattr(row, "column_name", None)
+        }
 
 
 def _fill_cdmc(rows: list[dict], cdmc_value: str | None) -> list[dict]:
@@ -362,6 +366,13 @@ def _fill_cdmc(rows: list[dict], cdmc_value: str | None) -> list[dict]:
         if row.get("cdmc") is None:
             row["cdmc"] = cdmc_value
     return rows
+
+
+def _get_cdmc_from_para_pub(param: tuple) -> str | None:
+    pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
+    if pub_rows and pub_rows[0].get("cdmc") is not None:
+        return str(pub_rows[0]["cdmc"])
+    return None
 
 
 def _build_batch_lookup_params(batch_id: str) -> list[tuple]:
@@ -400,6 +411,8 @@ def get_batches():
 def get_channels(batch_id: str):
     lookup_params = _build_batch_lookup_params(batch_id)
     last_error = None
+    # Keep legacy query shape by default if schema inspection is unavailable;
+    # per-query fallbacks below still handle missing columns robustly.
     has_para_singl_cdmc = True
     dmpdata = Path(get_dmpdata_path())
     if dmpdata.exists():
@@ -414,13 +427,9 @@ def get_channels(batch_id: str):
     for param in lookup_params:
         cdmc_value = None
         try:
-            pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
-            if pub_rows and pub_rows[0].get("cdmc") is not None:
-                cdmc_value = str(pub_rows[0]["cdmc"])
-            last_error = None
+            cdmc_value = _get_cdmc_from_para_pub(param)
         except pyodbc.Error as exc:
             logger.debug("get_channels pre-lookup cdmc failed for param %r: %s", param, exc)
-            last_error = exc
         try:
             if has_para_singl_cdmc:
                 rows = _read_dmpdata(
@@ -454,13 +463,9 @@ def get_channels(batch_id: str):
         for param in lookup_params:
             cdmc_value = None
             try:
-                pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
-                if pub_rows and pub_rows[0].get("cdmc") is not None:
-                    cdmc_value = str(pub_rows[0]["cdmc"])
-                last_error = None
+                cdmc_value = _get_cdmc_from_para_pub(param)
             except pyodbc.Error as exc:
                 logger.debug("get_channels simple-query cdmc lookup failed for param %r: %s", param, exc)
-                last_error = exc
             try:
                 if has_para_singl_cdmc:
                     rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id = ?", param)
@@ -485,31 +490,38 @@ def get_channels(batch_id: str):
         cdmc_val = None
         for param in lookup_params:
             try:
-                pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
-                last_error = None
+                cdmc_val = _get_cdmc_from_para_pub(param)
             except pyodbc.Error as exc:
                 logger.debug("get_channels cdmc lookup failed for param %r: %s", param, exc)
-                last_error = exc
-                pub_rows = []
-            if pub_rows and pub_rows[0].get("cdmc"):
-                cdmc_val = str(pub_rows[0]["cdmc"])
+            if cdmc_val:
                 break
         if cdmc_val:
             try:
-                if has_para_singl_cdmc:
-                    rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
-                else:
-                    rows = _read_dmpdata("SELECT baty FROM para_singl WHERE cdmc = ?", (cdmc_val,))
-                    rows = _fill_cdmc(rows, cdmc_val)
+                rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
                 last_error = None
             except pyodbc.Error as exc:
                 logger.debug("get_channels cdmc-based query failed for cdmc %r: %s", cdmc_val, exc)
-                try:
-                    rows = _read_dmpdata("SELECT baty FROM para_singl WHERE cdmc = ?", (cdmc_val,))
-                    rows = _fill_cdmc(rows, cdmc_val)
-                    last_error = None
-                except pyodbc.Error as fallback_exc:
-                    logger.debug("get_channels cdmc-based fallback query failed for cdmc %r: %s", cdmc_val, fallback_exc)
+                if has_para_singl_cdmc:
+                    try:
+                        rows = _read_dmpdata("SELECT baty FROM para_singl WHERE cdmc = ?", (cdmc_val,))
+                        rows = _fill_cdmc(rows, cdmc_val)
+                        last_error = None
+                    except pyodbc.Error as fallback_exc:
+                        logger.debug("get_channels cdmc-based fallback query failed for cdmc %r: %s", cdmc_val, fallback_exc)
+                        last_error = fallback_exc
+                        rows = []
+                        for param in lookup_params:
+                            try:
+                                rows = _read_dmpdata("SELECT baty FROM para_singl WHERE id = ?", param)
+                                rows = _fill_cdmc(rows, cdmc_val)
+                                last_error = None
+                            except pyodbc.Error as id_exc:
+                                logger.debug("get_channels id-based fallback failed for param %r: %s", param, id_exc)
+                                last_error = id_exc
+                                rows = []
+                            if rows:
+                                break
+                else:
                     rows = []
                     for param in lookup_params:
                         try:

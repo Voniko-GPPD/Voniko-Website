@@ -11,6 +11,7 @@ import {
   Typography,
 } from 'antd';
 import { fetchStations } from '../../api/dmpApi';
+import { useLang } from '../../contexts/LangContext';
 import DMPSidebar from './components/DMPSidebar';
 import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
@@ -19,6 +20,7 @@ import DMPExportTab from './components/DMPExportTab';
 const { Sider, Content } = Layout;
 
 export default function BatteryDMPPage() {
+  const { t } = useLang();
   const [stations, setStations] = useState([]);
   const [selectedStationId, setSelectedStationId] = useState(undefined);
   const [stationError, setStationError] = useState('');
@@ -59,25 +61,25 @@ export default function BatteryDMPPage() {
   }, [selection]);
 
   const breadcrumbItems = useMemo(() => ([
-    { title: `Model: ${selection?.model || '-'}` },
-    { title: `Date: ${selection?.date || '-'}` },
-    { title: `Batch: ${selection?.batchId || '-'}` },
-    { title: `Channel: ${selection?.channel ?? '-'}` },
-  ]), [selection]);
+    { title: `${t('dmpModel')}: ${selection?.model || '-'}` },
+    { title: `${t('dmpDate')}: ${selection?.date || '-'}` },
+    { title: `${t('dmpBatch')}: ${selection?.batchId || '-'}` },
+    { title: `${t('dmpChannel')}: ${selection?.channel ?? '-'}` },
+  ]), [selection, t]);
 
   return (
     <Layout style={{ background: '#fff', minHeight: 'calc(100vh - 112px)' }}>
       <Content style={{ padding: '0 16px' }}>
-        <Typography.Title level={4}>DMP Battery Data Bridge</Typography.Title>
+        <Typography.Title level={4}>{t('dmpBridgeTitle')}</Typography.Title>
 
         {stationError && <Alert type="error" message={stationError} showIcon style={{ marginBottom: 12 }} />}
 
         <Card size="small" style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Typography.Text strong>Station:</Typography.Text>
+            <Typography.Text strong>{t('dmpStation')}:</Typography.Text>
             <Select
               style={{ minWidth: 280 }}
-              placeholder="Select online DMP station"
+              placeholder={t('dmpSelectStation')}
               value={selectedStationId}
               onChange={setSelectedStationId}
               options={onlineStations.map((station) => ({
@@ -87,7 +89,7 @@ export default function BatteryDMPPage() {
             />
             {selectedStation && (
               <Tag color={selectedStation.online ? 'green' : 'red'}>
-                {selectedStation.name} • {selectedStation.online ? 'online' : 'offline'}
+                {selectedStation.name} • {selectedStation.online ? t('dmpOnline') : t('dmpOffline')}
               </Tag>
             )}
           </div>
@@ -96,14 +98,14 @@ export default function BatteryDMPPage() {
               style={{ marginTop: 12 }}
               type="warning"
               showIcon
-              message="No online DMP stations found. Run hardware-services/dmp_service.py on the DMP client machine."
+              message={t('dmpNoStations')}
             />
           )}
         </Card>
 
         <Layout style={{ background: '#fff' }}>
           <Sider width={280} style={{ background: '#fff', borderRight: '1px solid #f0f0f0', padding: 12 }}>
-            <Typography.Title level={5} style={{ marginTop: 0 }}>DMP Database</Typography.Title>
+            <Typography.Title level={5} style={{ marginTop: 0 }}>{t('dmpDatabase')}</Typography.Title>
             <DMPSidebar
               stationId={selectedStationId}
               onSelect={setSelection}
@@ -118,9 +120,9 @@ export default function BatteryDMPPage() {
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <Tag color="blue">{selection.model}</Tag>
                     <Tag color="purple">{selection.date}</Tag>
-                    <Tag color="cyan">Batch {selection.batchId}</Tag>
+                    <Tag color="cyan">{t('dmpBatch')} {selection.batchId}</Tag>
                     <Tag color="green">CH {selection.channel}</Tag>
-                    <Badge status={selectedStation?.online ? 'success' : 'error'} text={selectedStation?.name || 'No station'} />
+                    <Badge status={selectedStation?.online ? 'success' : 'error'} text={selectedStation?.name || t('dmpNoStation')} />
                   </div>
                 )}
               </div>
@@ -130,9 +132,9 @@ export default function BatteryDMPPage() {
               activeKey={activeTab}
               onChange={setActiveTab}
               items={[
-                { key: 'chart', label: 'Chart', children: <DMPChartTab stationId={selectedStationId} selection={selection} /> },
-                { key: 'history', label: 'History Data', children: <DMPHistoryTab stationId={selectedStationId} selection={selection} /> },
-                { key: 'export', label: 'Export Reports', children: <DMPExportTab stationId={selectedStationId} selection={selection} /> },
+                { key: 'chart', label: t('dmpChartTab'), children: <DMPChartTab stationId={selectedStationId} selection={selection} /> },
+                { key: 'history', label: t('dmpHistoryDataTab'), children: <DMPHistoryTab stationId={selectedStationId} selection={selection} /> },
+                { key: 'export', label: t('dmpExportTab'), children: <DMPExportTab stationId={selectedStationId} selection={selection} /> },
               ]}
             />
           </Content>

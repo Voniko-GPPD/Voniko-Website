@@ -1,7 +1,7 @@
 const BASE = '/api/dmp';
 
 async function apiFetch(url, options = {}) {
-  const token = localStorage.getItem('token');
+  const token = localStorage.getItem('accessToken');
   const res = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
@@ -54,7 +54,7 @@ export async function fetchTemplates(stationId) {
 }
 
 export async function downloadReport({ stationId, batchId, cdmc, channel, templateName }) {
-  const token = localStorage.getItem('token');
+  const token = localStorage.getItem('accessToken');
   const res = await fetch(`${BASE}/report`, {
     method: 'POST',
     headers: {

@@ -28,6 +28,7 @@ const commentRoutes = require('./src/routes/comments');
 const notificationsRouter = require('./src/routes/notificationsRouter');
 const barcodeRouter = require('./src/routes/barcode');
 const batteryRouter = require('./src/routes/battery');
+const dmpRouter = require('./src/routes/dmp');
 const { initBatteryWebSocket } = require('./src/utils/batterySocket');
 
 // Initialize database
@@ -98,6 +99,7 @@ app.use('/api/versions', commentRoutes);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/barcode', barcodeRouter);
 app.use('/api/battery', batteryRouter);
+app.use('/api/dmp', dmpRouter);
 
 // SSE notifications endpoint
 app.get('/api/notifications/stream', authenticateToken, (req, res) => {

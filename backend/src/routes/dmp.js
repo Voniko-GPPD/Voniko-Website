@@ -10,8 +10,16 @@ const router = express.Router();
 router.post('/register', (req, res) => {
   const { name, url } = req.body || {};
   if (!name || !url) return res.status(400).json({ error: 'name and url are required' });
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return res.status(400).json({ error: 'url must be http(s)' });
+    }
+  } catch (_) {
+    return res.status(400).json({ error: 'Invalid url' });
+  }
   const id = upsertStation(name, url);
-  logger.info('DMP station registered', { id, name, url });
+  logger.info('DMP station registered', { id, name });
   res.json({ ok: true, id });
 });
 
@@ -52,7 +60,7 @@ router.get('/batches/:batchId/channels', authenticateToken, async (req, res, nex
   const stationUrl = getStationUrl(req.query.stationId, res);
   if (!stationUrl) return;
   try {
-    const r = await axios.get(`${stationUrl}/batches/${req.params.batchId}/channels`, { timeout: 30000 });
+    const r = await axios.get(`${stationUrl}/batches/${encodeURIComponent(req.params.batchId)}/channels`, { timeout: 30000 });
     res.json(r.data);
   } catch (err) {
     if (err.response) return res.status(err.response.status).json(err.response.data);

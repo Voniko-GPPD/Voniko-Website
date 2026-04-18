@@ -68,10 +68,21 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 @contextmanager
 def shadow_copy(mdb_path: str):
     """Copy live .mdb to temp location before querying to avoid file-lock errors."""
+    source = Path(mdb_path).resolve()
+    base_dir = Path(DMP_DATA_DIR).resolve()
+    if source.suffix.lower() != ".mdb":
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="MDB file not found")
+    if not str(source).startswith(str(base_dir)):
+        dmpdata_path = Path(get_dmpdata_path()).resolve()
+        if source != dmpdata_path:
+            raise HTTPException(status_code=400, detail="Invalid path")
+
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mdb")
     os.close(tmp_fd)
     try:
-        shutil.copy2(mdb_path, tmp_path)
+        shutil.copy2(str(source), tmp_path)
         yield tmp_path
     finally:
         try:
@@ -88,7 +99,7 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = ()) -> list[dict]:
     with pyodbc.connect(conn_str) as conn:
         cursor = conn.cursor()
         cursor.execute(sql, params)
-        columns = [col[0] for col in cursor.description]
+        columns = [col[0] for col in cursor.description] if cursor.description else []
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
@@ -113,8 +124,16 @@ def get_dmpdata_path() -> str:
 
 
 def compute_stats(rows: list[dict]) -> dict:
-    volt_vals = [float(r["VOLT"]) for r in rows if r.get("VOLT") is not None]
-    im_vals = [float(r["Im"]) for r in rows if r.get("Im") is not None]
+    def safe_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    volt_vals = [safe_float(r.get("VOLT")) for r in rows]
+    volt_vals = [v for v in volt_vals if v is not None]
+    im_vals = [safe_float(r.get("Im")) for r in rows]
+    im_vals = [i for i in im_vals if i is not None]
 
     def agg(vals):
         if not vals:
@@ -208,6 +227,8 @@ def _process_worksheet(ws, ctx: dict):
 def _resolve_template_path(template_name: str) -> str:
     parsed = Path(template_name)
     if parsed.parent != Path(".") or parsed.suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="Invalid template")
+    if not re.match(r'^[A-Za-z0-9_-]+$', parsed.stem):
         raise HTTPException(status_code=400, detail="Invalid template")
 
     result = Path(DMP_TEMPLATES_DIR).resolve() / parsed.name

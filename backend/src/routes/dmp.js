@@ -10,6 +10,14 @@ router.post('/register', (req, res) => {
   if (!name || !url) {
     return res.status(400).json({ error: 'name and url required' });
   }
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return res.status(400).json({ error: 'url must be http(s)' });
+    }
+  } catch (_) {
+    return res.status(400).json({ error: 'Invalid url' });
+  }
   const id = upsertStation(name, url);
   return res.json({ id });
 });
@@ -34,6 +42,14 @@ function resolveOnlineStationUrl(stationId) {
   }
 
   return stationUrl;
+}
+
+function validateBatchId(batchId) {
+  const value = String(batchId || '').trim();
+  if (!value || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw Object.assign(new Error('Invalid batchId'), { status: 400 });
+  }
+  return value;
 }
 
 async function proxyGet(stationUrl, path, queryParams, res, next) {
@@ -70,7 +86,8 @@ router.get('/batches', authenticateToken, async (req, res, next) => {
 router.get('/batches/:batchId/channels', authenticateToken, async (req, res, next) => {
   try {
     const stationUrl = resolveOnlineStationUrl(req.query.stationId);
-    await proxyGet(stationUrl, `/batches/${encodeURIComponent(req.params.batchId)}/channels`, {}, res, next);
+    const safeBatchId = validateBatchId(req.params.batchId);
+    await proxyGet(stationUrl, `/batches/${encodeURIComponent(safeBatchId)}/channels`, {}, res, next);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

@@ -89,11 +89,16 @@ class ReportRequest(BaseModel):
 @contextmanager
 def shadow_copy(mdb_path: str):
     """Copy live .mdb to temp before querying to avoid file-lock errors."""
-    suffix = Path(mdb_path).suffix
+    source = Path(mdb_path).resolve()
+    if source.suffix.lower() != ".mdb":
+        raise HTTPException(status_code=400, detail="Only .mdb files are supported")
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="MDB file not found")
+    suffix = source.suffix
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(tmp_fd)
     try:
-        shutil.copy2(mdb_path, tmp_path)
+        shutil.copy2(str(source), tmp_path)
         yield tmp_path
     finally:
         try:
@@ -146,6 +151,25 @@ def _resolve_data_mdb(cdmc: str) -> Path:
     if not mdb_path.exists() or not mdb_path.is_file():
         raise HTTPException(status_code=404, detail="Data file not found")
     return mdb_path
+
+
+def _resolve_dmpdata_path() -> Path:
+    data_dir = Path(DMP_DATA_DIR).resolve()
+    dmpdata = (data_dir / "DMPDATA.mdb").resolve()
+    if not _is_inside(data_dir, dmpdata):
+        raise HTTPException(status_code=400, detail="Invalid DMP data directory")
+    if not dmpdata.exists() or not dmpdata.is_file():
+        raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+    return dmpdata
+
+
+def _validate_batch_id(batch_id: str) -> str:
+    value = str(batch_id or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="batch_id is required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise HTTPException(status_code=400, detail="Invalid batch_id")
+    return value
 
 
 def _resolve_template_path(template_name: str) -> Path:
@@ -311,9 +335,7 @@ def health_root():
 @app.get("/batches")
 def get_batches():
     try:
-        dmpdata = (Path(DMP_DATA_DIR).resolve() / "DMPDATA.mdb").resolve()
-        if not dmpdata.exists():
-            raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+        dmpdata = _resolve_dmpdata_path()
         with shadow_copy(str(dmpdata)) as copied:
             rows = query_mdb(copied, "SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
         return {"batches": rows}
@@ -327,11 +349,10 @@ def get_batches():
 @app.get("/batches/{batch_id}/channels")
 def get_channels(batch_id: str):
     try:
-        dmpdata = (Path(DMP_DATA_DIR).resolve() / "DMPDATA.mdb").resolve()
-        if not dmpdata.exists():
-            raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+        safe_batch_id = _validate_batch_id(batch_id)
+        dmpdata = _resolve_dmpdata_path()
         with shadow_copy(str(dmpdata)) as copied:
-            rows = query_mdb(copied, "SELECT baty, cdmc FROM para_singl WHERE id = ?", (batch_id,))
+            rows = query_mdb(copied, "SELECT baty, cdmc FROM para_singl WHERE id = ?", (safe_batch_id,))
         return {"channels": rows}
     except HTTPException:
         raise
@@ -384,15 +405,14 @@ def get_templates():
 @app.post("/report")
 def generate_report(request: ReportRequest):
     try:
-        dmpdata = (Path(DMP_DATA_DIR).resolve() / "DMPDATA.mdb").resolve()
-        if not dmpdata.exists():
-            raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+        safe_batch_id = _validate_batch_id(request.batch_id)
+        dmpdata = _resolve_dmpdata_path()
 
         with shadow_copy(str(dmpdata)) as copied:
             batch_rows = query_mdb(
                 copied,
                 "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
-                (request.batch_id,),
+                (safe_batch_id,),
             )
 
         if not batch_rows:
@@ -423,7 +443,7 @@ def generate_report(request: ReportRequest):
         template_path = _resolve_template_path(request.template_name)
         report_bytes = render_excel_template(str(template_path), context)
 
-        safe_batch = re.sub(r"[^A-Za-z0-9._-]", "_", str(request.batch_id))
+        safe_batch = re.sub(r"[^A-Za-z0-9._-]", "_", str(safe_batch_id))
         safe_channel = re.sub(r"[^A-Za-z0-9._-]", "_", str(request.channel))
         filename = f"dmp_report_{safe_batch}_{safe_channel}.xlsx"
 

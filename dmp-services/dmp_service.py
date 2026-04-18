@@ -152,7 +152,12 @@ def _inline_params(sql: str, params: tuple) -> str:
         elif isinstance(param, (int, float)):
             result += str(param)
         else:
-            escaped = str(param).replace("'", "''")
+            value = str(param)
+            # Permit only a conservative character set used by batch/cdmc identifiers
+            # and date-like strings when fallback inlining is required by Access ODBC.
+            if not re.fullmatch(r"[A-Za-z0-9 _:\.\-]+", value):
+                raise ValueError("Unsafe string parameter for inline SQL fallback")
+            escaped = value.replace("'", "''")
             result += f"'{escaped}'"
         result += parts[i + 1]
     return result
@@ -169,11 +174,19 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = ()) -> list[dict]:
             cursor.execute(sql, params) if params else cursor.execute(sql)
         except pyodbc.Error as exc:
             err_str = str(exc)
-            if params and ("HYC00" in err_str or "SQLBindParameter" in err_str):
+            if params and ("HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str):
                 # MS Access ODBC driver doesn't support bound string parameters;
-                # (errors: HYC00 or SQLBindParameter)
+                # (errors: HYC00, SQLBindParameter, or sometimes 07002)
                 # fall back to safely inlined parameters.
-                cursor.execute(_inline_params(sql, params))
+                try:
+                    cursor.execute(_inline_params(sql, params))
+                except (pyodbc.Error, ValueError) as inline_exc:
+                    logger.warning(
+                        "Inline parameter fallback failed (%s); re-raising original execute error (%s)",
+                        inline_exc,
+                        exc,
+                    )
+                    raise exc from inline_exc
             else:
                 raise
         columns = [col[0] for col in cursor.description] if cursor.description else []
@@ -397,10 +410,13 @@ def get_batches():
     if dmpdata.exists():
         try:
             with shadow_copy(str(dmpdata)) as copied:
-                para_pub_columns = _get_table_columns(copied, "para_pub")
-            has_para_pub_cdmc = "cdmc" in para_pub_columns
+                try:
+                    para_pub_columns = _get_table_columns(copied, "para_pub")
+                    has_para_pub_cdmc = "cdmc" in para_pub_columns
+                except (pyodbc.Error, HTTPException) as exc:
+                    logger.debug("Could not inspect para_pub schema for get_batches, using query fallback: %s", exc)
         except (pyodbc.Error, HTTPException) as exc:
-            logger.debug("Could not inspect para_pub schema for get_batches, using query fallback: %s", exc)
+            logger.debug("Could not create shadow copy for get_batches schema inspection: %s", exc)
     try:
         if has_para_pub_cdmc:
             rows = _read_dmpdata("SELECT id, cdmc, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
@@ -431,12 +447,18 @@ def get_channels(batch_id: str):
     if dmpdata.exists():
         try:
             with shadow_copy(str(dmpdata)) as copied:
-                para_singl_columns = _get_table_columns(copied, "para_singl")
-                para_pub_columns = _get_table_columns(copied, "para_pub")
-            has_para_singl_cdmc = "cdmc" in para_singl_columns
-            has_para_pub_cdmc = "cdmc" in para_pub_columns
+                try:
+                    para_singl_columns = _get_table_columns(copied, "para_singl")
+                    has_para_singl_cdmc = "cdmc" in para_singl_columns
+                except (pyodbc.Error, HTTPException) as exc:
+                    logger.debug("Could not inspect para_singl schema, using query fallbacks: %s", exc)
+                try:
+                    para_pub_columns = _get_table_columns(copied, "para_pub")
+                    has_para_pub_cdmc = "cdmc" in para_pub_columns
+                except (pyodbc.Error, HTTPException) as exc:
+                    logger.debug("Could not inspect para_pub schema, using query fallbacks: %s", exc)
         except (pyodbc.Error, HTTPException) as exc:
-            logger.debug("Could not inspect schema, using query fallbacks: %s", exc)
+            logger.debug("Could not create shadow copy for schema inspection, using query fallbacks: %s", exc)
 
     rows = []
     for param in lookup_params:

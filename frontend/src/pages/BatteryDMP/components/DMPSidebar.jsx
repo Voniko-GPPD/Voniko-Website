@@ -83,6 +83,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
   const { t } = useLang();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [channelError, setChannelError] = useState('');
   const [searchValue, setSearchValue] = useState('');
   const [batches, setBatches] = useState([]);
   const [channelsByBatch, setChannelsByBatch] = useState({});
@@ -93,6 +94,8 @@ export default function DMPSidebar({ stationId, onSelect }) {
     setBatches([]);
     setChannelsByBatch({});
     setExpandedKeys([]);
+    setError('');
+    setChannelError('');
 
     if (!stationId) {
       setLoading(false);
@@ -176,11 +179,12 @@ export default function DMPSidebar({ stationId, onSelect }) {
     const batchId = node.batchId;
     if (channelsByBatch[batchId]) return;
 
+    setChannelError('');
     try {
       const channels = await fetchChannels(stationId, batchId);
       setChannelsByBatch((prev) => ({ ...prev, [batchId]: channels }));
     } catch (err) {
-      setError(err.message || 'Failed to load channels');
+      setChannelError(err.message || 'Failed to load channels');
     }
   };
 
@@ -204,6 +208,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
       />
 
       {error && <Alert type="error" message={error} showIcon />}
+      {channelError && <Alert type="error" message={channelError} showIcon />}
 
       <div style={{ flex: 1, overflow: 'auto' }}>
         {loading ? (

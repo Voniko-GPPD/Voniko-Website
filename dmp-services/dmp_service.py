@@ -346,6 +346,7 @@ def get_batches():
 @app.get("/batches/{batch_id}/channels")
 def get_channels(batch_id: str):
     lookup_params = _build_batch_lookup_params(batch_id)
+    last_error = None
 
     rows = []
     for param in lookup_params:
@@ -354,8 +355,10 @@ def get_channels(batch_id: str):
                 "SELECT ps.baty, ps.cdmc FROM para_singl ps INNER JOIN para_pub pp ON ps.id = pp.id WHERE pp.id = ?",
                 param,
             )
+            last_error = None
         except pyodbc.Error as exc:
             logger.debug("get_channels JOIN query failed for param %r: %s", param, exc)
+            last_error = exc
             rows = []
         if rows:
             break
@@ -364,8 +367,10 @@ def get_channels(batch_id: str):
         for param in lookup_params:
             try:
                 rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id = ?", param)
+                last_error = None
             except pyodbc.Error as exc:
                 logger.debug("get_channels simple query failed for param %r: %s", param, exc)
+                last_error = exc
                 rows = []
             if rows:
                 break
@@ -375,8 +380,10 @@ def get_channels(batch_id: str):
         for param in lookup_params:
             try:
                 pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", param)
+                last_error = None
             except pyodbc.Error as exc:
                 logger.debug("get_channels cdmc lookup failed for param %r: %s", param, exc)
+                last_error = exc
                 pub_rows = []
             if pub_rows and pub_rows[0].get("cdmc"):
                 cdmc_val = str(pub_rows[0]["cdmc"])
@@ -384,9 +391,15 @@ def get_channels(batch_id: str):
         if cdmc_val:
             try:
                 rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc = ?", (cdmc_val,))
+                last_error = None
             except pyodbc.Error as exc:
                 logger.debug("get_channels cdmc-based query failed for cdmc %r: %s", cdmc_val, exc)
+                last_error = exc
                 rows = []
+
+    if not rows and last_error is not None:
+        logger.error("All channel query attempts failed for batch %r: %s", batch_id, last_error)
+        raise HTTPException(status_code=500, detail=f"Database query failed: {last_error}")
 
     return {"channels": rows}
 

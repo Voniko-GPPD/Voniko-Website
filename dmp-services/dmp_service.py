@@ -270,7 +270,7 @@ def health_check():
 
 @app.get("/batches")
 def get_batches():
-    rows = _read_dmpdata("SELECT cdmc, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+    rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
     for row in rows:
         fdrq = row.get("fdrq")
         if fdrq is None:
@@ -311,7 +311,7 @@ def get_templates():
 @app.post("/report")
 def generate_report(payload: ReportRequest):
     batch_rows = _read_dmpdata(
-        "SELECT cdmc, dcxh, fdrq, fdfs FROM para_pub WHERE cdmc=?",
+        "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id=?",
         (payload.batch_id,),
     )
     if not batch_rows:
@@ -322,7 +322,7 @@ def generate_report(payload: ReportRequest):
     batch = batch_rows[0]
 
     context = {
-        "BATCH_ID": batch.get("cdmc"),
+        "BATCH_ID": batch.get("id"),
         "MODEL": batch.get("dcxh"),
         "DATE": str(batch.get("fdrq")),
         "DISCHARGE_PATTERN": batch.get("fdfs"),

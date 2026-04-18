@@ -507,4 +507,5 @@ export default {
   dmpClickToLoadChannels: 'Click to load channels',
   dmpUnknownModel: 'Unknown Model',
   dmpUnknownDate: 'Unknown Date',
+  dmpUnknownPattern: 'Unknown Pattern',
 };

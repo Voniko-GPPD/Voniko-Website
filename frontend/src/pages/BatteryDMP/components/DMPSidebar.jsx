@@ -4,53 +4,61 @@ import { fetchBatches, fetchChannels } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 function buildBatchTree(batches, channelsByBatch, labels) {
-  const modelMap = new Map();
+  const dateMap = new Map();
 
   batches.forEach((batch) => {
-    const model = batch.dcxh || labels.unknownModel;
     const date = batch.fdrq || labels.unknownDate;
+    const model = batch.dcxh || labels.unknownModel;
+    const pattern = batch.fdfs || labels.unknownPattern;
 
+    if (!dateMap.has(date)) dateMap.set(date, new Map());
+    const modelMap = dateMap.get(date);
     if (!modelMap.has(model)) modelMap.set(model, new Map());
-    const dateMap = modelMap.get(model);
-    if (!dateMap.has(date)) dateMap.set(date, []);
-    dateMap.get(date).push(batch);
+    const patternMap = modelMap.get(model);
+    if (!patternMap.has(pattern)) patternMap.set(pattern, []);
+    patternMap.get(pattern).push(batch);
   });
 
-  return Array.from(modelMap.entries()).map(([model, dateMap]) => ({
-    key: `model:${model}`,
-    title: model,
+  return Array.from(dateMap.entries()).map(([date, modelMap]) => ({
+    key: `date:${date}`,
+    title: date,
     selectable: false,
-    children: Array.from(dateMap.entries()).map(([date, modelBatches]) => ({
-      key: `date:${model}:${date}`,
-      title: date,
+    children: Array.from(modelMap.entries()).map(([model, patternMap]) => ({
+      key: `model:${date}:${model}`,
+      title: model,
       selectable: false,
-      children: modelBatches.map((batch) => {
-        const batchKey = `batch:${batch.cdmc}`;
-        const channels = channelsByBatch[batch.cdmc] || [];
-        return {
-          key: batchKey,
-          title: `${labels.batch} ${batch.cdmc}`,
-          selectable: false,
-          batchId: batch.cdmc,
-          model,
-          date,
-          children: channels.length
-            ? channels.map((channel) => ({
-              key: `channel:${batch.cdmc}:${channel.baty}`,
-              title: `${labels.channel} ${channel.baty}`,
-              isLeaf: true,
-              selectable: true,
-              selection: {
-                batchId: batch.cdmc,
-                cdmc: channel.cdmc,
-                channel: channel.baty,
-                model,
-                date,
-              },
-            }))
-            : [{ key: `placeholder:${batch.cdmc}`, title: labels.clickToLoad, selectable: false, disabled: true }],
-        };
-      }),
+      children: Array.from(patternMap.entries()).map(([pattern, batchList]) => ({
+        key: `pattern:${date}:${model}:${pattern}`,
+        title: pattern,
+        selectable: false,
+        children: batchList.map((batch) => {
+          const batchKey = `batch:${batch.id}`;
+          const channels = channelsByBatch[batch.id] || [];
+          return {
+            key: batchKey,
+            title: `${labels.batch} ${batch.id}`,
+            selectable: false,
+            batchId: batch.id,
+            model,
+            date,
+            children: channels.length
+              ? channels.map((channel) => ({
+                key: `channel:${batch.id}:${channel.baty}`,
+                title: `${labels.channel} ${channel.baty}`,
+                isLeaf: true,
+                selectable: true,
+                selection: {
+                  batchId: batch.id,
+                  cdmc: channel.cdmc,
+                  channel: channel.baty,
+                  model,
+                  date,
+                },
+              }))
+              : [{ key: `placeholder:${batch.id}`, title: labels.clickToLoad, selectable: false, disabled: true }],
+          };
+        }),
+      })),
     })),
   }));
 }
@@ -117,6 +125,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
   const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch, {
     unknownModel: t('dmpUnknownModel'),
     unknownDate: t('dmpUnknownDate'),
+    unknownPattern: t('dmpUnknownPattern'),
     batch: t('dmpBatch'),
     channel: t('dmpChannel'),
     clickToLoad: t('dmpClickToLoadChannels'),

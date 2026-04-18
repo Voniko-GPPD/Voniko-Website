@@ -507,4 +507,5 @@ export default {
   dmpClickToLoadChannels: 'Nhấp để tải kênh',
   dmpUnknownModel: 'Model không xác định',
   dmpUnknownDate: 'Ngày không xác định',
+  dmpUnknownPattern: 'Kịch bản không xác định',
 };

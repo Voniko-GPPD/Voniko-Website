@@ -22,6 +22,11 @@ VONIKO_SERVER_URL: str = os.environ.get("VONIKO_SERVER_URL", "").rstrip("/")
 DMP_STATION_PORT: int = int(os.environ.get("DMP_STATION_PORT", "8766"))
 DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
+WATCH_INTERVAL_SECONDS: int = 5
+
+_WATCH_LOCK = threading.Lock()
+_WATCHED_MDB_MTIME: dict[str, float] = {}
+_WATCHED_CHANGES: dict[str, float] = {}
 
 
 def _get_local_ip() -> str:
@@ -53,8 +58,45 @@ def _registration_loop() -> None:
         time.sleep(30)
 
 
+def _scan_dynamic_mdb_files() -> dict[str, float]:
+    data_dir = Path(DMP_DATA_DIR).resolve()
+    if not data_dir.exists():
+        return {}
+
+    result: dict[str, float] = {}
+    for entry in data_dir.glob("*.mdb"):
+        if not entry.is_file():
+            continue
+        if entry.name.lower() == "dmpdata.mdb":
+            continue
+        try:
+            result[entry.stem] = entry.stat().st_mtime
+        except OSError:
+            continue
+    return result
+
+
+def _watch_dmp_changes_loop() -> None:
+    with _WATCH_LOCK:
+        _WATCHED_MDB_MTIME.update(_scan_dynamic_mdb_files())
+
+    while True:
+        current = _scan_dynamic_mdb_files()
+        now = time.time()
+        with _WATCH_LOCK:
+            for stem, mtime in current.items():
+                previous = _WATCHED_MDB_MTIME.get(stem)
+                if previous is None or mtime > previous:
+                    _WATCHED_CHANGES[stem] = now
+            _WATCHED_MDB_MTIME.clear()
+            _WATCHED_MDB_MTIME.update(current)
+        time.sleep(WATCH_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def _lifespan(application):
+    watcher_thread = threading.Thread(target=_watch_dmp_changes_loop, daemon=True)
+    watcher_thread.start()
     if VONIKO_SERVER_URL and DMP_STATION_NAME:
         t = threading.Thread(target=_registration_loop, daemon=True)
         t.start()
@@ -284,8 +326,20 @@ def get_batches():
 
 @app.get("/batches/{batch_id}/channels")
 def get_channels(batch_id: str):
-    rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE cdmc=?", (batch_id,))
+    rows = _read_dmpdata("SELECT baty, cdmc FROM para_singl WHERE id=?", (batch_id,))
     return {"channels": rows}
+
+
+@app.get("/changes")
+def get_changes(since: float = 0):
+    with _WATCH_LOCK:
+        changed = [
+            (stem, changed_at)
+            for stem, changed_at in _WATCHED_CHANGES.items()
+            if changed_at > since
+        ]
+    changed.sort(key=lambda item: item[1])
+    return {"changes": [stem for stem, _ in changed], "timestamp": time.time()}
 
 
 @app.get("/telemetry")

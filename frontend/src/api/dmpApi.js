@@ -41,6 +41,16 @@ export async function fetchTelemetry(stationId, cdmc, channel) {
   return data.telemetry || [];
 }
 
+export async function fetchChanges(stationId, since) {
+  const params = new URLSearchParams({ stationId, since: String(since) });
+  const res = await apiFetch(`${BASE}/changes?${params.toString()}`);
+  const data = await res.json();
+  return {
+    changes: data.changes || [],
+    timestamp: Number(data.timestamp) || Math.floor(Date.now() / 1000),
+  };
+}
+
 export async function fetchStats(stationId, cdmc, channel) {
   const params = new URLSearchParams({ stationId, cdmc, channel });
   const res = await apiFetch(`${BASE}/stats?${params.toString()}`);

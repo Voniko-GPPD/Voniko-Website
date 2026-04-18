@@ -84,6 +84,22 @@ router.get('/telemetry', authenticateToken, async (req, res, next) => {
   }
 });
 
+// GET /api/dmp/changes?stationId=&since=
+router.get('/changes', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/changes`, {
+      params: { since: req.query.since },
+      timeout: 15000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    if (err.response) return res.status(err.response.status).json(err.response.data);
+    next(err);
+  }
+});
+
 // GET /api/dmp/stats?stationId=&cdmc=&channel=
 router.get('/stats', authenticateToken, async (req, res, next) => {
   const stationUrl = getStationUrl(req.query.stationId, res);

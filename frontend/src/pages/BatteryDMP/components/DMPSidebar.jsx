@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Input, Spin, Tree } from 'antd';
-import { fetchBatches, fetchChannels } from '../../../api/dmpApi';
+import { fetchBatches, fetchChannels, fetchChanges } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 function buildBatchTree(batches, channelsByBatch, labels) {
@@ -121,6 +121,30 @@ export default function DMPSidebar({ stationId, onSelect }) {
       mounted = false;
     };
   }, [stationId, onSelect]);
+
+  useEffect(() => {
+    if (!stationId) return () => {};
+
+    let active = true;
+    let since = Math.floor(Date.now() / 1000);
+
+    const pollChanges = async () => {
+      try {
+        const { changes, timestamp } = await fetchChanges(stationId, since);
+        since = timestamp;
+        if (!active || !changes.length) return;
+        const updatedBatches = await fetchBatches(stationId);
+        if (!active) return;
+        setBatches(updatedBatches);
+      } catch (_) {}
+    };
+
+    const intervalId = setInterval(pollChanges, 10000);
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+    };
+  }, [stationId]);
 
   const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch, {
     unknownModel: t('dmpUnknownModel'),

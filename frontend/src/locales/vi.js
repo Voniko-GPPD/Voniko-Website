@@ -484,6 +484,8 @@ export default {
   dmpBatch: 'Lô',
   dmpChannel: 'Kênh',
   dmpNoStation: 'Không có trạm',
+  dmpMissingCdmc: 'Không tìm thấy Archive ID (cdmc) cho batch này.',
+  dmpMissingCdmcDetailed: 'Không tìm thấy Archive ID (cdmc) cho batch này. Dữ liệu DMPDATA.mdb có thể chưa đầy đủ.',
   dmpSelectStationToChart: 'Chọn trạm để xem biểu đồ',
   dmpSelectChannelToChart: 'Chọn kênh để xem biểu đồ',
   dmpSelectStationToHistory: 'Chọn trạm để xem dữ liệu lịch sử',

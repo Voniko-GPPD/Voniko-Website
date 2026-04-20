@@ -16,6 +16,12 @@ import { useLang } from '../../../contexts/LangContext';
 
 const statsKeys = ['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'IM_MAX', 'IM_MIN', 'IM_AVG'];
 
+function safeNum(val) {
+  if (val === null || val === undefined || val === '--' || val === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : null;
+}
+
 export default function DMPChartTab({ stationId, selection }) {
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
@@ -25,7 +31,19 @@ export default function DMPChartTab({ stationId, selection }) {
   const [visibleLines, setVisibleLines] = useState(['VOLT', 'Im']);
 
   useEffect(() => {
-    if (!stationId || !selection?.cdmc || selection.channel == null) {
+    if (!stationId || !selection) {
+      setTelemetry([]);
+      setStats({});
+      setError('');
+      return;
+    }
+    if (!selection.cdmc) {
+      setError(t('dmpMissingCdmcDetailed'));
+      setTelemetry([]);
+      setStats({});
+      return;
+    }
+    if (selection.channel == null) {
       setTelemetry([]);
       setStats({});
       setError('');
@@ -60,12 +78,14 @@ export default function DMPChartTab({ stationId, selection }) {
   }, [stationId, selection]);
 
   const chartData = useMemo(
-    () => telemetry.map((row, index) => ({
-      index,
-      TIM: Number(row.TIM),
-      VOLT: Number(row.VOLT),
-      Im: Number(row.Im),
-    })),
+    () => telemetry
+      .map((row, index) => ({
+        index,
+        TIM: safeNum(row.TIM),
+        VOLT: safeNum(row.VOLT),
+        Im: safeNum(row.Im),
+      }))
+      .filter((d) => d.TIM !== null),
     [telemetry]
   );
 

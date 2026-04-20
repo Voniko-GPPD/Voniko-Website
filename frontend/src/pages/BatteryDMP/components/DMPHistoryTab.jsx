@@ -6,8 +6,9 @@ import { useLang } from '../../../contexts/LangContext';
 const monoStyle = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' };
 
 function format4(value) {
+  if (value === null || value === undefined) return '--';
   const num = Number(value);
-  if (!Number.isFinite(num)) return '-';
+  if (!Number.isFinite(num)) return '--';
   return num.toFixed(4);
 }
 
@@ -19,7 +20,17 @@ export default function DMPHistoryTab({ stationId, selection }) {
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    if (!stationId || !selection?.cdmc || selection.channel == null) {
+    if (!stationId || !selection) {
+      setTelemetry([]);
+      setError('');
+      return;
+    }
+    if (!selection.cdmc) {
+      setError(t('dmpMissingCdmc'));
+      setTelemetry([]);
+      return;
+    }
+    if (selection.channel == null) {
       setTelemetry([]);
       setError('');
       return;
@@ -103,6 +114,10 @@ export default function DMPHistoryTab({ stationId, selection }) {
 
   if (!selection) {
     return <Empty description={t('dmpSelectChannelToHistory')} />;
+  }
+
+  if (!selection.cdmc) {
+    return <Alert type="warning" showIcon message={t('dmpMissingCdmc')} />;
   }
 
   if (loading) {

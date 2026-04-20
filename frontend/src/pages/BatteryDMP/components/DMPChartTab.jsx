@@ -54,28 +54,34 @@ export default function DMPChartTab({ stationId, selection }) {
     setLoading(true);
     setError('');
 
-    Promise.all([
-      fetchTelemetry(stationId, selection.cdmc, selection.channel),
-      fetchStats(stationId, selection.cdmc, selection.channel),
-    ])
-      .then(([telemetryRows, statsData]) => {
+    fetchTelemetry(stationId, selection.cdmc, selection.channel)
+      .then((rows) => {
         if (!mounted) return;
-        setTelemetry(telemetryRows);
-        setStats(statsData || {});
+        setTelemetry(rows);
       })
       .catch((err) => {
         if (!mounted) return;
-        setError(err.message || 'Failed to load chart data');
+        setError(err.message || 'Failed to load telemetry data');
       })
       .finally(() => {
         if (!mounted) return;
         setLoading(false);
       });
 
+    fetchStats(stationId, selection.cdmc, selection.channel)
+      .then((data) => {
+        if (!mounted) return;
+        setStats(data || {});
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setStats({});
+      });
+
     return () => {
       mounted = false;
     };
-  }, [stationId, selection]);
+  }, [stationId, selection, t]);
 
   const chartData = useMemo(
     () => telemetry

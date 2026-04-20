@@ -219,21 +219,28 @@ def get_dmpdata_path() -> str:
 
 def compute_stats(rows: list[dict]) -> dict:
     def safe_float(value):
+        if value == "--" or value == "" or value is None:
+            return None
         try:
-            return float(value)
+            f = float(value)
+            return f if f == f else None
         except (TypeError, ValueError):
             return None
 
     def get_value(row: dict, *keys):
         for key in keys:
             if key in row and row.get(key) is not None:
-                return row.get(key)
+                v = row.get(key)
+                if v == "--" or v == "":
+                    continue
+                return v
         return None
 
     volt_vals = [safe_float(get_value(r, "VOLT", "volt", "Volt")) for r in rows]
     volt_vals = [v for v in volt_vals if v is not None]
-    im_vals = [safe_float(get_value(r, "Im", "IM", "im")) for r in rows]
-    im_vals = [i for i in im_vals if i is not None]
+    im_vals_all = [safe_float(get_value(r, "Im", "IM", "im")) for r in rows]
+    im_vals_all = [i for i in im_vals_all if i is not None]
+    im_vals_active = [i for i in im_vals_all if i > 0]
 
     def agg(vals):
         if not vals:
@@ -244,14 +251,16 @@ def compute_stats(rows: list[dict]) -> dict:
             "avg": round(sum(vals) / len(vals), 4),
         }
 
-    v, i = agg(volt_vals), agg(im_vals)
+    v = agg(volt_vals)
+    i_all = agg(im_vals_all)
+    i_active = agg(im_vals_active)
     return {
         "VOLT_MAX": v["max"],
         "VOLT_MIN": v["min"],
         "VOLT_AVG": v["avg"],
-        "IM_MAX": i["max"],
-        "IM_MIN": i["min"],
-        "IM_AVG": i["avg"],
+        "IM_MAX": i_all["max"],
+        "IM_MIN": i_all["min"],
+        "IM_AVG": i_active["avg"],
     }
 
 
@@ -347,14 +356,55 @@ def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
         return query_mdb(copied, sql, params)
 
 
+def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
+    """
+    Query vidata with fallback strategy for Access ODBC parameter quirks.
+    """
+    base_sql = "SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {placeholder} ORDER BY TIM ASC"
+
+    try:
+        return query_mdb(mdb_path, base_sql.format(placeholder="?"), (channel,))
+    except Exception as exc1:
+        logger.debug("_query_vidata attempt1 (int param) failed: %s", exc1)
+
+    try:
+        return query_mdb(mdb_path, base_sql.format(placeholder="?"), (str(channel),))
+    except Exception as exc2:
+        logger.debug("_query_vidata attempt2 (str param) failed: %s", exc2)
+
+    try:
+        return query_mdb(
+            mdb_path,
+            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {int(channel)} ORDER BY TIM ASC",
+        )
+    except Exception as exc3:
+        logger.debug("_query_vidata attempt3 (inline int) failed: %s", exc3)
+
+    try:
+        return query_mdb(
+            mdb_path,
+            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = '{int(channel)}' ORDER BY TIM ASC",
+        )
+    except Exception as exc4:
+        logger.debug("_query_vidata attempt4 (inline str) failed: %s", exc4)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot query vidata for channel {channel}: {exc4}",
+        ) from exc4
+
+
 def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
     mdb_path = resolve_data_file(cdmc)
     with shadow_copy(mdb_path) as copied:
-        return query_mdb(
-            copied,
-            "SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = ? ORDER BY TIM ASC",
-            (channel,),
-        )
+        rows = _query_vidata_by_channel(copied, channel)
+    for row in rows:
+        tim = row.get("TIM")
+        if tim is not None and tim != "--":
+            try:
+                row["TIM"] = round(float(tim) / 3600, 6)
+            except (TypeError, ValueError):
+                pass
+    return rows
 
 
 def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:

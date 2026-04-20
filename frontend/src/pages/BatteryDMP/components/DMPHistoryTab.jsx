@@ -6,7 +6,7 @@ import { useLang } from '../../../contexts/LangContext';
 const monoStyle = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' };
 
 function format4(value) {
-  if (value === '--' || value === null || value === undefined) return '--';
+  if (value === null || value === undefined) return '--';
   const num = Number(value);
   if (!Number.isFinite(num)) return '--';
   return num.toFixed(4);
@@ -26,7 +26,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
       return;
     }
     if (!selection.cdmc) {
-      setError('Không tìm thấy Archive ID (cdmc) cho batch này.');
+      setError(t('dmpMissingCdmc'));
       setTelemetry([]);
       return;
     }
@@ -117,7 +117,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
   }
 
   if (!selection.cdmc) {
-    return <Alert type="warning" showIcon message="Không tìm thấy Archive ID (cdmc) cho batch này." />;
+    return <Alert type="warning" showIcon message={t('dmpMissingCdmc')} />;
   }
 
   if (loading) {

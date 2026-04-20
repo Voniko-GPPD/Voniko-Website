@@ -416,14 +416,14 @@ def get_batches():
 @app.get("/batches/{batch_id}/channels")
 def get_channels(batch_id: str):
     """
-    Lấy danh sách kênh cho một batch.
+    Get the channel list for a batch.
 
-    Schema Access:
+    Access schema:
     - para_pub.id = batch_id (Archive ID)
-    - para_pub.cdmc = tên file .mdb session
-    - para_singl.sid = para_pub.id (JOIN key, KHÔNG phải para_singl.id)
+    - para_pub.cdmc = session .mdb file name
+    - para_singl.sid = para_pub.id (JOIN key, not para_singl.id)
     - para_singl.baty = channel number
-    - para_singl.cdmc = tên file .mdb session (có thể NULL, dùng para_pub.cdmc làm backup)
+    - para_singl.cdmc = session .mdb file name (can be NULL, fallback to para_pub.cdmc)
     """
     cdmc_value: str | None = None
     try:
@@ -448,11 +448,11 @@ def get_channels(batch_id: str):
                 (batch_id,),
             )
         except Exception as exc2:
-            logger.error("get_channels: all queries failed for batch %r: %s", batch_id, exc2)
+            logger.debug("get_channels: fallback query failed for %r: %s", batch_id, exc2)
             last_error = exc2
 
     if not rows and last_error is not None:
-        raise HTTPException(status_code=500, detail=f"Database query failed: {last_error}")
+        raise HTTPException(status_code=500, detail=f"Database query failed: {str(last_error)}")
 
     for row in rows:
         if not row.get("cdmc") and cdmc_value:

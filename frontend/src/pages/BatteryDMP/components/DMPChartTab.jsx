@@ -38,7 +38,7 @@ export default function DMPChartTab({ stationId, selection }) {
       return;
     }
     if (!selection.cdmc) {
-      setError('Không tìm thấy Archive ID (cdmc) cho batch này. Dữ liệu DMPDATA.mdb có thể chưa đầy đủ.');
+      setError(t('dmpMissingCdmcDetailed'));
       setTelemetry([]);
       setStats({});
       return;

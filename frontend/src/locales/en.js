@@ -484,6 +484,8 @@ export default {
   dmpBatch: 'Batch',
   dmpChannel: 'Channel',
   dmpNoStation: 'No station',
+  dmpMissingCdmc: 'Archive ID (cdmc) was not found for this batch.',
+  dmpMissingCdmcDetailed: 'Archive ID (cdmc) was not found for this batch. DMPDATA.mdb may be incomplete.',
   dmpSelectStationToChart: 'Select a station to view chart',
   dmpSelectChannelToChart: 'Select a channel to view chart',
   dmpSelectStationToHistory: 'Select a station to view history data',

@@ -484,6 +484,8 @@ export default {
   dmpBatch: '批次',
   dmpChannel: '通道',
   dmpNoStation: '无站点',
+  dmpMissingCdmc: '该批次缺少 Archive ID (cdmc)。',
+  dmpMissingCdmcDetailed: '该批次缺少 Archive ID (cdmc)。DMPDATA.mdb 数据可能不完整。',
   dmpSelectStationToChart: '请选择站点以查看图表',
   dmpSelectChannelToChart: '请选择通道以查看图表',
   dmpSelectStationToHistory: '请选择站点以查看历史数据',

@@ -29,8 +29,8 @@ DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
-_ACCESS_QUERY_LOCK = threading.Semaphore(3)
-_ACCESS_QUERY_TIMEOUT: float = 25.0  # seconds to wait for a DB slot before returning 503
+_ACCESS_QUERY_LOCK = threading.Semaphore(5)
+_ACCESS_QUERY_TIMEOUT: float = 60.0  # seconds to wait for a DB slot before returning 503
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
@@ -432,11 +432,15 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
 
     try:
         return query_mdb(mdb_path, base_sql.format(placeholder="?"), (channel,))
+    except HTTPException:
+        raise
     except Exception as exc1:
         logger.debug("_query_vidata attempt1 (int param) failed: %s", exc1)
 
     try:
         return query_mdb(mdb_path, base_sql.format(placeholder="?"), (str(channel),))
+    except HTTPException:
+        raise
     except Exception as exc2:
         logger.debug("_query_vidata attempt2 (str param) failed: %s", exc2)
 
@@ -445,6 +449,8 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
             mdb_path,
             f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {int(channel)} ORDER BY TIM ASC",
         )
+    except HTTPException:
+        raise
     except Exception as exc3:
         logger.debug("_query_vidata attempt3 (inline int) failed: %s", exc3)
 
@@ -453,6 +459,8 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
             mdb_path,
             f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = '{int(channel)}' ORDER BY TIM ASC",
         )
+    except HTTPException:
+        raise
     except Exception as exc4:
         logger.debug("_query_vidata attempt4 (inline str) failed: %s", exc4)
         raise HTTPException(

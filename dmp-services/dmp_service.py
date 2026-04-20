@@ -135,7 +135,36 @@ def shadow_copy(mdb_path: str):
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mdb")
     os.close(tmp_fd)
     try:
-        shutil.copy2(str(source), tmp_path)
+        try:
+            shutil.copy2(str(source), tmp_path)
+        except PermissionError as exc:
+            logger.warning("shadow_copy: PermissionError copying %s — file locked by DMP app: %s", source, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"MDB file is locked by DMP application, retry later: {exc}",
+            ) from exc
+        except OSError as exc:
+            logger.warning("shadow_copy: OSError copying %s: %s", source, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot read MDB file: {exc}",
+            ) from exc
+
+        # Validate: must be at least 32 KB and start with Jet/ACE magic bytes
+        copied_size = os.path.getsize(tmp_path)
+        if copied_size < 32 * 1024:
+            raise HTTPException(
+                status_code=422,
+                detail=f"File '{source.name}' is too small ({copied_size} bytes) to be a valid Access database — may be a Windows shortcut",
+            )
+        with open(tmp_path, "rb") as fh:
+            magic = fh.read(4)
+        if magic != b"\x00\x01\x00\x00":
+            raise HTTPException(
+                status_code=422,
+                detail=f"File '{source.name}' does not have a valid Access database header — may be a Windows shortcut",
+            )
+
         yield tmp_path
     finally:
         try:
@@ -418,8 +447,14 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
             return rows
 
     mdb_path = resolve_data_file(cdmc)
-    with shadow_copy(mdb_path) as copied:
-        rows = _query_vidata_by_channel(copied, channel)
+    try:
+        with shadow_copy(mdb_path) as copied:
+            rows = _query_vidata_by_channel(copied, channel)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("_read_telemetry: unexpected error for cdmc=%r channel=%d", cdmc, channel)
+        raise HTTPException(status_code=500, detail=f"Unexpected error reading telemetry: {exc}") from exc
     for row in rows:
         tim = row.get("TIM")
         if tim is not None and tim != "--":

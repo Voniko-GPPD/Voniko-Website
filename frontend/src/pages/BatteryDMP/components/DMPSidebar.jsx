@@ -154,7 +154,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     };
 
     pollChanges();
-    const intervalId = setInterval(pollChanges, 10000);
+    const intervalId = setInterval(pollChanges, 30000);
     return () => {
       active = false;
       clearInterval(intervalId);

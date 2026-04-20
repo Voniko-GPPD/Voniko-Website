@@ -29,7 +29,7 @@ DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
-_ACCESS_QUERY_LOCK = threading.Semaphore(2)
+_ACCESS_QUERY_LOCK = threading.Semaphore(3)
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
 _WATCHED_MDB_MTIME: dict[str, float] = {}
@@ -181,7 +181,7 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> 
     for attempt_num in range(1, retries + 2):
         try:
             with _ACCESS_QUERY_LOCK:
-                with pyodbc.connect(conn_str) as conn:
+                with pyodbc.connect(conn_str, timeout=10) as conn:
                     cursor = conn.cursor()
                     try:
                         cursor.execute(sql, params) if params else cursor.execute(sql)
@@ -441,13 +441,14 @@ def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:
         r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
         f"DBQ={mdb_path};"
     )
-    with pyodbc.connect(conn_str) as conn:
-        cursor = conn.cursor()
-        return {
-            str(row.column_name).lower()
-            for row in cursor.columns(table=table_name)
-            if getattr(row, "column_name", None)
-        }
+    with _ACCESS_QUERY_LOCK:
+        with pyodbc.connect(conn_str, timeout=10) as conn:
+            cursor = conn.cursor()
+            return {
+                str(row.column_name).lower()
+                for row in cursor.columns(table=table_name)
+                if getattr(row, "column_name", None)
+            }
 
 
 @app.get("/")

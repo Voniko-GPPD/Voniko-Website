@@ -29,6 +29,9 @@ DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
+_ACCESS_QUERY_LOCK = threading.Lock()
+_TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
+_TELEMETRY_CACHE_TTL: float = 60.0  # seconds
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
 _SCHEMA_TABLE_WHITELIST = {"para_singl", "para_pub", "vidata"}
@@ -166,36 +169,37 @@ def _inline_params(sql: str, params: tuple) -> str:
 
 
 def query_mdb(mdb_path: str, sql: str, params: tuple = ()) -> list[dict]:
-    conn_str = (
-        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
-        f"DBQ={mdb_path};"
-    )
-    with pyodbc.connect(conn_str) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(sql, params) if params else cursor.execute(sql)
-        except pyodbc.Error as exc:
-            err_str = str(exc)
-            if params and ("HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str):
-                # MS Access ODBC driver doesn't support bound string parameters;
-                # (errors: HYC00, SQLBindParameter, or sometimes 07002)
-                # fall back to safely inlined parameters on a fresh cursor — the
-                # original cursor's statement handle is invalid after HYC00 and
-                # cannot be reused for another execute() call.
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute(_inline_params(sql, params))
-                except (pyodbc.Error, ValueError) as inline_exc:
-                    logger.warning(
-                        "Inline parameter fallback failed (%s); re-raising original execute error (%s)",
-                        inline_exc,
-                        exc,
-                    )
-                    raise exc from inline_exc
-            else:
-                raise
-        columns = [col[0] for col in cursor.description] if cursor.description else []
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    with _ACCESS_QUERY_LOCK:
+        conn_str = (
+            r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+            f"DBQ={mdb_path};"
+        )
+        with pyodbc.connect(conn_str) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(sql, params) if params else cursor.execute(sql)
+            except pyodbc.Error as exc:
+                err_str = str(exc)
+                if params and ("HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str):
+                    # MS Access ODBC driver doesn't support bound string parameters;
+                    # (errors: HYC00, SQLBindParameter, or sometimes 07002)
+                    # fall back to safely inlined parameters on a fresh cursor — the
+                    # original cursor's statement handle is invalid after HYC00 and
+                    # cannot be reused for another execute() call.
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute(_inline_params(sql, params))
+                    except (pyodbc.Error, ValueError) as inline_exc:
+                        logger.warning(
+                            "Inline parameter fallback failed (%s); re-raising original execute error (%s)",
+                            inline_exc,
+                            exc,
+                        )
+                        raise exc from inline_exc
+                else:
+                    raise
+            columns = [col[0] for col in cursor.description] if cursor.description else []
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 def resolve_data_file(filename: str) -> str:
@@ -395,6 +399,14 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
 
 
 def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
+    cache_key = (cdmc, channel)
+    cached = _TELEMETRY_CACHE.get(cache_key)
+    if cached is not None:
+        rows, ts = cached
+        if time.time() - ts < _TELEMETRY_CACHE_TTL:
+            logger.debug("_read_telemetry cache hit: cdmc=%r channel=%d", cdmc, channel)
+            return rows
+
     mdb_path = resolve_data_file(cdmc)
     with shadow_copy(mdb_path) as copied:
         rows = _query_vidata_by_channel(copied, channel)
@@ -405,6 +417,7 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
                 row["TIM"] = round(float(tim) / 3600, 6)
             except (TypeError, ValueError):
                 pass
+    _TELEMETRY_CACHE[cache_key] = (rows, time.time())
     return rows
 
 

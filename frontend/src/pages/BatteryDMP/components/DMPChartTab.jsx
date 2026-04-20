@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { fetchStats, fetchTelemetry } from '../../../api/dmpApi';
+import { fetchTelemetry } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 const statsKeys = ['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'IM_MAX', 'IM_MIN', 'IM_AVG'];
@@ -20,6 +20,34 @@ function safeNum(val) {
   if (val === null || val === undefined || val === '--' || val === '') return null;
   const n = Number(val);
   return Number.isFinite(n) ? n : null;
+}
+
+function computeStats(telemetry) {
+  const voltVals = telemetry.map((r) => safeNum(r.VOLT ?? r.volt ?? r.Volt)).filter((v) => v !== null);
+  const imVals = telemetry.map((r) => safeNum(r.Im ?? r.IM ?? r.im)).filter((v) => v !== null);
+  const imActive = imVals.filter((v) => v > 0);
+
+  const agg = (arr) => {
+    if (!arr.length) return { max: null, min: null, avg: null };
+    const sum = arr.reduce((a, b) => a + b, 0);
+    return {
+      max: Math.round(Math.max(...arr) * 10000) / 10000,
+      min: Math.round(Math.min(...arr) * 10000) / 10000,
+      avg: Math.round((sum / arr.length) * 10000) / 10000,
+    };
+  };
+
+  const v = agg(voltVals);
+  const i = agg(imVals);
+  const ia = agg(imActive);
+  return {
+    VOLT_MAX: v.max,
+    VOLT_MIN: v.min,
+    VOLT_AVG: v.avg,
+    IM_MAX: i.max,
+    IM_MIN: i.min,
+    IM_AVG: ia.avg,
+  };
 }
 
 export default function DMPChartTab({ stationId, selection }) {
@@ -57,6 +85,7 @@ export default function DMPChartTab({ stationId, selection }) {
     fetchTelemetry(stationId, selection.cdmc, selection.channel, abortController.signal)
       .then((rows) => {
         setTelemetry(rows);
+        setStats(computeStats(rows));
       })
       .catch((err) => {
         if (err.name === 'AbortError') return;
@@ -65,15 +94,6 @@ export default function DMPChartTab({ stationId, selection }) {
       .finally(() => {
         if (abortController.signal.aborted) return;
         setLoading(false);
-      });
-
-    fetchStats(stationId, selection.cdmc, selection.channel, abortController.signal)
-      .then((data) => {
-        setStats(data || {});
-      })
-      .catch((err) => {
-        if (err.name === 'AbortError') return;
-        setStats({});
       });
 
     return () => {

@@ -30,11 +30,16 @@ WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
+_ACCESS_QUERY_TIMEOUT: float = 25.0  # seconds to wait for a DB slot before returning 503
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
+_TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
 _SCHEMA_TABLE_WHITELIST = {"para_singl", "para_pub", "vidata"}
+# Cached result of para_pub schema check (None = not yet determined)
+_HAS_PARA_PUB_CDMC: bool | None = None
+_HAS_PARA_PUB_CDMC_LOCK = threading.Lock()
 
 
 def _get_local_ip() -> str:
@@ -197,6 +202,25 @@ def _inline_params(sql: str, params: tuple) -> str:
     return result
 
 
+@contextmanager
+def _acquire_query_lock():
+    """Acquire the Access DB semaphore with a timeout.
+
+    Raises HTTPException(503) instead of blocking indefinitely when the
+    database is saturated with concurrent requests.
+    """
+    acquired = _ACCESS_QUERY_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is busy with too many concurrent requests, please retry shortly",
+        )
+    try:
+        yield
+    finally:
+        _ACCESS_QUERY_LOCK.release()
+
+
 def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> list[dict]:
     """Run an Access query with bounded concurrency and short HY000 retries.
 
@@ -209,7 +233,7 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> 
     )
     for attempt_num in range(1, retries + 2):
         try:
-            with _ACCESS_QUERY_LOCK:
+            with _acquire_query_lock():
                 with pyodbc.connect(conn_str, timeout=10) as conn:
                     cursor = conn.cursor()
                     try:
@@ -439,12 +463,13 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
 
 def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
     cache_key = (cdmc, channel)
-    cached = _TELEMETRY_CACHE.get(cache_key)
-    if cached is not None:
-        rows, ts = cached
-        if time.time() - ts < _TELEMETRY_CACHE_TTL:
-            logger.debug("_read_telemetry cache hit: cdmc=%r channel=%d", cdmc, channel)
-            return rows
+    with _TELEMETRY_CACHE_LOCK:
+        cached = _TELEMETRY_CACHE.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _TELEMETRY_CACHE_TTL:
+                logger.debug("_read_telemetry cache hit: cdmc=%r channel=%d", cdmc, channel)
+                return rows
 
     mdb_path = resolve_data_file(cdmc)
     try:
@@ -462,7 +487,8 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
                 row["TIM"] = round(float(tim) / 3600, 6)
             except (TypeError, ValueError):
                 pass
-    _TELEMETRY_CACHE[cache_key] = (rows, time.time())
+    with _TELEMETRY_CACHE_LOCK:
+        _TELEMETRY_CACHE[cache_key] = (rows, time.time())
     return rows
 
 
@@ -476,7 +502,7 @@ def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:
         r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
         f"DBQ={mdb_path};"
     )
-    with _ACCESS_QUERY_LOCK:
+    with _acquire_query_lock():
         with pyodbc.connect(conn_str, timeout=10) as conn:
             cursor = conn.cursor()
             return {
@@ -493,25 +519,37 @@ def health_check():
 
 @app.get("/batches")
 def get_batches():
-    has_para_pub_cdmc = True
-    dmpdata = Path(get_dmpdata_path())
-    if dmpdata.exists():
-        try:
-            with shadow_copy(str(dmpdata)) as copied:
+    global _HAS_PARA_PUB_CDMC
+
+    # Determine schema once and cache for the lifetime of the process
+    with _HAS_PARA_PUB_CDMC_LOCK:
+        if _HAS_PARA_PUB_CDMC is None:
+            detected = True  # default: assume cdmc column exists
+            dmpdata = Path(get_dmpdata_path())
+            if dmpdata.exists():
                 try:
-                    para_pub_columns = _get_table_columns(copied, "para_pub")
-                    has_para_pub_cdmc = "cdmc" in para_pub_columns
+                    with shadow_copy(str(dmpdata)) as copied:
+                        try:
+                            para_pub_columns = _get_table_columns(copied, "para_pub")
+                            detected = "cdmc" in para_pub_columns
+                        except (pyodbc.Error, HTTPException) as exc:
+                            logger.debug("Could not inspect para_pub schema, using query fallback: %s", exc)
                 except (pyodbc.Error, HTTPException) as exc:
-                    logger.debug("Could not inspect para_pub schema for get_batches, using query fallback: %s", exc)
-        except (pyodbc.Error, HTTPException) as exc:
-            logger.debug("Could not create shadow copy for get_batches schema inspection: %s", exc)
+                    logger.debug("Could not create shadow copy for schema inspection: %s", exc)
+            _HAS_PARA_PUB_CDMC = detected
+
+    has_para_pub_cdmc = _HAS_PARA_PUB_CDMC
+
     try:
         if has_para_pub_cdmc:
             rows = _read_dmpdata("SELECT id, cdmc, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
         else:
             rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
     except pyodbc.Error:
-        rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+        try:
+            rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+        except pyodbc.Error as exc:
+            raise HTTPException(status_code=500, detail=f"Database query failed: {exc}") from exc
     for row in rows:
         fdrq = row.get("fdrq")
         if fdrq is None:

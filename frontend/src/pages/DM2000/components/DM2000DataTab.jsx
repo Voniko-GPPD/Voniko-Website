@@ -8,7 +8,7 @@ function safeNum(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-export default function DM2000DataTab({ stationId, selection, selectedBaty, onBatyChange }) {
+export default function DM2000DataTab({ stationId, selection }) {
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [batteryLoading, setBatteryLoading] = useState(false);
@@ -16,6 +16,11 @@ export default function DM2000DataTab({ stationId, selection, selectedBaty, onBa
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState([]);
   const [batteries, setBatteries] = useState([]);
+  const [selectedBaty, setSelectedBaty] = useState(0);
+
+  useEffect(() => {
+    setSelectedBaty(0);
+  }, [selection?.archname]);
 
   useEffect(() => {
     let active = true;
@@ -138,7 +143,7 @@ export default function DM2000DataTab({ stationId, selection, selectedBaty, onBa
           style={{ width: 220 }}
           value={selectedBaty}
           options={batteryOptions}
-          onChange={onBatyChange}
+          onChange={setSelectedBaty}
           loading={batteryLoading}
         />
         <Input.Search

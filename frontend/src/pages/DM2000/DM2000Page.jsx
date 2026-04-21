@@ -18,7 +18,6 @@ export default function DM2000Page() {
   const [stationError, setStationError] = useState('');
   const [selection, setSelection] = useState(null);
   const [activeTab, setActiveTab] = useState(SEARCH_TAB_KEY);
-  const [selectedBaty, setSelectedBaty] = useState(0);
 
   useEffect(() => {
     let mounted = true;
@@ -45,10 +44,6 @@ export default function DM2000Page() {
   useEffect(() => {
     setSelection(null);
   }, [selectedStationId]);
-
-  useEffect(() => {
-    setSelectedBaty(0);
-  }, [selection?.archname]);
 
   const handleSelectArchive = (record) => {
     setSelection(record);
@@ -126,8 +121,6 @@ export default function DM2000Page() {
               <DM2000CurveTab
                 stationId={selectedStationId}
                 selection={selection}
-                selectedBaty={selectedBaty}
-                onBatyChange={setSelectedBaty}
               />
             ),
           },
@@ -138,8 +131,6 @@ export default function DM2000Page() {
               <DM2000DataTab
                 stationId={selectedStationId}
                 selection={selection}
-                selectedBaty={selectedBaty}
-                onBatyChange={setSelectedBaty}
               />
             ),
           },
@@ -150,8 +141,6 @@ export default function DM2000Page() {
               <DM2000DailyVoltTab
                 stationId={selectedStationId}
                 selection={selection}
-                selectedBaty={selectedBaty}
-                onBatyChange={setSelectedBaty}
               />
             ),
           },

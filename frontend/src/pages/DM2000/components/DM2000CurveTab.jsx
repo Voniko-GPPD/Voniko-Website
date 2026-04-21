@@ -59,7 +59,7 @@ export default function DM2000CurveTab({ stationId, selection, selectedBaty, onB
         if (!active) return;
         setBatteries(
           (rows || [])
-            .map((row) => Number(row.baty ?? row.BATY ?? row.Baty))
+            .map((row) => Number(row?.baty ?? row?.BATY ?? row?.Baty ?? row))
             .filter((value) => Number.isFinite(value) && value > 0),
         );
       } catch (err) {

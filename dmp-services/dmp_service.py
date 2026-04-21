@@ -37,6 +37,13 @@ _ACCESS_QUERY_TIMEOUT: float = 60.0  # seconds to wait for a DB slot before retu
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
+_DM2000_CURVE_CACHE: dict[tuple, tuple[list, float]] = {}
+_DM2000_CURVE_CACHE_LOCK = threading.Lock()
+_DM2000_CURVE_CACHE_TTL: float = 300.0  # seconds
+_DM2000_ARCHIVES_CACHE: dict[str, tuple[list, float]] = {}
+_DM2000_ARCHIVES_CACHE_LOCK = threading.Lock()
+_DM2000_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
+_DM2000_CACHE_MAX_ENTRIES: int = 100
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
 _SCHEMA_TABLE_WHITELIST = {
@@ -579,13 +586,29 @@ def _is_valid_template_name(name: str) -> bool:
 
 
 def _validate_dm2000_archname(archname: str) -> None:
-    if not re.match(r'^[A-Za-z0-9_-]+$', archname):
+    if not re.match(r'^[A-Za-z0-9_.\-]+$', archname):
         raise HTTPException(status_code=400, detail="Invalid archname")
 
 
+def _cache_set_with_cap(cache: dict, key, value) -> None:
+    cache[key] = value
+    if len(cache) <= _DM2000_CACHE_MAX_ENTRIES:
+        return
+    oldest_key = min(cache.items(), key=lambda item: item[1][1])[0]
+    cache.pop(oldest_key, None)
+
+
 def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
+    cache_key = (archname, baty)
+    with _DM2000_CURVE_CACHE_LOCK:
+        cached = _DM2000_CURVE_CACHE.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
+                return rows
+
     try:
-        return _read_dm2000_ls(
+        rows = _read_dm2000_ls(
             "SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC",
             (archname, baty),
         )
@@ -608,16 +631,28 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
                     curve.append({"TIM": t, "VOLT": v})
             except (TypeError, ValueError):
                 continue
-        return curve
+        rows = curve
+
+    with _DM2000_CURVE_CACHE_LOCK:
+        _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (rows, time.time()))
+    return rows
 
 
 def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
+    cache_key = ("avg", archname)
+    with _DM2000_CURVE_CACHE_LOCK:
+        cached = _DM2000_CURVE_CACHE.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
+                return rows
+
     try:
         rows = _read_dm2000_ls(
             "SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC",
             (archname,),
         )
-        return _compute_average_curve(rows)
+        avg_rows = _compute_average_curve(rows)
     except pyodbc.Error:
         rows = _read_dm2000_ls(
             "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
@@ -629,7 +664,11 @@ def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
             for idx in range(1, 10):
                 tim = row.get(f"time{idx}")
                 flattened.append({"TIM": tim, "VOLT": volt})
-        return _compute_average_curve(flattened)
+        avg_rows = _compute_average_curve(flattened)
+
+    with _DM2000_CURVE_CACHE_LOCK:
+        _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (avg_rows, time.time()))
+    return avg_rows
 
 
 def _parse_iso_date_param(value: str | None, field_name: str) -> date | None:
@@ -913,7 +952,28 @@ def get_dm2000_archives(
     serial_filter: str = None,
     limit: int = 500,
 ):
-    rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs")
+    table_names_to_try = ["ls_jb_cs", "ls_pam2", "ls_cs", "ls_jbcs", "ls_archive"]
+    rows = None
+    cache_key = "all_archives"
+    with _DM2000_ARCHIVES_CACHE_LOCK:
+        cached = _DM2000_ARCHIVES_CACHE.get(cache_key)
+        if cached is not None:
+            cached_rows, ts = cached
+            if time.time() - ts < _DM2000_ARCHIVES_CACHE_TTL:
+                rows = cached_rows
+
+    if rows is None:
+        for table_name in table_names_to_try:
+            try:
+                rows = _read_dm2000_ls(f"SELECT * FROM {table_name}")
+                break
+            except (pyodbc.Error, HTTPException):
+                continue
+        if rows is None:
+            return {"archives": [], "total": 0, "warning": "Archive table not found in dmdata_ls.mdb"}
+        with _DM2000_ARCHIVES_CACHE_LOCK:
+            _cache_set_with_cap(_DM2000_ARCHIVES_CACHE, cache_key, (rows, time.time()))
+
     date_from_parsed = _parse_iso_date_param(date_from, "date_from")
     date_to_parsed = _parse_iso_date_param(date_to, "date_to")
 
@@ -1006,9 +1066,12 @@ def get_dm2000_average_curve(archname: str):
 
 
 @app.get("/dm2000/archives/{archname}/stats")
-def get_dm2000_stats(archname: str, baty: int):
+def get_dm2000_stats(archname: str, baty: int = 0):
     _validate_dm2000_archname(archname)
-    rows = _read_dm2000_curve_rows(archname, baty)
+    if baty == 0:
+        rows = _read_dm2000_average_curve_rows(archname)
+    else:
+        rows = _read_dm2000_curve_rows(archname, baty)
     return compute_dm2000_stats(rows)
 
 

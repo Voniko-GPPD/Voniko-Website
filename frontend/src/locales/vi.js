@@ -513,7 +513,7 @@ export default {
   dmpUnknownPattern: 'Kịch bản không xác định',
 
   dm2000Title: 'Tra cứu lịch sử DM2000',
-  dm2000CurveTab: 'Đường cong',
+  dm2000CurveTab: 'Biểu đồ',
   dm2000DataTab: 'Dữ liệu',
   dm2000DailyVoltTab: 'Điện áp hàng ngày',
   dm2000ExportTab: 'Xuất báo cáo',

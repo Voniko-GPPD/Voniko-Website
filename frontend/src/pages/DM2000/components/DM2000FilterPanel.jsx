@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, Button, DatePicker, Form, Input, Space, Table, Typography } from 'antd';
+import { Alert, Button, Col, DatePicker, Form, Input, Row, Space, Table, Typography } from 'antd';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { fetchDM2000Archives } from '../../../api/dm2000Api';
@@ -67,24 +67,38 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Form form={form} layout="vertical" size="small">
-        <Form.Item name="date_from" label={t('dm2000DateFrom')} style={{ marginBottom: 8 }}>
-          <DatePicker style={{ width: '100%' }} />
-        </Form.Item>
-        <Form.Item name="date_to" label={t('dm2000DateTo')} style={{ marginBottom: 8 }}>
-          <DatePicker style={{ width: '100%' }} />
-        </Form.Item>
-        <Form.Item name="type_filter" label={t('dm2000TypeFilter')} style={{ marginBottom: 8 }}>
-          <Input allowClear />
-        </Form.Item>
-        <Form.Item name="name_filter" label={t('dm2000NameFilter')} style={{ marginBottom: 8 }}>
-          <Input allowClear />
-        </Form.Item>
-        <Form.Item name="mfr_filter" label={t('dm2000MfrFilter')} style={{ marginBottom: 8 }}>
-          <Input allowClear />
-        </Form.Item>
-        <Form.Item name="serial_filter" label={t('dm2000SerialFilter')} style={{ marginBottom: 12 }}>
-          <Input allowClear />
-        </Form.Item>
+        <Row gutter={[16, 0]}>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="date_from" label={t('dm2000DateFrom')} style={{ marginBottom: 8 }}>
+              <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="date_to" label={t('dm2000DateTo')} style={{ marginBottom: 8 }}>
+              <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="type_filter" label={t('dm2000TypeFilter')} style={{ marginBottom: 8 }}>
+              <Input allowClear />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="name_filter" label={t('dm2000NameFilter')} style={{ marginBottom: 8 }}>
+              <Input allowClear />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="mfr_filter" label={t('dm2000MfrFilter')} style={{ marginBottom: 8 }}>
+              <Input allowClear />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
+            <Form.Item name="serial_filter" label={t('dm2000SerialFilter')} style={{ marginBottom: 8 }}>
+              <Input allowClear />
+            </Form.Item>
+          </Col>
+        </Row>
         <Space>
           <Button type="primary" icon={<SearchOutlined />} onClick={onSearch} disabled={!stationId} loading={loading}>
             {t('dm2000Search')}
@@ -107,10 +121,13 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
             dataSource={archives}
             loading={loading}
             pagination={{ pageSize: 50 }}
-            scroll={{ x: 800, y: 400 }}
+            scroll={{ x: 'max-content', y: 500 }}
             onRow={(record) => ({
               onClick: () => onSelect?.(record),
-              style: record.archname === selectedArchname ? { backgroundColor: '#e6f4ff' } : undefined,
+              style: {
+                cursor: 'pointer',
+                ...(record.archname === selectedArchname ? { backgroundColor: '#e6f4ff' } : {}),
+              },
             })}
           />
         </>

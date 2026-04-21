@@ -513,7 +513,7 @@ export default {
   dmpUnknownPattern: 'Unknown Pattern',
 
   dm2000Title: 'DM2000 Historic Query',
-  dm2000CurveTab: 'Curve',
+  dm2000CurveTab: 'Chart',
   dm2000DataTab: 'Data Table',
   dm2000DailyVoltTab: 'Daily Voltage',
   dm2000ExportTab: 'Export Report',

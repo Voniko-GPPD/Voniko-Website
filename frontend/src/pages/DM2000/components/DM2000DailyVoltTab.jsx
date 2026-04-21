@@ -9,11 +9,12 @@ function safeNum(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-export default function DM2000DailyVoltTab({ stationId, selection, selectedBaty, onBatyChange }) {
+export default function DM2000DailyVoltTab({ stationId, selection }) {
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [rows, setRows] = useState([]);
+  const [selectedBaty, setSelectedBaty] = useState(1);
   const lastArchRef = useRef(null);
 
   useEffect(() => {
@@ -23,9 +24,9 @@ export default function DM2000DailyVoltTab({ stationId, selection, selectedBaty,
     }
     if (lastArchRef.current !== selection.archname) {
       lastArchRef.current = selection.archname;
-      if (selectedBaty === 0) onBatyChange?.(1);
+      setSelectedBaty(1);
     }
-  }, [selection?.archname, selectedBaty, onBatyChange]);
+  }, [selection?.archname]);
 
   useEffect(() => {
     let active = true;
@@ -80,7 +81,7 @@ export default function DM2000DailyVoltTab({ stationId, selection, selectedBaty,
         style={{ width: 220 }}
         value={selectedBaty || 1}
         options={batteryOptions}
-        onChange={onBatyChange}
+        onChange={setSelectedBaty}
       />
 
       {loading ? (

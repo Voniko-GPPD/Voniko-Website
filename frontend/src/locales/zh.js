@@ -513,7 +513,7 @@ export default {
   dmpUnknownPattern: '未知模式',
 
   dm2000Title: 'DM2000历史查询',
-  dm2000CurveTab: '曲线',
+  dm2000CurveTab: '图表',
   dm2000DataTab: '数据表',
   dm2000DailyVoltTab: '每日电压',
   dm2000ExportTab: '导出报告',

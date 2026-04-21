@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Empty, Select, Space, Spin, Table } from 'antd';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { fetchDM2000DailyVoltage } from '../../../api/dm2000Api';
@@ -14,10 +14,17 @@ export default function DM2000DailyVoltTab({ stationId, selection, selectedBaty,
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [rows, setRows] = useState([]);
+  const lastArchRef = useRef(null);
 
   useEffect(() => {
-    if (!selection?.archname) return;
-    if (selectedBaty === 0) onBatyChange?.(1);
+    if (!selection?.archname) {
+      lastArchRef.current = null;
+      return;
+    }
+    if (lastArchRef.current !== selection.archname) {
+      lastArchRef.current = selection.archname;
+      if (selectedBaty === 0) onBatyChange?.(1);
+    }
   }, [selection?.archname, selectedBaty, onBatyChange]);
 
   useEffect(() => {

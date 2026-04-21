@@ -20,6 +20,12 @@ import {
 import { useLang } from '../../../contexts/LangContext';
 
 const thresholds = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
+const statItems = [
+  { key: 'VOLT_MAX', title: 'VOLT MAX' },
+  { key: 'VOLT_MIN', title: 'VOLT MIN' },
+  { key: 'VOLT_AVG', title: 'VOLT AVG' },
+  { key: 'DURATION_MIN', title: 'DURATION MIN' },
+];
 
 function safeNum(value) {
   const num = Number(value);
@@ -149,10 +155,10 @@ export default function DM2000CurveTab({ stationId, selection, selectedBaty, onB
       </Row>
 
       <Row gutter={[12, 12]}>
-        {['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'DURATION_MIN'].map((key) => (
-          <Col xs={24} sm={12} md={6} key={key}>
+        {statItems.map((item) => (
+          <Col xs={24} sm={12} md={6} key={item.key}>
             <Card size="small" loading={statsLoading}>
-              <Statistic title={key} value={stats[key]} precision={4} />
+              <Statistic title={item.title} value={stats[item.key]} precision={4} />
             </Card>
           </Col>
         ))}

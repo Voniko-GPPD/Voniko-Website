@@ -1173,22 +1173,22 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         curve_data = _read_dm2000_curve_rows(payload.archname, payload.baty)
         baty_label = str(payload.baty)
 
-    def _ov(db_val, override_val):
+    def _apply_override(db_val, override_val):
         return override_val if override_val is not None and str(override_val).strip() != "" else db_val
 
     stats = compute_dm2000_stats(curve_data)
     context = {
-        "ARCHNAME": _ov(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
-        "START_DATE": _ov(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),
-        "BATTERY_TYPE": _ov(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type),
-        "BATCH_NAME": _ov(_dm2000_get_value(archive, "name", "dcmc"), payload.override_batch_name),
-        "DISCHARGE_CONDITION": _ov(_dm2000_get_value(archive, "fdfs"), payload.override_discharge_condition),
+        "ARCHNAME": _apply_override(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
+        "START_DATE": _apply_override(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),
+        "BATTERY_TYPE": _apply_override(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type),
+        "BATCH_NAME": _apply_override(_dm2000_get_value(archive, "name", "dcmc"), payload.override_batch_name),
+        "DISCHARGE_CONDITION": _apply_override(_dm2000_get_value(archive, "fdfs"), payload.override_discharge_condition),
         "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
         "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "yfws"),
-        "MANUFACTURER": _ov(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
-        "MADE_DATE": _ov(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
-        "SERIAL_NO": _ov(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
-        "REMARKS": _ov(_dm2000_get_value(archive, "remarks", "bz"), payload.override_remarks),
+        "MANUFACTURER": _apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
+        "MADE_DATE": _apply_override(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
+        "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
+        "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "bz"), payload.override_remarks),
         "BATTERY_NO": baty_label,
         **stats,
         "HISTORY_DATA": curve_data,

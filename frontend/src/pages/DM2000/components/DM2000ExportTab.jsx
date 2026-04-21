@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Card, Checkbox, Col, Collapse, Descriptions, Empty,
-  Form, Input, Radio, Row, Space, Spin, Table, Typography, notification,
+  Alert, Button, Card, Checkbox, Col, Collapse, Empty,
+  Form, Input, Radio, Row, Space, Spin, Typography, notification,
 } from 'antd';
 import { EyeOutlined } from '@ant-design/icons';
 import {
@@ -11,6 +11,8 @@ import {
 import { useLang } from '../../../contexts/LangContext';
 
 const PREVIEW_THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
+// Limit preview time-at-voltage fetch to avoid too many parallel requests
+const MAX_TIME_AT_VOLTAGE_PREVIEW = 3;
 
 function safeNum(value) {
   const n = Number(value);
@@ -124,7 +126,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
           ),
         ),
         Promise.all(
-          batysToPreview.slice(0, 3).map((baty) =>
+          batysToPreview.slice(0, MAX_TIME_AT_VOLTAGE_PREVIEW).map((baty) =>
             fetchDM2000TimeAtVoltage(stationId, selection.archname, baty)
               .then((rows) => ({ baty, rows: rows || [] }))
               .catch(() => ({ baty, rows: [] })),
@@ -316,12 +318,14 @@ function ReportPreview({ archiveFields, statsResults, timeAtVoltResults, preview
 
   const getTimeAtVolt = (baty, threshold) => {
     const rows = timeAtVoltMap[baty] || [];
+    // Rows from archname-based schema have sj (voltage) + minutes (duration) columns
+    // Rows from cdid-based schema have tim_vot{baty} aliased as minutes
     const row = rows.find((r) => {
-      const sj = safeNum(r.sj || r.SJ);
+      const sj = safeNum(r.sj ?? r.SJ);
       return sj != null && Math.abs(sj - threshold) < 0.001;
     });
     if (!row) return '-';
-    const val = safeNum(row.minutes || row.tim_vot1 || Object.values(row).find((v) => safeNum(v) != null));
+    const val = safeNum(row.minutes ?? row.MINUTES);
     return val != null ? val.toFixed(1) : '-';
   };
 

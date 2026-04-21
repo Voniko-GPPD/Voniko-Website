@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Col, Empty, Row, Select, Spin, Statistic, Switch, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, Row, Select, Spin, Statistic, Switch, Typography, notification } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import {
   Brush,
@@ -41,9 +41,15 @@ function safeNum(value) {
 
 function downloadChartAsPng(containerRef, filename) {
   const container = containerRef.current;
-  if (!container) return;
+  if (!container) {
+    notification.warning({ message: 'Chart container not found' });
+    return;
+  }
   const svg = container.querySelector('svg');
-  if (!svg) return;
+  if (!svg) {
+    notification.warning({ message: 'Chart SVG not available' });
+    return;
+  }
 
   const { width, height } = svg.getBoundingClientRect();
   const svgData = new XMLSerializer().serializeToString(svg);

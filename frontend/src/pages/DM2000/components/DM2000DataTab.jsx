@@ -64,6 +64,7 @@ export default function DM2000DataTab({ stationId, selection }) {
     }
 
     if (selectedBaty === 0 && batteryLoading) {
+      setLoading(true);
       return () => { active = false; };
     }
 

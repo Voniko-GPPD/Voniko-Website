@@ -1,9 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Button, Card, Checkbox, Col, Collapse, Empty,
+  Alert, Button, Card, Checkbox, Col, Empty,
   Form, Input, Radio, Row, Space, Spin, Typography, notification,
 } from 'antd';
-import { EyeOutlined } from '@ant-design/icons';
 import {
   downloadDM2000Report, fetchDM2000Batteries, fetchDM2000Stats,
   fetchDM2000Templates, fetchDM2000TimeAtVoltage,
@@ -11,8 +10,6 @@ import {
 import { useLang } from '../../../contexts/LangContext';
 
 const PREVIEW_THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
-// Limit preview time-at-voltage fetch to avoid too many parallel requests
-const MAX_TIME_AT_VOLTAGE_PREVIEW = 3;
 
 function safeNum(value) {
   const n = Number(value);
@@ -28,14 +25,18 @@ export default function DM2000ExportTab({ stationId, selection }) {
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState('');
   const [templates, setTemplates] = useState([]);
   const [templateName, setTemplateName] = useState('');
   const [exportBatys, setExportBatys] = useState([0]);
   const [batteries, setBatteries] = useState([]);
   const [archiveFields, setArchiveFields] = useState({});
-  const [previewData, setPreviewData] = useState(null);
+  const [previewStats, setPreviewStats] = useState({});
+  const [previewTimeAtVolt, setPreviewTimeAtVolt] = useState({});
+  // Tracks batteries that already have an in-flight or completed fetch so we
+  // don't re-fetch on every toggle and don't depend on previewStats/
+  // previewTimeAtVolt inside the fetch effect.
+  const requestedBatysRef = useRef(new Set());
 
   useEffect(() => {
     let active = true;
@@ -73,7 +74,9 @@ export default function DM2000ExportTab({ stationId, selection }) {
 
   useEffect(() => {
     setExportBatys([0]);
-    setPreviewData(null);
+    setPreviewStats({});
+    setPreviewTimeAtVolt({});
+    requestedBatysRef.current = new Set();
     if (selection) {
       setArchiveFields({
         archname: selection.archname || '',
@@ -109,37 +112,41 @@ export default function DM2000ExportTab({ stationId, selection }) {
     ...batteries.map((b) => ({ label: `${b}#`, value: b })),
   ], [batteries, t]);
 
-  const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
+  const previewBatys = useMemo(
+    () => exportBatys.filter((b) => b > 0),
+    [exportBatys],
+  );
 
-  const handleLoadPreview = async () => {
-    if (!stationId || !selection?.archname) return;
-    setPreviewLoading(true);
-    setPreviewData(null);
-    try {
-      const batysToPreview = exportBatys.filter((b) => b > 0);
-      const [statsResults, timeAtVoltResults] = await Promise.all([
-        Promise.all(
-          batysToPreview.map((baty) =>
-            fetchDM2000Stats(stationId, selection.archname, baty)
-              .then((s) => ({ baty, stats: s || {} }))
-              .catch(() => ({ baty, stats: {} })),
-          ),
-        ),
-        Promise.all(
-          batysToPreview.slice(0, MAX_TIME_AT_VOLTAGE_PREVIEW).map((baty) =>
-            fetchDM2000TimeAtVoltage(stationId, selection.archname, baty)
-              .then((rows) => ({ baty, rows: rows || [] }))
-              .catch(() => ({ baty, rows: [] })),
-          ),
-        ),
-      ]);
-      setPreviewData({ statsResults, timeAtVoltResults });
-    } catch (err) {
-      notification.warning({ message: err.message || 'Failed to load preview data' });
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
+  // Fetch stats / time-at-voltage for any newly selected battery so the preview
+  // form fills in incrementally as the user toggles checkboxes. Already-loaded
+  // batteries are tracked in a ref to avoid re-fetching on each toggle.
+  useEffect(() => {
+    if (!stationId || !selection?.archname || previewBatys.length === 0) return undefined;
+    const missing = previewBatys.filter((b) => !requestedBatysRef.current.has(b));
+    if (missing.length === 0) return undefined;
+    missing.forEach((b) => requestedBatysRef.current.add(b));
+
+    let active = true;
+    Promise.all([
+      Promise.all(missing.map((baty) =>
+        fetchDM2000Stats(stationId, selection.archname, baty)
+          .then((s) => [baty, s || {}])
+          .catch(() => [baty, {}]),
+      )),
+      Promise.all(missing.map((baty) =>
+        fetchDM2000TimeAtVoltage(stationId, selection.archname, baty)
+          .then((rows) => [baty, rows || []])
+          .catch(() => [baty, []]),
+      )),
+    ]).then(([statsEntries, timeEntries]) => {
+      if (!active) return;
+      setPreviewStats((prev) => ({ ...prev, ...Object.fromEntries(statsEntries) }));
+      setPreviewTimeAtVolt((prev) => ({ ...prev, ...Object.fromEntries(timeEntries) }));
+    });
+    return () => { active = false; };
+  }, [stationId, selection?.archname, previewBatys]);
+
+  const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
 
   const handleDownload = async () => {
     if (!stationId || !selection?.archname || !templateName) return;
@@ -178,8 +185,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
   if (loading) {
     return <Spin />;
   }
-
-  const previewBatys = previewData ? previewData.statsResults.map((r) => r.baty) : [];
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -254,39 +259,21 @@ export default function DM2000ExportTab({ stationId, selection }) {
         </Row>
       </Card>
 
-      <Collapse
-        size="small"
-        items={[{
-          key: 'preview',
-          label: t('dm2000ReportPreviewTitle'),
-          extra: (
-            <Button
-              size="small"
-              icon={<EyeOutlined />}
-              loading={previewLoading}
-              onClick={(e) => { e.stopPropagation(); handleLoadPreview(); }}
-              disabled={exportBatys.filter((b) => b > 0).length === 0}
-            >
-              {t('dm2000PreviewReport')}
-            </Button>
-          ),
-          children: previewLoading ? (
-            <Spin />
-          ) : previewData ? (
-            <ReportPreview
-              archiveFields={archiveFields}
-              statsResults={previewData.statsResults}
-              timeAtVoltResults={previewData.timeAtVoltResults}
-              previewBatys={previewBatys}
-              t={t}
-            />
-          ) : (
-            <Typography.Text type="secondary">
-              {t('dm2000PreviewReport')}
-            </Typography.Text>
-          ),
-        }]}
-      />
+      <Card size="small" title={t('dm2000ReportPreviewTitle')}>
+        {previewBatys.length === 0 ? (
+          <Typography.Text type="secondary">
+            {t('dm2000SelectAtLeastOne')}
+          </Typography.Text>
+        ) : (
+          <ReportPreview
+            archiveFields={archiveFields}
+            statsMap={previewStats}
+            timeAtVoltMap={previewTimeAtVolt}
+            previewBatys={previewBatys}
+            t={t}
+          />
+        )}
+      </Card>
 
       <Button
         type="primary"
@@ -300,7 +287,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
   );
 }
 
-function ReportPreview({ archiveFields, statsResults, timeAtVoltResults, previewBatys, t }) {
+function ReportPreview({ archiveFields, statsMap, timeAtVoltMap, previewBatys, t }) {
   const cellStyle = {
     border: '1px solid #d9d9d9',
     padding: '3px 6px',
@@ -310,14 +297,9 @@ function ReportPreview({ archiveFields, statsResults, timeAtVoltResults, preview
   const headerCellStyle = { ...cellStyle, background: '#fafafa', fontWeight: 600 };
   const labelStyle = { ...cellStyle, background: '#f5f5f5', color: '#666' };
 
-  const statsMap = Object.fromEntries(statsResults.map(({ baty, stats }) => [baty, stats]));
-
-  const timeAtVoltMap = Object.fromEntries(
-    timeAtVoltResults.map(({ baty, rows }) => [baty, rows]),
-  );
-
   const getTimeAtVolt = (baty, threshold) => {
-    const rows = timeAtVoltMap[baty] || [];
+    const rows = timeAtVoltMap[baty];
+    if (!rows) return '…';
     // Rows from archname-based schema have sj (voltage) + minutes (duration) columns
     // Rows from cdid-based schema have tim_vot{baty} aliased as minutes
     const row = rows.find((r) => {
@@ -327,6 +309,11 @@ function ReportPreview({ archiveFields, statsResults, timeAtVoltResults, preview
     if (!row) return '-';
     const val = safeNum(row.minutes ?? row.MINUTES);
     return val != null ? val.toFixed(1) : '-';
+  };
+
+  const fmtCell = (baty, key) => {
+    if (!(baty in statsMap)) return '…';
+    return fmt(statsMap[baty]?.[key]);
   };
 
   return (
@@ -369,36 +356,35 @@ function ReportPreview({ archiveFields, statsResults, timeAtVoltResults, preview
             return (
               <tr key={key}>
                 <td style={labelStyle}>{label}</td>
-                {previewBatys.map((b) => <td key={b} style={cellStyle}>{fmt(statsMap[b]?.[key])}</td>)}
+                {previewBatys.map((b) => <td key={b} style={cellStyle}>{fmtCell(b, key)}</td>)}
                 <td style={cellStyle}>{vals.length > 0 ? Math.max(...vals).toFixed(4) : '-'}</td>
                 <td style={cellStyle}>{vals.length > 0 ? Math.min(...vals).toFixed(4) : '-'}</td>
                 <td style={cellStyle}>{vals.length > 0 ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(4) : '-'}</td>
               </tr>
             );
           })}
-          {timeAtVoltResults.length > 0 && (
-            <>
-              <tr>
-                <td colSpan={previewBatys.length + 3} style={{ ...cellStyle, fontStyle: 'italic', background: '#f0f5ff' }}>
-                  The Duration of Series Designated Voltage (Unit: hour)
-                </td>
+          <tr>
+            <td colSpan={previewBatys.length + 3} style={{ ...cellStyle, fontStyle: 'italic', background: '#f0f5ff' }}>
+              The Duration of Series Designated Voltage (Unit: hour)
+            </td>
+          </tr>
+          {PREVIEW_THRESHOLDS.map((threshold) => {
+            const cellVals = previewBatys.map((b) => getTimeAtVolt(b, threshold));
+            const numericVals = cellVals
+              .map((v) => safeNum(v))
+              .filter((v) => v != null);
+            return (
+              <tr key={threshold}>
+                <td style={labelStyle}>{threshold.toFixed(3)}</td>
+                {previewBatys.map((b, idx) => (
+                  <td key={b} style={cellStyle}>{cellVals[idx]}</td>
+                ))}
+                <td style={cellStyle}>{numericVals.length > 0 ? Math.max(...numericVals).toFixed(1) : '-'}</td>
+                <td style={cellStyle}>{numericVals.length > 0 ? Math.min(...numericVals).toFixed(1) : '-'}</td>
+                <td style={cellStyle}>{numericVals.length > 0 ? (numericVals.reduce((s, v) => s + v, 0) / numericVals.length).toFixed(1) : '-'}</td>
               </tr>
-              {PREVIEW_THRESHOLDS.map((threshold) => (
-                <tr key={threshold}>
-                  <td style={labelStyle}>{threshold.toFixed(3)}</td>
-                  {timeAtVoltResults.slice(0, previewBatys.length).map(({ baty }) => (
-                    <td key={baty} style={cellStyle}>{getTimeAtVolt(baty, threshold)}</td>
-                  ))}
-                  {Array.from({ length: Math.max(0, previewBatys.length - timeAtVoltResults.length) }).map((_, i) => (
-                    <td key={`empty-${i}`} style={cellStyle}>-</td>
-                  ))}
-                  <td style={cellStyle}>-</td>
-                  <td style={cellStyle}>-</td>
-                  <td style={cellStyle}>-</td>
-                </tr>
-              ))}
-            </>
-          )}
+            );
+          })}
           <tr>
             <td style={labelStyle}>{t('dm2000Remarks')}</td>
             <td colSpan={previewBatys.length + 2} style={cellStyle}>{archiveFields.remarks || '-'}</td>

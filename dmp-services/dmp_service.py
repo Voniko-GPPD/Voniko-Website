@@ -1043,6 +1043,38 @@ def get_dm2000_archives(
     return {"archives": filtered, "total": len(filtered)}
 
 
+def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
+    """Fallback: derive active battery channels from ls_vtime time1..time9 columns.
+
+    For cdid-based ls_vtime, each row holds one voltage threshold with elapsed
+    time per battery in time{n}. A battery channel is considered active when at
+    least one of its time{n} values is non-null/non-empty.
+    """
+    select_cols = ", ".join(f"time{i}" for i in range(1, 10))
+    try:
+        rows = _read_dm2000_ls(
+            f"SELECT {select_cols} FROM ls_vtime WHERE cdid = ?",
+            (archname,),
+        )
+    except pyodbc.Error:
+        return []
+
+    active: set[int] = set()
+    for row in rows:
+        for i in range(1, 10):
+            value = row.get(f"time{i}")
+            if value in (None, "", "--"):
+                continue
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(num):
+                continue
+            active.add(i)
+    return [{"baty": i} for i in sorted(active)]
+
+
 @app.get("/dm2000/archives/{archname}/batteries")
 def get_dm2000_batteries(archname: str):
     _validate_dm2000_archname(archname)
@@ -1052,13 +1084,30 @@ def get_dm2000_batteries(archname: str):
             (archname,),
         )
     except pyodbc.Error:
-        rows = _read_dm2000_ls(
-            "SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC",
-            (archname,),
-        )
+        try:
+            rows = _read_dm2000_ls(
+                "SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            rows = []
     for row in rows:
         if "baty" not in row:
             row["baty"] = _dm2000_get_value(row, "baty", "gpp")
+
+    # If ls_pam2 has no usable rows (e.g. discharge in progress, or pam2 not
+    # populated for this cdid), derive the battery list from ls_vtime so the
+    # dropdown still shows each individual pin instead of being empty.
+    def _baty_int(value):
+        try:
+            num = int(float(value))
+            return num if num > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    has_battery = any(_baty_int(row.get("baty")) is not None for row in rows)
+    if not has_battery:
+        rows = _derive_dm2000_batteries_from_vtime(archname)
     return {"batteries": rows, "archname": archname}
 
 

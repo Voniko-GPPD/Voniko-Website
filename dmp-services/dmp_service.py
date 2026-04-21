@@ -1053,7 +1053,7 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
     time per battery in time{n}. A battery channel is considered active when at
     least one of its time{n} values is non-null/non-empty.
 
-    For archname-based ls_vtime (which uses a baty column instead of time{n}),
+    For archname-based ls_vtime (which uses a baty column instead of time1..time9),
     falls back to querying DISTINCT baty values directly.
     """
     select_cols = ", ".join(f"time{i}" for i in range(1, 10))

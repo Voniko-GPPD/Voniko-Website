@@ -101,6 +101,7 @@ export default function DM2000Page() {
             <Tabs
               activeKey={activeTab}
               onChange={setActiveTab}
+              destroyInactiveTabPane
               items={[
                 {
                   key: 'curve',

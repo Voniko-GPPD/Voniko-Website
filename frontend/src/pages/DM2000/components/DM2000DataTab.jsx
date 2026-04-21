@@ -30,7 +30,11 @@ export default function DM2000DataTab({ stationId, selection, selectedBaty, onBa
       try {
         const result = await fetchDM2000Batteries(stationId, selection.archname);
         if (!active) return;
-        setBatteries((result || []).map((value) => Number(value)).filter((value) => Number.isFinite(value)));
+        setBatteries(
+          (result || [])
+            .map((row) => Number(row?.baty ?? row?.BATY ?? row?.Baty ?? row))
+            .filter((value) => Number.isFinite(value) && value > 0),
+        );
       } catch (err) {
         if (!active) return;
         setError(err.message || 'Failed to load batteries');

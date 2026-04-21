@@ -551,4 +551,10 @@ export default {
   dm2000ClearAll: 'Bỏ chọn tất cả',
   dm2000SelectAtLeastOne: 'Vui lòng chọn ít nhất một pin',
   dm2000BatteryUnit: 'pin',
+  dm2000ShowAll: 'Xem tất cả pin',
+  dm2000DownloadChart: 'Tải biểu đồ (PNG)',
+  dm2000BatteryName: 'Tên pin',
+  dm2000PreviewReport: 'Xem trước báo cáo',
+  dm2000ReportPreviewTitle: 'Bản xem trước báo cáo',
+  dm2000EditableFields: 'Thông tin archive (có thể chỉnh sửa)',
 };

@@ -551,4 +551,10 @@ export default {
   dm2000ClearAll: 'Clear All',
   dm2000SelectAtLeastOne: 'Please select at least one battery',
   dm2000BatteryUnit: 'battery',
+  dm2000ShowAll: 'Show All Batteries',
+  dm2000DownloadChart: 'Download Chart (PNG)',
+  dm2000BatteryName: 'Battery No.',
+  dm2000PreviewReport: 'Preview Report',
+  dm2000ReportPreviewTitle: 'Report Preview',
+  dm2000EditableFields: 'Archive Info (editable)',
 };

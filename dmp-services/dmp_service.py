@@ -17,6 +17,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -384,6 +386,15 @@ class DM2000ReportRequest(BaseModel):
     archname: str
     baty: int = Field(ge=0)
     template_name: str = Field(min_length=6)
+    override_archname: Optional[str] = None
+    override_start_date: Optional[str] = None
+    override_battery_type: Optional[str] = None
+    override_batch_name: Optional[str] = None
+    override_discharge_condition: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+    override_made_date: Optional[str] = None
+    override_serial_no: Optional[str] = None
+    override_remarks: Optional[str] = None
 
 
 def render_excel_template(template_path: str, context: dict) -> bytes:
@@ -1162,19 +1173,22 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         curve_data = _read_dm2000_curve_rows(payload.archname, payload.baty)
         baty_label = str(payload.baty)
 
+    def _ov(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
+
     stats = compute_dm2000_stats(curve_data)
     context = {
-        "ARCHNAME": _dm2000_get_value(archive, "archname", "cdid", "id"),
-        "START_DATE": str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""),
-        "BATTERY_TYPE": _dm2000_get_value(archive, "dcxh"),
-        "BATCH_NAME": _dm2000_get_value(archive, "name", "dcmc"),
-        "DISCHARGE_CONDITION": _dm2000_get_value(archive, "fdfs"),
+        "ARCHNAME": _ov(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
+        "START_DATE": _ov(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),
+        "BATTERY_TYPE": _ov(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type),
+        "BATCH_NAME": _ov(_dm2000_get_value(archive, "name", "dcmc"), payload.override_batch_name),
+        "DISCHARGE_CONDITION": _ov(_dm2000_get_value(archive, "fdfs"), payload.override_discharge_condition),
         "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
         "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "yfws"),
-        "MANUFACTURER": _dm2000_get_value(archive, "manufacturer", "scdw"),
-        "MADE_DATE": str(_dm2000_get_value(archive, "madedate", "scrq") or ""),
-        "SERIAL_NO": _dm2000_get_value(archive, "serialno", "dcph"),
-        "REMARKS": _dm2000_get_value(archive, "remarks", "bz"),
+        "MANUFACTURER": _ov(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
+        "MADE_DATE": _ov(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
+        "SERIAL_NO": _ov(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
+        "REMARKS": _ov(_dm2000_get_value(archive, "remarks", "bz"), payload.override_remarks),
         "BATTERY_NO": baty_label,
         **stats,
         "HISTORY_DATA": curve_data,

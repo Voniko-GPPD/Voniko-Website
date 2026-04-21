@@ -551,4 +551,10 @@ export default {
   dm2000ClearAll: '清空选择',
   dm2000SelectAtLeastOne: '请至少选择一个电池',
   dm2000BatteryUnit: '电池',
+  dm2000ShowAll: '显示所有电池',
+  dm2000DownloadChart: '下载图表 (PNG)',
+  dm2000BatteryName: '电池编号',
+  dm2000PreviewReport: '预览报告',
+  dm2000ReportPreviewTitle: '报告预览',
+  dm2000EditableFields: '归档信息（可编辑）',
 };

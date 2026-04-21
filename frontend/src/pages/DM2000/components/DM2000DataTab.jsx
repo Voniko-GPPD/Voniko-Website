@@ -63,15 +63,32 @@ export default function DM2000DataTab({ stationId, selection }) {
       return () => {};
     }
 
+    if (selectedBaty === 0 && batteryLoading) {
+      return () => { active = false; };
+    }
+
     const load = async () => {
       setLoading(true);
       setError('');
       try {
-        const result = selectedBaty > 0
-          ? await fetchDM2000Curve(stationId, selection.archname, selectedBaty)
-          : await fetchDM2000AverageCurve(stationId, selection.archname);
-        if (!active) return;
-        setRows(result || []);
+        if (selectedBaty > 0) {
+          const result = await fetchDM2000Curve(stationId, selection.archname, selectedBaty);
+          if (!active) return;
+          setRows(result || []);
+        } else if (batteries.length > 0) {
+          const allResults = await Promise.all(
+            batteries.map((baty) =>
+              fetchDM2000Curve(stationId, selection.archname, baty)
+                .then((curve) => (curve || []).map((row) => ({ ...row, BATY: baty }))),
+            ),
+          );
+          if (!active) return;
+          setRows(allResults.flat());
+        } else {
+          const result = await fetchDM2000AverageCurve(stationId, selection.archname);
+          if (!active) return;
+          setRows(result || []);
+        }
       } catch (err) {
         if (!active) return;
         setError(err.message || 'Failed to load table data');
@@ -85,7 +102,7 @@ export default function DM2000DataTab({ stationId, selection }) {
     return () => {
       active = false;
     };
-  }, [stationId, selection?.archname, selectedBaty]);
+  }, [stationId, selection?.archname, selectedBaty, batteries, batteryLoading]);
 
   const batteryOptions = useMemo(() => {
     const unique = [...new Set(batteries)].sort((a, b) => a - b);
@@ -94,6 +111,8 @@ export default function DM2000DataTab({ stationId, selection }) {
       ...unique.map((value) => ({ value, label: `${value}#` })),
     ];
   }, [batteries, t]);
+
+  const showBatyColumn = selectedBaty === 0 && batteries.length > 0;
 
   const filteredRows = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -108,17 +127,26 @@ export default function DM2000DataTab({ stationId, selection }) {
     return normalized.filter((row) => (
       String(row.TIM).toLowerCase().includes(keyword)
       || String(row.VOLT).toLowerCase().includes(keyword)
+      || (row.BATY != null && String(row.BATY).toLowerCase().includes(keyword))
     ));
   }, [rows, search]);
 
-  const columns = [
-    { title: '#', key: 'idx', width: 80, render: (_value, _record, index) => index + 1 },
+  const columns = useMemo(() => [
+    { title: '#', key: 'idx', width: 60, render: (_value, _record, index) => index + 1 },
+    ...(showBatyColumn ? [{
+      title: t('dm2000BatteryName'),
+      dataIndex: 'BATY',
+      key: 'BATY',
+      width: 100,
+      sorter: (a, b) => (Number(a.BATY) || 0) - (Number(b.BATY) || 0),
+      render: (value) => (value != null ? `${value}#` : '-'),
+    }] : []),
     {
       title: t('dm2000TimeMin'),
       dataIndex: 'TIM',
       key: 'TIM',
       sorter: (a, b) => Number(a.TIM) - Number(b.TIM),
-      defaultSortOrder: 'ascend',
+      defaultSortOrder: showBatyColumn ? undefined : 'ascend',
       render: (value) => `${Number(value).toFixed(4)} min`,
     },
     {
@@ -128,7 +156,7 @@ export default function DM2000DataTab({ stationId, selection }) {
       sorter: (a, b) => Number(a.VOLT) - Number(b.VOLT),
       render: (value) => Number(value).toFixed(4),
     },
-  ];
+  ], [showBatyColumn, t]);
 
   if (!selection) {
     return <Empty description={t('dm2000SelectArchive')} />;
@@ -168,7 +196,7 @@ export default function DM2000DataTab({ stationId, selection }) {
           scroll={{ y: 500 }}
           summary={() => (
             <Table.Summary.Row>
-              <Table.Summary.Cell colSpan={3} index={0}>
+              <Table.Summary.Cell colSpan={columns.length} index={0}>
                 <Typography.Text type="secondary">{t('dmpTotalRows', { count: filteredRows.length })}</Typography.Text>
               </Table.Summary.Cell>
             </Table.Summary.Row>

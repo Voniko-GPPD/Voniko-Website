@@ -74,15 +74,45 @@ export async function fetchDM2000Templates(stationId) {
   return data.templates || [];
 }
 
-export async function downloadDM2000Report({ stationId, archname, baty, templateName }) {
+export async function downloadDM2000Report({
+  stationId,
+  archname,
+  baty,
+  templateName,
+  overrideArchname,
+  overrideStartDate,
+  overrideBatteryType,
+  overrideBatchName,
+  overrideDischargeCondition,
+  overrideManufacturer,
+  overrideMadeDate,
+  overrideSerialNo,
+  overrideRemarks,
+}) {
   const token = localStorage.getItem('accessToken');
+  const body = {
+    stationId,
+    archname,
+    baty,
+    template_name: templateName,
+  };
+  if (overrideArchname != null) body.override_archname = overrideArchname;
+  if (overrideStartDate != null) body.override_start_date = overrideStartDate;
+  if (overrideBatteryType != null) body.override_battery_type = overrideBatteryType;
+  if (overrideBatchName != null) body.override_batch_name = overrideBatchName;
+  if (overrideDischargeCondition != null) body.override_discharge_condition = overrideDischargeCondition;
+  if (overrideManufacturer != null) body.override_manufacturer = overrideManufacturer;
+  if (overrideMadeDate != null) body.override_made_date = overrideMadeDate;
+  if (overrideSerialNo != null) body.override_serial_no = overrideSerialNo;
+  if (overrideRemarks != null) body.override_remarks = overrideRemarks;
+
   const res = await fetch(`${BASE}/report`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ stationId, archname, baty, template_name: templateName }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));

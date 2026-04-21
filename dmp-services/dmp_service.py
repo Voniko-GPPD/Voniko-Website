@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ VONIKO_SERVER_URL: str = os.environ.get("VONIKO_SERVER_URL", "").rstrip("/")
 DMP_STATION_PORT: int = int(os.environ.get("DMP_STATION_PORT", "8766"))
 DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
+DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
+DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
@@ -36,7 +39,16 @@ _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
-_SCHEMA_TABLE_WHITELIST = {"para_singl", "para_pub", "vidata"}
+_SCHEMA_TABLE_WHITELIST = {
+    "para_singl",
+    "para_pub",
+    "vidata",
+    "ls_jb_cs",
+    "ls_pam2",
+    "ls_vtime",
+    "ls_evolt",
+    "ls_timev",
+}
 # Cached result of para_pub schema check (None = not yet determined)
 _HAS_PARA_PUB_CDMC: bool | None = None
 _HAS_PARA_PUB_CDMC_LOCK = threading.Lock()
@@ -124,18 +136,18 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 
 @contextmanager
-def shadow_copy(mdb_path: str):
-    """Copy live .mdb to temp location before querying to avoid file-lock errors."""
+def shadow_copy_any(mdb_path: str, allowed_dir: str):
+    """Generic shadow copy with path restriction under allowed_dir."""
     source = Path(mdb_path).resolve()
-    base_dir = Path(DMP_DATA_DIR).resolve()
+    base_dir = Path(allowed_dir).resolve()
     if source.suffix.lower() != ".mdb":
         raise HTTPException(status_code=400, detail="Invalid file type")
     if not source.exists() or not source.is_file():
         raise HTTPException(status_code=404, detail="MDB file not found")
-    if not str(source).startswith(str(base_dir)):
-        dmpdata_path = Path(get_dmpdata_path()).resolve()
-        if source != dmpdata_path:
-            raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        source.relative_to(base_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid path") from exc
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mdb")
     os.close(tmp_fd)
@@ -160,14 +172,14 @@ def shadow_copy(mdb_path: str):
         if copied_size < 32 * 1024:
             raise HTTPException(
                 status_code=422,
-                detail=f"File '{source.name}' is too small ({copied_size} bytes) to be a valid Access database — may be a Windows shortcut",
+                detail=f"File too small ({copied_size} bytes) to be a valid Access database (possible Windows shortcut)",
             )
         with open(tmp_path, "rb") as fh:
             magic = fh.read(4)
         if magic != b"\x00\x01\x00\x00":
             raise HTTPException(
                 status_code=422,
-                detail=f"File '{source.name}' does not have a valid Access database header — may be a Windows shortcut",
+                detail="Not a valid Access database header (possible Windows shortcut)",
             )
 
         yield tmp_path
@@ -176,6 +188,20 @@ def shadow_copy(mdb_path: str):
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+@contextmanager
+def shadow_copy(mdb_path: str):
+    """Copy live DMP .mdb to temp location before querying to avoid file-lock errors."""
+    with shadow_copy_any(mdb_path, DMP_DATA_DIR) as tmp:
+        yield tmp
+
+
+@contextmanager
+def shadow_copy_dm2000(mdb_path: str):
+    """Copy DM2000 .mdb to a temp file before querying to avoid lock conflicts."""
+    with shadow_copy_any(mdb_path, DM2000_DATA_DIR) as tmp:
+        yield tmp
 
 
 def _inline_params(sql: str, params: tuple) -> str:
@@ -285,6 +311,14 @@ def get_dmpdata_path() -> str:
     return str(Path(DMP_DATA_DIR).resolve() / "DMPDATA.mdb")
 
 
+def get_dm2000_ls_path() -> str:
+    return str(Path(DM2000_DATA_DIR).resolve() / "dmdata_ls.mdb")
+
+
+def get_dm2000_main_path() -> str:
+    return str(Path(DM2000_DATA_DIR).resolve() / "DM2000.mdb")
+
+
 def compute_stats(rows: list[dict]) -> dict:
     def safe_float(value):
         if value == "--" or value == "" or value is None:
@@ -337,6 +371,12 @@ class ReportRequest(BaseModel):
     cdmc: str
     channel: int
     template_name: str
+
+
+class DM2000ReportRequest(BaseModel):
+    archname: str
+    baty: int = Field(ge=0)
+    template_name: str = Field(min_length=6)
 
 
 def render_excel_template(template_path: str, context: dict) -> bytes:
@@ -402,15 +442,21 @@ def _process_worksheet(ws, ctx: dict):
 
 
 def _resolve_template_path(template_name: str) -> str:
-    parsed = Path(template_name)
-    if parsed.parent != Path(".") or parsed.suffix.lower() != ".xlsx":
-        raise HTTPException(status_code=400, detail="Invalid template")
-    if not re.match(r'^[A-Za-z0-9_-]+$', parsed.stem):
+    if not _is_valid_template_name(template_name):
         raise HTTPException(status_code=400, detail="Invalid template")
 
-    result = Path(DMP_TEMPLATES_DIR).resolve() / parsed.name
-    if not str(result).startswith(str(Path(DMP_TEMPLATES_DIR).resolve())):
-        raise HTTPException(status_code=400, detail="Invalid path")
+    base = Path(DMP_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail="Template not found")
+    result = (base / template_name).resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
     if not result.exists():
         raise HTTPException(status_code=404, detail="Template not found")
     return str(result)
@@ -422,6 +468,177 @@ def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
         raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
     with shadow_copy(str(dmpdata)) as copied:
         return query_mdb(copied, sql, params)
+
+
+def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
+    ls_path = Path(get_dm2000_ls_path())
+    if not ls_path.exists():
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+    with shadow_copy_dm2000(str(ls_path)) as copied:
+        return query_mdb(copied, sql, params)
+
+
+def _resolve_dm2000_template_path(template_name: str) -> str:
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template")
+
+    base = Path(DM2000_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail="Template not found")
+    result = (base / template_name).resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+    if not result.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+    return str(result)
+
+
+def compute_dm2000_stats(rows: list[dict]) -> dict:
+    """Compute DM2000 curve statistics. TIM is already in minutes."""
+    def safe_float(v):
+        if v is None or v == "--" or v == "":
+            return None
+        try:
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    volt_vals = [safe_float(r.get("VOLT") or r.get("volt")) for r in rows]
+    volt_vals = [v for v in volt_vals if v is not None]
+
+    tim_vals = [safe_float(r.get("TIM") or r.get("tim")) for r in rows]
+    tim_vals = [t for t in tim_vals if t is not None]
+
+    def agg(vals):
+        if not vals:
+            return {"max": None, "min": None, "avg": None}
+        return {
+            "max": round(max(vals), 4),
+            "min": round(min(vals), 4),
+            "avg": round(sum(vals) / len(vals), 4),
+        }
+
+    v = agg(volt_vals)
+    duration = max(tim_vals) if tim_vals else None
+    return {
+        "VOLT_MAX": v["max"],
+        "VOLT_MIN": v["min"],
+        "VOLT_AVG": v["avg"],
+        "DURATION_MIN": duration,
+    }
+
+
+def _compute_average_curve(rows: list[dict]) -> list[dict]:
+    """Group by TIM and average VOLT values."""
+    from collections import defaultdict
+    tim_groups: dict[float, list[float]] = defaultdict(list)
+    for row in rows:
+        tim = row.get("TIM") or row.get("tim")
+        volt = row.get("VOLT") or row.get("volt")
+        try:
+            t = float(tim)
+            v = float(volt)
+            if not math.isnan(t) and not math.isnan(v):
+                tim_groups[t].append(v)
+        except (TypeError, ValueError):
+            continue
+    return [
+        {"TIM": t, "VOLT": round(sum(vs) / len(vs), 6)}
+        for t, vs in sorted(tim_groups.items())
+    ]
+
+
+def _dm2000_get_value(row: dict, *keys):
+    for key in keys:
+        if key in row and row.get(key) not in (None, ""):
+            return row.get(key)
+    lowered = {str(k).lower(): v for k, v in row.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _is_valid_template_name(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if not name.endswith(".xlsx"):
+        return False
+    stem = name[:-5]
+    return bool(stem) and all(ch.isalnum() or ch in "_-" for ch in stem)
+
+
+def _validate_dm2000_archname(archname: str) -> None:
+    if not re.match(r'^[A-Za-z0-9_-]+$', archname):
+        raise HTTPException(status_code=400, detail="Invalid archname")
+
+
+def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
+    try:
+        return _read_dm2000_ls(
+            "SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC",
+            (archname, baty),
+        )
+    except pyodbc.Error:
+        if baty <= 0 or baty > 99:
+            raise HTTPException(status_code=400, detail="Invalid baty")
+        time_col = f"time{baty}"
+        rows = _read_dm2000_ls(
+            f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC",
+            (archname,),
+        )
+        curve = []
+        for row in rows:
+            tim = row.get("TIM")
+            volt = row.get("dy")
+            try:
+                t = float(tim)
+                v = float(volt)
+                if not math.isnan(t) and not math.isnan(v):
+                    curve.append({"TIM": t, "VOLT": v})
+            except (TypeError, ValueError):
+                continue
+        return curve
+
+
+def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
+    try:
+        rows = _read_dm2000_ls(
+            "SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC",
+            (archname,),
+        )
+        return _compute_average_curve(rows)
+    except pyodbc.Error:
+        rows = _read_dm2000_ls(
+            "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
+            (archname,),
+        )
+        flattened: list[dict] = []
+        for row in rows:
+            volt = row.get("dy")
+            for idx in range(1, 10):
+                tim = row.get(f"time{idx}")
+                flattened.append({"TIM": tim, "VOLT": volt})
+        return _compute_average_curve(flattened)
+
+
+def _parse_iso_date_param(value: str | None, field_name: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}, expected YYYY-MM-DD") from exc
 
 
 def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
@@ -677,6 +894,232 @@ def generate_report(payload: ReportRequest):
     report_bytes = render_excel_template(template_path, context)
     filename = f"dmp_report_{payload.batch_id}_{payload.channel}.xlsx"
 
+    return StreamingResponse(
+        BytesIO(report_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── DM2000 Historic Database Routes ────────────────────────────────────────
+
+@app.get("/dm2000/archives")
+def get_dm2000_archives(
+    date_from: str = None,
+    date_to: str = None,
+    type_filter: str = None,
+    name_filter: str = None,
+    mfr_filter: str = None,
+    serial_filter: str = None,
+    limit: int = 500,
+):
+    rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs")
+    date_from_parsed = _parse_iso_date_param(date_from, "date_from")
+    date_to_parsed = _parse_iso_date_param(date_to, "date_to")
+
+    def _to_date_text(value):
+        if value and hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d")
+        return str(value)[:10] if value not in (None, "") else ""
+
+    archives = []
+    for row in rows:
+        item = {
+            "archname": _dm2000_get_value(row, "archname", "cdid", "id"),
+            "startdate": _to_date_text(_dm2000_get_value(row, "startdate", "fdrq")),
+            "dcxh": _dm2000_get_value(row, "dcxh"),
+            "name": _dm2000_get_value(row, "name", "dcmc"),
+            "fdfs": _dm2000_get_value(row, "fdfs"),
+            "duration": _dm2000_get_value(row, "duration", "fdts"),
+            "unifrate": _dm2000_get_value(row, "unifrate", "yfws"),
+            "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
+            "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
+            "serialno": _dm2000_get_value(row, "serialno", "dcph"),
+            "remarks": _dm2000_get_value(row, "remarks", "bz"),
+        }
+        archives.append(item)
+
+    def _contains(value, pattern):
+        if not pattern:
+            return True
+        return pattern.lower() in str(value or "").lower()
+
+    filtered = []
+    for row in archives:
+        row_date = None
+        if row["startdate"]:
+            try:
+                row_date = date.fromisoformat(str(row["startdate"])[:10])
+            except ValueError:
+                row_date = None
+        if date_from_parsed and row_date and row_date < date_from_parsed:
+            continue
+        if date_to_parsed and row_date and row_date > date_to_parsed:
+            continue
+        if not _contains(row.get("dcxh"), type_filter):
+            continue
+        if not _contains(row.get("name"), name_filter):
+            continue
+        if not _contains(row.get("manufacturer"), mfr_filter):
+            continue
+        if not _contains(row.get("serialno"), serial_filter):
+            continue
+        filtered.append(row)
+
+    filtered.sort(key=lambda r: str(r.get("startdate") or ""), reverse=True)
+    if limit is not None and limit > 0:
+        filtered = filtered[:limit]
+    return {"archives": filtered, "total": len(filtered)}
+
+
+@app.get("/dm2000/archives/{archname}/batteries")
+def get_dm2000_batteries(archname: str):
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm2000_ls(
+            "SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC",
+            (archname,),
+        )
+    except pyodbc.Error:
+        rows = _read_dm2000_ls(
+            "SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC",
+            (archname,),
+        )
+    for row in rows:
+        if "baty" not in row:
+            row["baty"] = _dm2000_get_value(row, "baty", "gpp")
+    return {"batteries": rows, "archname": archname}
+
+
+@app.get("/dm2000/archives/{archname}/curve")
+def get_dm2000_curve(archname: str, baty: int):
+    _validate_dm2000_archname(archname)
+    rows = _read_dm2000_curve_rows(archname, baty)
+    return {"curve": rows, "archname": archname, "baty": baty, "time_unit": "minutes"}
+
+
+@app.get("/dm2000/archives/{archname}/average-curve")
+def get_dm2000_average_curve(archname: str):
+    _validate_dm2000_archname(archname)
+    avg = _read_dm2000_average_curve_rows(archname)
+    return {"curve": avg, "archname": archname, "baty": "average", "time_unit": "minutes"}
+
+
+@app.get("/dm2000/archives/{archname}/stats")
+def get_dm2000_stats(archname: str, baty: int):
+    _validate_dm2000_archname(archname)
+    rows = _read_dm2000_curve_rows(archname, baty)
+    return compute_dm2000_stats(rows)
+
+
+@app.get("/dm2000/archives/{archname}/daily-voltage")
+def get_dm2000_daily_voltage(archname: str, baty: int):
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm2000_ls(
+            "SELECT * FROM ls_evolt WHERE archname = ? AND baty = ? ORDER BY date ASC",
+            (archname, baty),
+        )
+        for row in rows:
+            d = row.get("date")
+            if d and hasattr(d, "strftime"):
+                row["date"] = d.strftime("%Y-%m-%d")
+        return {"daily_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        if baty <= 0 or baty > 99:
+            raise HTTPException(status_code=400, detail="Invalid baty")
+        volt_col = f"volt{baty}"
+        rows = _read_dm2000_ls(
+            f"SELECT daytime, {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
+            (archname,),
+        )
+        normalized = []
+        for row in rows:
+            d = row.get("daytime")
+            v = row.get("volt")
+            if d and hasattr(d, "strftime"):
+                d = d.strftime("%Y-%m-%d")
+            normalized.append({"date": str(d)[:10] if d not in (None, "") else None, "volt": v})
+        return {"daily_voltage": normalized, "archname": archname, "baty": baty}
+
+
+@app.get("/dm2000/archives/{archname}/time-at-voltage")
+def get_dm2000_time_at_voltage(archname: str, baty: int):
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm2000_ls(
+            "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+            (archname, baty),
+        )
+        return {"time_at_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        if baty <= 0 or baty > 99:
+            raise HTTPException(status_code=400, detail="Invalid baty")
+        tim_col = f"tim_vot{baty}"
+        rows = _read_dm2000_ls(
+            f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+            (archname,),
+        )
+        return {"time_at_voltage": rows, "archname": archname, "baty": baty}
+
+
+@app.get("/dm2000/templates")
+def get_dm2000_templates():
+    templates_dir = Path(DM2000_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.post("/dm2000/report")
+def generate_dm2000_report(payload: DM2000ReportRequest):
+    _validate_dm2000_archname(payload.archname)
+
+    try:
+        archive_rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,))
+    except pyodbc.Error:
+        archive_rows = []
+    if not archive_rows:
+        try:
+            archive_rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,))
+        except pyodbc.Error:
+            archive_rows = []
+    if not archive_rows:
+        raise HTTPException(status_code=404, detail="Archive not found")
+    archive = archive_rows[0]
+
+    if payload.baty == 0:
+        curve_data = _read_dm2000_average_curve_rows(payload.archname)
+        baty_label = "Average"
+    else:
+        curve_data = _read_dm2000_curve_rows(payload.archname, payload.baty)
+        baty_label = str(payload.baty)
+
+    stats = compute_dm2000_stats(curve_data)
+    context = {
+        "ARCHNAME": _dm2000_get_value(archive, "archname", "cdid", "id"),
+        "START_DATE": str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""),
+        "BATTERY_TYPE": _dm2000_get_value(archive, "dcxh"),
+        "BATCH_NAME": _dm2000_get_value(archive, "name", "dcmc"),
+        "DISCHARGE_CONDITION": _dm2000_get_value(archive, "fdfs"),
+        "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
+        "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "yfws"),
+        "MANUFACTURER": _dm2000_get_value(archive, "manufacturer", "scdw"),
+        "MADE_DATE": str(_dm2000_get_value(archive, "madedate", "scrq") or ""),
+        "SERIAL_NO": _dm2000_get_value(archive, "serialno", "dcph"),
+        "REMARKS": _dm2000_get_value(archive, "remarks", "bz"),
+        "BATTERY_NO": baty_label,
+        **stats,
+        "HISTORY_DATA": curve_data,
+    }
+
+    template_path = _resolve_dm2000_template_path(payload.template_name)
+    report_bytes = render_excel_template(template_path, context)
+    filename = f"dm2000_report_{payload.archname}_{baty_label}.xlsx"
     return StreamingResponse(
         BytesIO(report_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -166,4 +166,125 @@ router.post('/report', authenticateToken, async (req, res, next) => {
   }
 });
 
+// ─── DM2000 Historic Database Proxy Routes ───────────────────────────────
+
+router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives`, {
+      params: {
+        date_from: req.query.date_from,
+        date_to: req.query.date_to,
+        type_filter: req.query.type_filter,
+        name_filter: req.query.name_filter,
+        mfr_filter: req.query.mfr_filter,
+        serial_filter: req.query.serial_filter,
+        limit: req.query.limit,
+      },
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/batteries', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/batteries`, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/curve', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/curve`, {
+      params: { baty: req.query.baty },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/average-curve', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/average-curve`, { timeout: 180000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/stats', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/stats`, {
+      params: { baty: req.query.baty },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/daily-voltage', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/daily-voltage`, {
+      params: { baty: req.query.baty },
+      timeout: 60000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/time-at-voltage', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/time-at-voltage`, {
+      params: { baty: req.query.baty },
+      timeout: 15000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.post('/dm2000/report', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/report`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dm2000_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try { return res.status(err.response.status).json(JSON.parse(msg)); }
+      catch { return res.status(err.response.status).send(msg); }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
 module.exports = router;

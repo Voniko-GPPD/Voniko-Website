@@ -627,10 +627,13 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
         if baty <= 0 or baty > 99:
             raise HTTPException(status_code=400, detail="Invalid baty")
         time_col = f"time{baty}"
-        rows = _read_dm2000_ls(
-            f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC",
-            (archname,),
-        )
+        try:
+            rows = _read_dm2000_ls(
+                f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            rows = []
         curve = []
         for row in rows:
             tim = row.get("TIM")
@@ -1049,6 +1052,9 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
     For cdid-based ls_vtime, each row holds one voltage threshold with elapsed
     time per battery in time{n}. A battery channel is considered active when at
     least one of its time{n} values is non-null/non-empty.
+
+    For archname-based ls_vtime (which uses a baty column instead of time{n}),
+    falls back to querying DISTINCT baty values directly.
     """
     select_cols = ", ".join(f"time{i}" for i in range(1, 10))
     try:
@@ -1057,7 +1063,24 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
             (archname,),
         )
     except pyodbc.Error:
-        return []
+        # cdid-based schema failed; try archname-based schema
+        try:
+            baty_rows = _read_dm2000_ls(
+                "SELECT DISTINCT baty FROM ls_vtime WHERE archname = ? ORDER BY baty ASC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            return []
+        result = []
+        for row in baty_rows:
+            val = _dm2000_get_value(row, "baty")
+            try:
+                num = int(float(val))
+                if num > 0:
+                    result.append({"baty": num})
+            except (TypeError, ValueError):
+                pass
+        return result
 
     active: set[int] = set()
     for row in rows:
@@ -1152,10 +1175,13 @@ def get_dm2000_daily_voltage(archname: str, baty: int):
         if baty <= 0 or baty > 99:
             raise HTTPException(status_code=400, detail="Invalid baty")
         volt_col = f"volt{baty}"
-        rows = _read_dm2000_ls(
-            f"SELECT daytime, {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
-            (archname,),
-        )
+        try:
+            rows = _read_dm2000_ls(
+                f"SELECT daytime, {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            return {"daily_voltage": [], "archname": archname, "baty": baty}
         normalized = []
         for row in rows:
             d = row.get("daytime")
@@ -1179,10 +1205,13 @@ def get_dm2000_time_at_voltage(archname: str, baty: int):
         if baty <= 0 or baty > 99:
             raise HTTPException(status_code=400, detail="Invalid baty")
         tim_col = f"tim_vot{baty}"
-        rows = _read_dm2000_ls(
-            f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
-            (archname,),
-        )
+        try:
+            rows = _read_dm2000_ls(
+                f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            return {"time_at_voltage": [], "archname": archname, "baty": baty}
         return {"time_at_voltage": rows, "archname": archname, "baty": baty}
 
 

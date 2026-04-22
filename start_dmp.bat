@@ -95,7 +95,6 @@ echo [PM2] Khoi dong DMP Service...
 call pm2 start "%~dp0dmp-services\venv\Scripts\pythonw.exe" ^
     --name "dmp-service" ^
     --restart-delay 3000 ^
-    --max-restarts 10 ^
     -- -m uvicorn dmp_service:app ^
     --host 0.0.0.0 ^
     --port %DMP_STATION_PORT% ^

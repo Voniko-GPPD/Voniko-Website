@@ -137,20 +137,24 @@ def _watch_dmp_changes_loop() -> None:
         _WATCHED_MDB_MTIME.update(_scan_dynamic_mdb_files())
 
     while True:
-        current = _scan_dynamic_mdb_files()
-        now = time.time()
-        with _WATCH_LOCK:
-            deleted_stems = set(_WATCHED_MDB_MTIME.keys()) - set(current.keys())
-            for stem in deleted_stems:
-                _WATCHED_CHANGES.pop(stem, None)
-                _WATCHED_MDB_MTIME.pop(stem, None)
-            for stem, mtime in current.items():
-                previous = _WATCHED_MDB_MTIME.get(stem)
-                if previous is None or mtime > previous:
-                    _WATCHED_CHANGES[stem] = now
-                _WATCHED_MDB_MTIME[stem] = mtime
-        # Keep dm2000 local cache in sync with the source file
-        _dm2000_refresh_ls_cache()
+        try:
+            current = _scan_dynamic_mdb_files()
+            now = time.time()
+            with _WATCH_LOCK:
+                deleted_stems = set(_WATCHED_MDB_MTIME.keys()) - set(current.keys())
+                for stem in deleted_stems:
+                    _WATCHED_CHANGES.pop(stem, None)
+                    _WATCHED_MDB_MTIME.pop(stem, None)
+                for stem, mtime in current.items():
+                    previous = _WATCHED_MDB_MTIME.get(stem)
+                    if previous is None or mtime > previous:
+                        _WATCHED_CHANGES[stem] = now
+                    _WATCHED_MDB_MTIME[stem] = mtime
+            # Keep dm2000 local cache in sync with the source file
+            _dm2000_refresh_ls_cache()
+        except (OSError, ValueError, pyodbc.Error, HTTPException) as exc:
+            # Never let the watcher thread die — log and continue.
+            logger.warning("watch_loop: unexpected error (will retry): %s", exc)
         time.sleep(WATCH_INTERVAL_SECONDS)
 
 
@@ -229,7 +233,20 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 _DM2000_LS_CACHE_READY.set()
             return
 
-        os.replace(cache_tmp, cache_final)
+        try:
+            os.replace(cache_tmp, cache_final)
+        except OSError as exc:
+            # On Windows the file may still be held open by an active pyodbc
+            # connection.  Keep the existing cache and try again next interval.
+            logger.warning("dm2000_cache: rename failed (file in use?), keeping old cache: %s", exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DM2000_LS_CACHE_READY.is_set():
+                _DM2000_LS_CACHE_PATH = str(ls_path)
+                _DM2000_LS_CACHE_READY.set()
+            return
         _DM2000_LS_CACHE_PATH = cache_final
         _DM2000_LS_SOURCE_MTIME = current_mtime
         logger.info("dm2000_cache: refreshed local copy from %s (mtime=%s)", ls_path, current_mtime)
@@ -725,17 +742,17 @@ def _compute_average_curve(rows: list[dict]) -> list[dict]:
     ]
 
 
-def _get_evolt_volt_stats(archname: str, baty: int) -> dict | None:
-    """Get VOLT_MAX (OCV), VOLT_MIN (FCV), VOLT_AVG from ls_evolt for a battery.
+def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
+    """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
+    a single battery from ls_pam2.
 
-    Returns a dict with VOLT_MAX, VOLT_MIN, VOLT_AVG, or None if no data found.
+    These two values are measured by the DM2000 instrument before and at the
+    start of the discharge cycle and stored directly in ls_pam2.  They must
+    NOT be confused with the daily discharge voltages in ls_evolt, which are
+    measurements taken during (not before) the discharge.
 
-    The data is queried ORDER BY date/daytime ASC so the first row is the OCV
-    (voltage measured before discharge begins, always the highest value) and
-    the last row is the FCV (voltage at the end of discharge, always the lowest).
-    Using positional first/last rather than max/min is intentional: OCV and FCV
-    are defined as the chronologically first and last measurements, not simply
-    the extreme values in the series.
+    Returns a dict with VOLT_MAX (OCV) and VOLT_MIN (FCV), or None if the
+    data is unavailable.
     """
     def safe_float(v):
         if v is None or v in ("--", ""):
@@ -746,38 +763,37 @@ def _get_evolt_volt_stats(archname: str, baty: int) -> dict | None:
         except (TypeError, ValueError):
             return None
 
-    volt_rows = []
-    # Try archname-based schema first
+    row = None
+    # Query all pam2 rows for this archive and filter by battery position in
+    # Python to handle both integer and text storage of the gpp/baty column.
     try:
-        rows = _read_dm2000_ls(
-            "SELECT volt FROM ls_evolt WHERE archname = ? AND baty = ? ORDER BY date ASC",
-            (archname, baty),
-        )
-        if rows:
-            volt_rows = [safe_float(r.get("volt")) for r in rows]
-    except pyodbc.Error:
+        rows = _read_dm2000_ls_multi([
+            ("SELECT * FROM ls_pam2 WHERE cdid = ?", (archname,)),
+            ("SELECT * FROM ls_pam2 WHERE archname = ?", (archname,)),
+        ])
+        for r in rows:
+            gpp_val = _dm2000_get_value(r, "gpp", "baty")
+            try:
+                if gpp_val is not None and int(float(str(gpp_val))) == baty:
+                    row = r
+                    break
+            except (TypeError, ValueError):
+                pass
+    except (pyodbc.Error, HTTPException):
         pass
 
-    if not volt_rows:
-        # Try cdid-based schema
-        volt_col = f"volt{baty}"
-        try:
-            rows = _read_dm2000_ls(
-                f"SELECT {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
-                (archname,),
-            )
-            volt_rows = [safe_float(r.get("volt")) for r in rows]
-        except pyodbc.Error:
-            pass
+    if row is None:
+        return None
 
-    volt_vals = [v for v in volt_rows if v is not None]
-    if not volt_vals:
+    ocv = safe_float(_dm2000_get_value(row, "ocv", "OCV"))
+    fcv = safe_float(_dm2000_get_value(row, "fcv", "FCV"))
+
+    if ocv is None and fcv is None:
         return None
 
     return {
-        "VOLT_MAX": volt_vals[0],   # OCV – first daily measurement (start of discharge)
-        "VOLT_MIN": volt_vals[-1],  # FCV – last daily measurement (end of discharge)
-        "VOLT_AVG": round(sum(volt_vals) / len(volt_vals), 4),
+        "VOLT_MAX": ocv,
+        "VOLT_MIN": fcv,
     }
 
 
@@ -1216,22 +1232,37 @@ def get_dm2000_archives(
         item = {
             "archname": _dm2000_get_value(row, "archname", "cdid", "id"),
             "startdate": _to_date_text(_dm2000_get_value(row, "startdate", "fdrq")),
-            "enddate": _to_date_text(_dm2000_get_value(row, "enddate", "fzdq", "jssj", "endrq")),
+            "enddate": _to_date_text(_dm2000_get_value(row, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date")),
             "dcxh": _dm2000_get_value(row, "dcxh"),
             "name": _dm2000_get_value(row, "name", "dcmc"),
             "fdfs": _dm2000_get_value(row, "fdfs"),
             "duration": _dm2000_get_value(row, "duration", "fdts"),
-            "unifrate": _dm2000_get_value(row, "unifrate", "yfws"),
+            # unifrate: try percentage column (hl=合格率) first, then the integer
+            # index (yfws=匀放系数 0-9).  DM2000 may store either depending on version.
+            "unifrate": _dm2000_get_value(row, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
             "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
             "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
             "serialno": _dm2000_get_value(row, "serialno", "dcph"),
             "remarks": _dm2000_get_value(row, "remarks", "bz"),
-            # Additional fields for report preview
-            "voltage_type": _dm2000_get_value(row, "voltage_type", "dianxin_leixing", "dxy", "nominal_voltage", "dianxin"),
+            # Additional fields for report preview.
+            # Multiple aliases cover different DM2000 schema versions.
+            "voltage_type": _dm2000_get_value(
+                row,
+                "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+                "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+            ),
             "trademark": _dm2000_get_value(row, "trademark", "shangbiao", "sbmc", "pinpai"),
             "load_resistance": _dm2000_get_value(row, "load_resistance", "fzdz", "fzlkdz", "dw"),
-            "endpoint_voltage": _dm2000_get_value(row, "endpoint_voltage", "jzdianyi", "jzdy", "jzdv", "endpoint_v"),
-            "dis_condition": _dm2000_get_value(row, "dis_condition", "fdtj", "wendu", "wd", "temperature"),
+            "endpoint_voltage": _dm2000_get_value(
+                row,
+                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            ),
+            "dis_condition": _dm2000_get_value(
+                row,
+                "dis_condition", "wd", "fdwd", "hjwd", "wendu",
+                "fdtj", "hjtj", "temperature", "temp_c",
+            ),
             "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration"),
             "company": DM2000_COMPANY_NAME or None,
         }
@@ -1343,6 +1374,21 @@ def get_dm2000_batteries(archname: str):
     for row in rows:
         if "baty" not in row:
             row["baty"] = _dm2000_get_value(row, "baty", "gpp")
+        # Normalise OCV / FCV / SOt to well-known keys so the frontend can
+        # find them regardless of the original Access column name casing or
+        # abbreviation variant used by this DM2000 version.
+        if "ocv" not in row:
+            row["ocv"] = _dm2000_get_value(row, "ocv", "OCV")
+        if "fcv" not in row:
+            row["fcv"] = _dm2000_get_value(row, "fcv", "FCV")
+        # SOt (actual discharged capacity in mAh).  DM2000 uses several
+        # column names across versions: sh (实耗), fdrl (放电容量), rl (容量),
+        # rql, sot, capacity, sl, sc, dcrl, fdl.
+        row["sot_mah"] = _dm2000_get_value(
+            row,
+            "sh", "sot", "SOT", "sot_mah", "sotmah",
+            "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl",
+        )
 
     # If ls_pam2 has no usable rows (e.g. discharge in progress, or pam2 not
     # populated for this cdid), derive the battery list from ls_vtime so the
@@ -1385,14 +1431,15 @@ def get_dm2000_stats(archname: str, baty: int = 0):
     else:
         rows = _read_dm2000_curve_rows(archname, baty)
     stats = compute_dm2000_stats(rows)
-    # Override VOLT_MAX/VOLT_MIN/VOLT_AVG with OCV/FCV from daily voltage (ls_evolt).
-    # For the cdid-based schema, ls_vtime stores voltage thresholds rather than real
-    # measured voltages, so compute_dm2000_stats produces wrong values (always the
-    # fixed threshold limits 1.4 / 0.9).  Using ls_evolt gives the true OCV and FCV.
+    # Override VOLT_MAX/VOLT_MIN with the true OCV/FCV stored in ls_pam2.
+    # ls_pam2 holds the instrument-measured open-circuit voltage (OCV, before
+    # discharge) and loaded voltage (FCV, at discharge start) — the values
+    # DM2000 reports in its own Excel export.  The ls_vtime curve data uses
+    # fixed voltage thresholds, not real measurements.
     if baty > 0:
-        evolt_stats = _get_evolt_volt_stats(archname, baty)
-        if evolt_stats:
-            stats.update(evolt_stats)
+        pam2_stats = _get_pam2_ocv_fcv(archname, baty)
+        if pam2_stats:
+            stats.update(pam2_stats)
     return stats
 
 
@@ -1515,13 +1562,15 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         return override_val if override_val is not None and str(override_val).strip() != "" else db_val
 
     stats = compute_dm2000_stats(curve_data)
-    # Override VOLT_MAX/VOLT_MIN/VOLT_AVG with OCV/FCV from ls_evolt (daily voltage).
-    # For the cdid-based schema the curve VOLT values are fixed voltage thresholds
-    # rather than real measurements, so ls_evolt gives the true OCV and FCV.
+    # Override VOLT_MAX/VOLT_MIN with the true OCV/FCV stored in ls_pam2.
+    # ls_pam2 holds the instrument-measured open-circuit voltage (OCV, before
+    # discharge) and loaded voltage (FCV, at discharge start) — the values
+    # DM2000 reports in its own Excel export.  The ls_vtime curve data uses
+    # fixed voltage thresholds, not real measurements.
     if payload.baty > 0:
-        evolt_stats = _get_evolt_volt_stats(payload.archname, payload.baty)
-        if evolt_stats:
-            stats.update(evolt_stats)
+        pam2_stats = _get_pam2_ocv_fcv(payload.archname, payload.baty)
+        if pam2_stats:
+            stats.update(pam2_stats)
     context = {
         "ARCHNAME": _apply_override(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
         "START_DATE": _apply_override(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),
@@ -1529,7 +1578,7 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "BATCH_NAME": _apply_override(_dm2000_get_value(archive, "name", "dcmc"), payload.override_batch_name),
         "DISCHARGE_CONDITION": _apply_override(_dm2000_get_value(archive, "fdfs"), payload.override_discharge_condition),
         "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
-        "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "yfws"),
+        "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
         "MANUFACTURER": _apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
         "MADE_DATE": _apply_override(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
         "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
@@ -1537,12 +1586,24 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "BATTERY_NO": baty_label,
         # Extra fields for full template support
         "COMPANY": DM2000_COMPANY_NAME or "",
-        "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq") or ""),
-        "VOLTAGE_TYPE": str(_dm2000_get_value(archive, "voltage_type", "dianxin_leixing", "dxy", "nominal_voltage", "dianxin") or ""),
+        "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date") or ""),
+        "VOLTAGE_TYPE": str(_dm2000_get_value(
+            archive,
+            "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+            "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+        ) or ""),
         "TRADEMARK": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
         "LOAD_RESISTANCE": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
-        "ENDPOINT_VOLTAGE": str(_dm2000_get_value(archive, "endpoint_voltage", "jzdianyi", "jzdy", "jzdv", "endpoint_v") or ""),
-        "DIS_CONDITION": str(_dm2000_get_value(archive, "dis_condition", "fdtj", "wendu", "wd", "temperature") or ""),
+        "ENDPOINT_VOLTAGE": str(_dm2000_get_value(
+            archive,
+            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+        ) or ""),
+        "DIS_CONDITION": str(_dm2000_get_value(
+            archive,
+            "dis_condition", "wd", "fdwd", "hjwd", "wendu",
+            "fdtj", "hjtj", "temperature", "temp_c",
+        ) or ""),
         "MIN_DURATION": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration") or ""),
         **stats,
         "HISTORY_DATA": curve_data,

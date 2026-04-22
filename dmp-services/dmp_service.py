@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 import os
@@ -266,11 +267,17 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
 async def _lifespan(application):
     watcher_thread = threading.Thread(target=_watch_dmp_changes_loop, daemon=True)
     watcher_thread.start()
+    # Build the initial dm2000 local cache in a thread executor so the async
+    # event loop is not blocked during startup.  Simple endpoints (templates,
+    # config) can respond immediately; DB-backed endpoints wait for
+    # _DM2000_LS_CACHE_READY as usual.
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: _dm2000_refresh_ls_cache(force=True))
+    # Register with the Voniko server only AFTER the local cache is ready so
+    # that requests proxied to this station are not met with a premature 503.
     if VONIKO_SERVER_URL and DMP_STATION_NAME:
         t = threading.Thread(target=_registration_loop, daemon=True)
         t.start()
-    # Build the initial dm2000 local cache synchronously before serving requests
-    _dm2000_refresh_ls_cache(force=True)
     yield
 
 
@@ -1440,6 +1447,10 @@ def get_dm2000_stats(archname: str, baty: int = 0):
         pam2_stats = _get_pam2_ocv_fcv(archname, baty)
         if pam2_stats:
             stats.update(pam2_stats)
+            # Expose as dedicated keys so the frontend and templates can use
+            # OCV/FCV independently of the curve VOLT_MAX/VOLT_MIN stats.
+            stats["OCV"] = pam2_stats["VOLT_MAX"]
+            stats["FCV"] = pam2_stats["VOLT_MIN"]
     return stats
 
 
@@ -1571,6 +1582,9 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         pam2_stats = _get_pam2_ocv_fcv(payload.archname, payload.baty)
         if pam2_stats:
             stats.update(pam2_stats)
+            # Expose as dedicated keys for templates using {{OCV}} / {{FCV}}
+            stats["OCV"] = pam2_stats["VOLT_MAX"]
+            stats["FCV"] = pam2_stats["VOLT_MIN"]
     context = {
         "ARCHNAME": _apply_override(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
         "START_DATE": _apply_override(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),

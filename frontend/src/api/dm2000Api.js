@@ -136,3 +136,41 @@ export async function downloadDM2000Report({
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function downloadDM2000SimpleReport({
+  stationId,
+  archname,
+  batys,
+  overrideBatteryType,
+  overrideManufacturer,
+}) {
+  const token = localStorage.getItem('accessToken');
+  const body = { stationId, archname, batys: batys || [] };
+  if (overrideBatteryType != null && overrideBatteryType !== '') body.override_battery_type = overrideBatteryType;
+  if (overrideManufacturer != null && overrideManufacturer !== '') body.override_manufacturer = overrideManufacturer;
+
+  const res = await fetch(`${BASE}/report-simple`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || err.detail || 'Report generation failed');
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const nameMatch = disposition.match(/filename="([^"]+)"/);
+  const filename = nameMatch ? nameMatch[1] : `dm2000_preview_${archname}.xlsx`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

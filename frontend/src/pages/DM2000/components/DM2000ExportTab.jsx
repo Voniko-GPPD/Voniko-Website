@@ -4,7 +4,7 @@ import {
   Form, Input, Radio, Row, Space, Spin, Typography, notification,
 } from 'antd';
 import {
-  downloadDM2000Report, fetchDM2000Batteries, fetchDM2000Config,
+  downloadDM2000Report, downloadDM2000SimpleReport, fetchDM2000Batteries, fetchDM2000Config,
   fetchDM2000Stats, fetchDM2000Templates, fetchDM2000TimeAtVoltage,
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
@@ -225,6 +225,29 @@ export default function DM2000ExportTab({ stationId, selection }) {
     }
   };
 
+  const handleDownloadPreview = async () => {
+    if (!stationId || !selection?.archname) return;
+    if (previewBatys.length === 0) {
+      notification.warning({ message: t('dm2000SelectAtLeastOne') });
+      return;
+    }
+    setDownloading(true);
+    try {
+      await downloadDM2000SimpleReport({
+        stationId,
+        archname: selection.archname,
+        batys: previewBatys,
+        overrideBatteryType: archiveFields.dcxh || undefined,
+        overrideManufacturer: archiveFields.manufacturer || undefined,
+      });
+      notification.success({ message: t('dmpReportDownloaded') });
+    } catch (err) {
+      notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   if (!selection) {
     return <Empty description={t('dm2000SelectArchive')} />;
   }
@@ -275,64 +298,64 @@ export default function DM2000ExportTab({ stationId, selection }) {
         )}
       </Card>
 
-      <Card size="small" title={t('dm2000EditableFields')}>
+      <Card size="small" title={t('dm2000ArchiveInfo')}>
         <Row gutter={[16, 8]}>
           <Col xs={24} sm={12}>
             <Form layout="vertical" size="small">
               <Form.Item label={t('dm2000ArchName')}>
-                <Input value={archiveFields.archname} onChange={setField('archname')} />
+                <Typography.Text>{archiveFields.archname || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Name')}>
-                <Input value={archiveFields.name} onChange={setField('name')} />
+                <Typography.Text>{archiveFields.name || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Type')}>
                 <Input value={archiveFields.dcxh} onChange={setField('dcxh')} />
               </Form.Item>
               <Form.Item label={t('dm2000VoltageType')}>
-                <Input value={archiveFields.voltage_type} onChange={setField('voltage_type')} />
+                <Typography.Text>{archiveFields.voltage_type || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Trademark')}>
-                <Input value={archiveFields.trademark} onChange={setField('trademark')} />
+                <Typography.Text>{archiveFields.trademark || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000SerialNo')}>
-                <Input value={archiveFields.serialno} onChange={setField('serialno')} />
+                <Typography.Text>{archiveFields.serialno || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Manufacturer')}>
                 <Input value={archiveFields.manufacturer} onChange={setField('manufacturer')} />
               </Form.Item>
               <Form.Item label={t('dm2000MadeDate')}>
-                <Input value={archiveFields.madedate} onChange={setField('madedate')} />
+                <Typography.Text>{archiveFields.madedate || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000MinDuration')}>
-                <Input value={archiveFields.min_duration} onChange={setField('min_duration')} />
+                <Typography.Text>{archiveFields.min_duration || '-'}</Typography.Text>
               </Form.Item>
             </Form>
           </Col>
           <Col xs={24} sm={12}>
             <Form layout="vertical" size="small">
               <Form.Item label={t('dm2000StartDate')}>
-                <Input value={archiveFields.startdate} onChange={setField('startdate')} />
+                <Typography.Text>{archiveFields.startdate || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000EndDate')}>
-                <Input value={archiveFields.enddate} onChange={setField('enddate')} />
+                <Typography.Text>{archiveFields.enddate || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000DisCondition')}>
-                <Input value={archiveFields.fdfs} onChange={setField('fdfs')} />
+                <Typography.Text>{archiveFields.fdfs || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000LoadResistance')}>
-                <Input value={archiveFields.load_resistance} onChange={setField('load_resistance')} />
+                <Typography.Text>{archiveFields.load_resistance || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000EndpointVoltage')}>
-                <Input value={archiveFields.endpoint_voltage} onChange={setField('endpoint_voltage')} />
+                <Typography.Text>{archiveFields.endpoint_voltage || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000UnifRate')}>
-                <Input value={archiveFields.unifrate} onChange={setField('unifrate')} />
+                <Typography.Text>{archiveFields.unifrate || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Temperature')}>
-                <Input value={archiveFields.dis_condition} onChange={setField('dis_condition')} />
+                <Typography.Text>{archiveFields.dis_condition || '-'}</Typography.Text>
               </Form.Item>
               <Form.Item label={t('dm2000Remarks')}>
-                <Input value={archiveFields.remarks} onChange={setField('remarks')} />
+                <Typography.Text>{archiveFields.remarks || '-'}</Typography.Text>
               </Form.Item>
             </Form>
           </Col>
@@ -357,14 +380,23 @@ export default function DM2000ExportTab({ stationId, selection }) {
         )}
       </Card>
 
-      <Button
-        type="primary"
-        onClick={handleDownload}
-        loading={downloading}
-        disabled={!stationId || !selection?.archname || !templateName || exportBatys.length === 0}
-      >
-        {`${t('dm2000DownloadReport')} (${exportBatys.length} ${t('dm2000BatteryUnit')})`}
-      </Button>
+      <Space wrap>
+        <Button
+          type="primary"
+          onClick={handleDownload}
+          loading={downloading}
+          disabled={!stationId || !selection?.archname || !templateName || exportBatys.length === 0}
+        >
+          {`${t('dm2000DownloadReport')} (${exportBatys.length} ${t('dm2000BatteryUnit')})`}
+        </Button>
+        <Button
+          onClick={handleDownloadPreview}
+          loading={downloading}
+          disabled={!stationId || !selection?.archname || previewBatys.length === 0}
+        >
+          {t('dm2000DownloadPreview')}
+        </Button>
+      </Space>
     </Space>
   );
 }

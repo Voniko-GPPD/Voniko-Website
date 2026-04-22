@@ -24,6 +24,7 @@ export default function DM2000DataTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setBatteries([]);
     if (!stationId || !selection?.archname) {
       setBatteryLoading(false);
@@ -33,7 +34,7 @@ export default function DM2000DataTab({ stationId, selection }) {
     const load = async () => {
       setBatteryLoading(true);
       try {
-        const result = await fetchDM2000Batteries(stationId, selection.archname);
+        const result = await fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal });
         if (!active) return;
         setBatteries(
           (result || [])
@@ -41,7 +42,7 @@ export default function DM2000DataTab({ stationId, selection }) {
             .filter((value) => Number.isFinite(value) && value > 0),
         );
       } catch (err) {
-        if (!active) return;
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load batteries');
       } finally {
         if (!active) return;
@@ -52,46 +53,33 @@ export default function DM2000DataTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [stationId, selection?.archname]);
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setRows([]);
     if (!stationId || !selection?.archname) {
       setLoading(false);
       return () => {};
     }
 
-    if (selectedBaty === 0 && batteryLoading) {
-      setLoading(true);
-      return () => { active = false; };
-    }
-
     const load = async () => {
       setLoading(true);
       setError('');
       try {
+        let result;
         if (selectedBaty > 0) {
-          const result = await fetchDM2000Curve(stationId, selection.archname, selectedBaty);
-          if (!active) return;
-          setRows(result || []);
-        } else if (batteries.length > 0) {
-          const allResults = await Promise.all(
-            batteries.map((baty) =>
-              fetchDM2000Curve(stationId, selection.archname, baty)
-                .then((curve) => (curve || []).map((row) => ({ ...row, BATY: baty }))),
-            ),
-          );
-          if (!active) return;
-          setRows(allResults.flat());
+          result = await fetchDM2000Curve(stationId, selection.archname, selectedBaty, { signal: controller.signal });
         } else {
-          const result = await fetchDM2000AverageCurve(stationId, selection.archname);
-          if (!active) return;
-          setRows(result || []);
+          result = await fetchDM2000AverageCurve(stationId, selection.archname, { signal: controller.signal });
         }
-      } catch (err) {
         if (!active) return;
+        setRows(result || []);
+      } catch (err) {
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load table data');
       } finally {
         if (!active) return;
@@ -102,8 +90,9 @@ export default function DM2000DataTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
-  }, [stationId, selection?.archname, selectedBaty, batteries, batteryLoading]);
+  }, [stationId, selection?.archname, selectedBaty]);
 
   const batteryOptions = useMemo(() => {
     const unique = [...new Set(batteries)].sort((a, b) => a - b);

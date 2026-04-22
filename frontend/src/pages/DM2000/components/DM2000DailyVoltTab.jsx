@@ -30,6 +30,7 @@ export default function DM2000DailyVoltTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setRows([]);
     if (!stationId || !selection?.archname || !selectedBaty) {
       setLoading(false);
@@ -40,11 +41,11 @@ export default function DM2000DailyVoltTab({ stationId, selection }) {
       setLoading(true);
       setError('');
       try {
-        const result = await fetchDM2000DailyVoltage(stationId, selection.archname, selectedBaty);
+        const result = await fetchDM2000DailyVoltage(stationId, selection.archname, selectedBaty, { signal: controller.signal });
         if (!active) return;
         setRows(result || []);
       } catch (err) {
-        if (!active) return;
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load daily voltage');
       } finally {
         if (!active) return;
@@ -55,6 +56,7 @@ export default function DM2000DailyVoltTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [stationId, selection?.archname, selectedBaty]);
 

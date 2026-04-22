@@ -94,6 +94,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setBatteries([]);
     if (!stationId || !selection?.archname) {
       setBatteryLoading(false);
@@ -104,7 +105,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
       setBatteryLoading(true);
       setError('');
       try {
-        const rows = await fetchDM2000Batteries(stationId, selection.archname);
+        const rows = await fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal });
         if (!active) return;
         setBatteries(
           (rows || [])
@@ -112,7 +113,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
             .filter((value) => Number.isFinite(value) && value > 0),
         );
       } catch (err) {
-        if (!active) return;
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load batteries');
       } finally {
         if (!active) return;
@@ -123,11 +124,13 @@ export default function DM2000CurveTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [stationId, selection?.archname]);
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setCurve([]);
     setStats({});
     setAllCurves({});
@@ -140,7 +143,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
     if (selectedBaty === SHOW_ALL_VALUE) {
       if (batteries.length === 0) {
         setLoading(false);
-        return () => {};
+        return () => { active = false; controller.abort(); };
       }
       const loadAll = async () => {
         setLoading(true);
@@ -150,12 +153,12 @@ export default function DM2000CurveTab({ stationId, selection }) {
           const [curveResults, statsResults] = await Promise.all([
             Promise.all(
               batteries.map((baty) =>
-                fetchDM2000Curve(stationId, selection.archname, baty).then((rows) => ({ baty, rows: rows || [] })),
+                fetchDM2000Curve(stationId, selection.archname, baty, { signal: controller.signal }).then((rows) => ({ baty, rows: rows || [] })),
               ),
             ),
             Promise.all(
               batteries.map((baty) =>
-                fetchDM2000Stats(stationId, selection.archname, baty).then((s) => ({ baty, stats: s || {} })),
+                fetchDM2000Stats(stationId, selection.archname, baty, { signal: controller.signal }).then((s) => ({ baty, stats: s || {} })),
               ),
             ),
           ]);
@@ -180,7 +183,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
             DURATION_MIN: allDuration.length > 0 ? Math.max(...allDuration) : null,
           } : {});
         } catch (err) {
-          if (!active) return;
+          if (!active || err.name === 'AbortError') return;
           setError(err.message || 'Failed to load curve data');
         } finally {
           if (!active) return;
@@ -189,7 +192,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
         }
       };
       loadAll();
-      return () => { active = false; };
+      return () => { active = false; controller.abort(); };
     }
 
     const load = async () => {
@@ -199,15 +202,15 @@ export default function DM2000CurveTab({ stationId, selection }) {
       try {
         const [curveRows, statsRows] = await Promise.all([
           selectedBaty > 0
-            ? fetchDM2000Curve(stationId, selection.archname, selectedBaty)
-            : fetchDM2000AverageCurve(stationId, selection.archname),
-          fetchDM2000Stats(stationId, selection.archname, selectedBaty),
+            ? fetchDM2000Curve(stationId, selection.archname, selectedBaty, { signal: controller.signal })
+            : fetchDM2000AverageCurve(stationId, selection.archname, { signal: controller.signal }),
+          fetchDM2000Stats(stationId, selection.archname, selectedBaty, { signal: controller.signal }),
         ]);
         if (!active) return;
         setCurve(curveRows || []);
         setStats(statsRows || {});
       } catch (err) {
-        if (!active) return;
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load curve data');
       } finally {
         if (!active) return;
@@ -219,6 +222,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [stationId, selection?.archname, selectedBaty, batteries]);
 

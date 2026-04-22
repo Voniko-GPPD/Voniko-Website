@@ -36,6 +36,9 @@ WATCH_INTERVAL_SECONDS: int = 5
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(5)
 _ACCESS_QUERY_TIMEOUT: float = 60.0  # seconds to wait for a DB slot before returning 503
+# Limit concurrent DM2000 shadow-copy + query operations to avoid memory/disk exhaustion
+# when many requests arrive simultaneously (e.g. when a user rapidly switches archives).
+_DM2000_LS_LOCK = threading.Semaphore(2)
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
@@ -45,6 +48,9 @@ _DM2000_CURVE_CACHE_TTL: float = 300.0  # seconds
 _DM2000_ARCHIVES_CACHE: dict[str, tuple[list, float]] = {}
 _DM2000_ARCHIVES_CACHE_LOCK = threading.Lock()
 _DM2000_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
+_DM2000_BATTERIES_CACHE: dict[str, tuple[list, float]] = {}
+_DM2000_BATTERIES_CACHE_LOCK = threading.Lock()
+_DM2000_BATTERIES_CACHE_TTL: float = 60.0  # seconds
 _DM2000_CACHE_MAX_ENTRIES: int = 100
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
@@ -492,8 +498,17 @@ def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
     ls_path = Path(get_dm2000_ls_path())
     if not ls_path.exists():
         raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
-    with shadow_copy_dm2000(str(ls_path)) as copied:
-        return query_mdb(copied, sql, params)
+    acquired = _DM2000_LS_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is busy with too many concurrent requests, please retry shortly",
+        )
+    try:
+        with shadow_copy_dm2000(str(ls_path)) as copied:
+            return query_mdb(copied, sql, params)
+    finally:
+        _DM2000_LS_LOCK.release()
 
 
 def _resolve_dm2000_template_path(template_name: str) -> str:
@@ -1157,6 +1172,14 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
 @app.get("/dm2000/archives/{archname}/batteries")
 def get_dm2000_batteries(archname: str):
     _validate_dm2000_archname(archname)
+
+    with _DM2000_BATTERIES_CACHE_LOCK:
+        cached = _DM2000_BATTERIES_CACHE.get(archname)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM2000_BATTERIES_CACHE_TTL:
+                return {"batteries": rows, "archname": archname}
+
     try:
         rows = _read_dm2000_ls(
             "SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC",
@@ -1187,6 +1210,9 @@ def get_dm2000_batteries(archname: str):
     has_battery = any(_baty_int(row.get("baty")) is not None for row in rows)
     if not has_battery:
         rows = _derive_dm2000_batteries_from_vtime(archname)
+
+    with _DM2000_BATTERIES_CACHE_LOCK:
+        _DM2000_BATTERIES_CACHE[archname] = (rows, time.time())
     return {"batteries": rows, "archname": archname}
 
 

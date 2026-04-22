@@ -40,6 +40,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setTemplates([]);
     setTemplateName('');
     if (!stationId) {
@@ -51,14 +52,14 @@ export default function DM2000ExportTab({ stationId, selection }) {
       setLoading(true);
       setError('');
       try {
-        const result = await fetchDM2000Templates(stationId);
+        const result = await fetchDM2000Templates(stationId, { signal: controller.signal });
         if (!active) return;
         setTemplates(result || []);
         if ((result || []).length > 0) {
           setTemplateName(result[0]);
         }
       } catch (err) {
-        if (!active) return;
+        if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load templates');
       } finally {
         if (!active) return;
@@ -69,6 +70,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     load();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [stationId]);
 
@@ -91,10 +93,11 @@ export default function DM2000ExportTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setBatteries([]);
     if (!stationId || !selection?.archname) return () => {};
 
-    fetchDM2000Batteries(stationId, selection.archname)
+    fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal })
       .then((rows) => {
         if (!active) return;
         setBatteries(
@@ -103,8 +106,10 @@ export default function DM2000ExportTab({ stationId, selection }) {
             .filter((v) => Number.isFinite(v) && v > 0),
         );
       })
-      .catch(() => {});
-    return () => { active = false; };
+      .catch((err) => {
+        if (!active || err.name === 'AbortError') return;
+      });
+    return () => { active = false; controller.abort(); };
   }, [stationId, selection?.archname]);
 
   const batteryOptions = useMemo(() => [
@@ -127,23 +132,26 @@ export default function DM2000ExportTab({ stationId, selection }) {
     missing.forEach((b) => requestedBatysRef.current.add(b));
 
     let active = true;
+    const controller = new AbortController();
     Promise.all([
       Promise.all(missing.map((baty) =>
-        fetchDM2000Stats(stationId, selection.archname, baty)
+        fetchDM2000Stats(stationId, selection.archname, baty, { signal: controller.signal })
           .then((s) => [baty, s || {}])
-          .catch(() => [baty, {}]),
+          .catch((err) => (err.name === 'AbortError' ? null : [baty, {}])),
       )),
       Promise.all(missing.map((baty) =>
-        fetchDM2000TimeAtVoltage(stationId, selection.archname, baty)
+        fetchDM2000TimeAtVoltage(stationId, selection.archname, baty, { signal: controller.signal })
           .then((rows) => [baty, rows || []])
-          .catch(() => [baty, []]),
+          .catch((err) => (err.name === 'AbortError' ? null : [baty, []])),
       )),
     ]).then(([statsEntries, timeEntries]) => {
       if (!active) return;
-      setPreviewStats((prev) => ({ ...prev, ...Object.fromEntries(statsEntries) }));
-      setPreviewTimeAtVolt((prev) => ({ ...prev, ...Object.fromEntries(timeEntries) }));
+      const validStats = statsEntries.filter(Boolean);
+      const validTime = timeEntries.filter(Boolean);
+      setPreviewStats((prev) => ({ ...prev, ...Object.fromEntries(validStats) }));
+      setPreviewTimeAtVolt((prev) => ({ ...prev, ...Object.fromEntries(validTime) }));
     });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [stationId, selection?.archname, previewBatys]);
 
   const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));

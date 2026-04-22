@@ -833,13 +833,15 @@ def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
 
 
 def _dm2000_get_value(row: dict, *keys):
+    # DM2000 Access databases use "--" as a null/empty indicator for many fields.
+    _NULL_LIKE = (None, "", "--")
     for key in keys:
-        if key in row and row.get(key) not in (None, ""):
+        if key in row and row.get(key) not in _NULL_LIKE:
             return row.get(key)
     lowered = {str(k).lower(): v for k, v in row.items()}
     for key in keys:
         value = lowered.get(key.lower())
-        if value not in (None, ""):
+        if value not in _NULL_LIKE:
             return value
     return None
 
@@ -1297,6 +1299,7 @@ def get_dm2000_archives(
                 row,
                 "voltage_type", "bcdv", "dcdy", "dxy", "edy",
                 "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+                "lxdy", "vtype", "battv", "lx", "dctype", "v_type",
             ),
             "trademark": _dm2000_get_value(row, "trademark", "shangbiao", "sbmc", "pinpai"),
             "load_resistance": _dm2000_get_value(row, "load_resistance", "fzdz", "fzlkdz", "dw"),
@@ -1304,11 +1307,13 @@ def get_dm2000_archives(
                 row,
                 "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
                 "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                "jzdian", "evy", "minv", "cutv", "jz_dy",
             ),
             "dis_condition": _dm2000_get_value(
                 row,
                 "dis_condition", "wd", "fdwd", "hjwd", "wendu",
                 "fdtj", "hjtj", "temperature", "temp_c",
+                "temp", "hjt", "qw", "t", "csh",
             ),
             "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration"),
             "company": DM2000_COMPANY_NAME or None,
@@ -1435,6 +1440,7 @@ def get_dm2000_batteries(archname: str):
             row,
             "sh", "sot", "SOT", "sot_mah", "sotmah",
             "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl",
+            "fdsh", "sh_mah", "fdmah", "actual_cap", "shrc", "fdrc",
         )
 
     # If ls_pam2 has no usable rows (e.g. discharge in progress, or pam2 not
@@ -1684,6 +1690,7 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
             archive,
             "voltage_type", "bcdv", "dcdy", "dxy", "edy",
             "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+            "lxdy", "vtype", "battv", "lx", "dctype", "v_type",
         ) or ""),
         "TRADEMARK": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
         "LOAD_RESISTANCE": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
@@ -1691,11 +1698,13 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
             archive,
             "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
             "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            "jzdian", "evy", "minv", "cutv", "jz_dy",
         ) or ""),
         "DIS_CONDITION": str(_dm2000_get_value(
             archive,
             "dis_condition", "wd", "fdwd", "hjwd", "wendu",
             "fdtj", "hjtj", "temperature", "temp_c",
+            "temp", "hjt", "qw", "t", "csh",
         ) or ""),
         "MIN_DURATION": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration") or ""),
         **stats,
@@ -1928,11 +1937,11 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         "madedate": _to_date_text(_dm2000_get_value(archive, "madedate", "scrq")),
         "serialno": str(_dm2000_get_value(archive, "serialno", "dcph") or ""),
         "remarks": str(_dm2000_get_value(archive, "remarks", "bz") or ""),
-        "voltage_type": str(_dm2000_get_value(archive, "voltage_type", "bcdv", "dcdy", "dxy", "edy", "nominal_voltage") or ""),
+        "voltage_type": str(_dm2000_get_value(archive, "voltage_type", "bcdv", "dcdy", "dxy", "edy", "nominal_voltage", "lxdy", "vtype", "battv", "lx", "dctype", "v_type") or ""),
         "trademark": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
         "load_resistance": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
-        "endpoint_voltage": str(_dm2000_get_value(archive, "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz", "endpoint_v", "vcut", "cutoffv") or ""),
-        "dis_condition": str(_dm2000_get_value(archive, "dis_condition", "wd", "fdwd", "hjwd", "wendu", "fdtj", "hjtj", "temperature", "temp_c") or ""),
+        "endpoint_voltage": str(_dm2000_get_value(archive, "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz", "endpoint_v", "vcut", "cutoffv", "jzdian", "evy", "minv", "cutv", "jz_dy") or ""),
+        "dis_condition": str(_dm2000_get_value(archive, "dis_condition", "wd", "fdwd", "hjwd", "wendu", "fdtj", "hjtj", "temperature", "temp_c", "temp", "hjt", "qw", "t", "csh") or ""),
         "min_duration": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration") or ""),
     }
 
@@ -1958,7 +1967,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
             row["ocv"] = _dm2000_get_value(row, "ocv", "OCV")
         if "fcv" not in row:
             row["fcv"] = _dm2000_get_value(row, "fcv", "FCV")
-        row["sot_mah"] = _dm2000_get_value(row, "sh", "sot", "SOT", "sot_mah", "sotmah", "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl")
+        row["sot_mah"] = _dm2000_get_value(row, "sh", "sot", "SOT", "sot_mah", "sotmah", "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl", "fdsh", "sh_mah", "fdmah", "actual_cap", "shrc", "fdrc")
         battery_params[b] = row
 
     # Supplement OCV/FCV from ls_evolt

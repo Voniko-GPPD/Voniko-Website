@@ -54,6 +54,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   };
 
   const columns = [
+    { title: '#', key: 'idx', width: 60, render: (_v, _r, i) => i + 1 },
     { title: t('dm2000StartDate'), dataIndex: 'startdate', key: 'startdate', width: 140 },
     { title: t('dm2000Type'), dataIndex: 'dcxh', key: 'dcxh', width: 120 },
     { title: t('dm2000Name'), dataIndex: 'name', key: 'name', width: 140 },
@@ -61,7 +62,10 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     { title: t('dm2000Duration'), dataIndex: 'duration', key: 'duration', width: 120 },
     { title: t('dm2000UnifRate'), dataIndex: 'unifrate', key: 'unifrate', width: 100 },
     { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 140 },
+    { title: t('dm2000MadeDate'), dataIndex: 'madedate', key: 'madedate', width: 120 },
     { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160 },
+    { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 140 },
+    { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160 },
   ];
 
   return (

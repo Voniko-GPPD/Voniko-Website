@@ -302,60 +302,15 @@ export default function DM2000ExportTab({ stationId, selection }) {
         <Row gutter={[16, 8]}>
           <Col xs={24} sm={12}>
             <Form layout="vertical" size="small">
-              <Form.Item label={t('dm2000ArchName')}>
-                <Typography.Text>{archiveFields.archname || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000Name')}>
-                <Typography.Text>{archiveFields.name || '-'}</Typography.Text>
-              </Form.Item>
               <Form.Item label={t('dm2000Type')}>
                 <Input value={archiveFields.dcxh} onChange={setField('dcxh')} />
-              </Form.Item>
-              <Form.Item label={t('dm2000VoltageType')}>
-                <Typography.Text>{archiveFields.voltage_type || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000Trademark')}>
-                <Typography.Text>{archiveFields.trademark || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000SerialNo')}>
-                <Typography.Text>{archiveFields.serialno || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000Manufacturer')}>
-                <Input value={archiveFields.manufacturer} onChange={setField('manufacturer')} />
-              </Form.Item>
-              <Form.Item label={t('dm2000MadeDate')}>
-                <Typography.Text>{archiveFields.madedate || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000MinDuration')}>
-                <Typography.Text>{archiveFields.min_duration || '-'}</Typography.Text>
               </Form.Item>
             </Form>
           </Col>
           <Col xs={24} sm={12}>
             <Form layout="vertical" size="small">
-              <Form.Item label={t('dm2000StartDate')}>
-                <Typography.Text>{archiveFields.startdate || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000EndDate')}>
-                <Typography.Text>{archiveFields.enddate || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000DisCondition')}>
-                <Typography.Text>{archiveFields.fdfs || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000LoadResistance')}>
-                <Typography.Text>{archiveFields.load_resistance || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000EndpointVoltage')}>
-                <Typography.Text>{archiveFields.endpoint_voltage || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000UnifRate')}>
-                <Typography.Text>{archiveFields.unifrate || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000Temperature')}>
-                <Typography.Text>{archiveFields.dis_condition || '-'}</Typography.Text>
-              </Form.Item>
-              <Form.Item label={t('dm2000Remarks')}>
-                <Typography.Text>{archiveFields.remarks || '-'}</Typography.Text>
+              <Form.Item label={t('dm2000Manufacturer')}>
+                <Input value={archiveFields.manufacturer} onChange={setField('manufacturer')} />
               </Form.Item>
             </Form>
           </Col>

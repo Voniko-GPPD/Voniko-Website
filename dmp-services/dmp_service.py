@@ -538,6 +538,13 @@ class DM2000ReportRequest(BaseModel):
     override_remarks: Optional[str] = None
 
 
+class DM2000SimpleReportRequest(BaseModel):
+    archname: str
+    batys: list[int] = Field(default=[])
+    override_battery_type: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+
+
 def render_excel_template(template_path: str, context: dict) -> bytes:
     wb = load_workbook(template_path)
     for ws in wb.worksheets:
@@ -885,7 +892,12 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
 
     # Detect which schema was returned and normalise to {TIM, VOLT} dicts.
     if raw and "dy" in raw[0]:
-        rows = []
+        # cdid-based schema: dy = voltage threshold, TIM = time{baty} for this battery.
+        # ls_vtime may have duplicate rows for the same voltage threshold (multiple
+        # discharge sessions stored in the same archive).  Group by voltage (dy) and
+        # average the TIM values so that each threshold appears exactly once, giving
+        # a single smooth curve instead of multiple overlapping lines.
+        volt_groups: dict[float, list[float]] = {}
         for row in raw:
             tim = row.get("TIM")
             volt = row.get("dy")
@@ -893,11 +905,18 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
                 t = float(tim)
                 v = float(volt)
                 if not math.isnan(t) and not math.isnan(v):
-                    rows.append({"TIM": t, "VOLT": v})
+                    volt_groups.setdefault(v, []).append(t)
             except (TypeError, ValueError):
                 continue
+        rows = sorted(
+            [{"TIM": sum(ts) / len(ts), "VOLT": v} for v, ts in volt_groups.items()],
+            key=lambda r: r["TIM"],
+        )
     else:
-        rows = raw
+        # archname-based schema: full time-series rows with TIM and VOLT columns.
+        # Apply the same deduplication used for the average curve: group by TIM and
+        # average VOLT to collapse any duplicate measurements from multiple sessions.
+        rows = _compute_average_curve(raw)
 
     with _DM2000_CURVE_CACHE_LOCK:
         _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (rows, time.time()))
@@ -1688,6 +1707,346 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
     filename = f"dm2000_report_{payload.archname}_{baty_label}.xlsx"
     return StreamingResponse(
         BytesIO(report_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _build_preview_workbook(  # noqa: C901
+    archive_fields: dict,
+    company: str,
+    batys: list,
+    stats_map: dict,
+    time_at_volt_map: dict,
+    battery_params: dict,
+) -> bytes:
+    """Build a simple Excel workbook matching the ReportPreview HTML format."""
+    from openpyxl import Workbook as _Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90]
+    thin = Side(style="thin")
+    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill_header = PatternFill("solid", fgColor="FAFAFA")
+    fill_label = PatternFill("solid", fgColor="F5F5F5")
+    fill_section = PatternFill("solid", fgColor="EFF4FF")
+
+    wb = _Workbook()
+    ws = wb.active
+    ws.title = "Battery Discharge Curve"
+
+    num_batys = len(batys)
+    total_cols = 1 + num_batys + 3  # label + No.1..N + Max + Min + Avge
+
+    def _safe_float(v):
+        if v is None or v in ("", "--"):
+            return None
+        try:
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    def _fmt_num(v, decimals=3):
+        f = _safe_float(v)
+        return round(f, decimals) if f is not None else "-"
+
+    def _agg(vals):
+        vs = [_safe_float(v) for v in vals]
+        vs = [x for x in vs if x is not None]
+        if not vs:
+            return "-", "-", "-"
+        return round(max(vs), 3), round(min(vs), 3), round(sum(vs) / len(vs), 3)
+
+    def _set(row, col, value, bold=False, fill=None, align="center", merge_to=None, italic=False, size=10):
+        c = ws.cell(row=row, column=col, value=value)
+        c.border = bdr
+        c.font = Font(bold=bold, italic=italic, name="Arial", size=size)
+        c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=False)
+        if fill:
+            c.fill = fill
+        if merge_to and merge_to > col:
+            ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=merge_to)
+        return c
+
+    half = total_cols // 2
+    r = 1
+
+    # Title
+    _set(r, 1, "Battery Discharge Curve", bold=True, merge_to=total_cols, size=14)
+    r += 1
+
+    # Company
+    if company:
+        _set(r, 1, company, merge_to=total_cols)
+        r += 1
+
+    # Archive info pairs
+    info_rows_data = [
+        ("Ten lo", archive_fields.get("name") or "-", "Ma archive", archive_fields.get("archname") or "-"),
+        ("Kieu pin", archive_fields.get("dcxh") or "-", "Dieu kien phong", archive_fields.get("fdfs") or "-"),
+        ("Loai dien ap", archive_fields.get("voltage_type") or "-", "Dien tro tai", archive_fields.get("load_resistance") or "-"),
+        ("Nhan hieu", archive_fields.get("trademark") or "-", "Dien ap ket thuc", archive_fields.get("endpoint_voltage") or "-"),
+        ("So seri", archive_fields.get("serialno") or "-", "Dong deu", archive_fields.get("unifrate") or "-"),
+        ("Nha san xuat", archive_fields.get("manufacturer") or "-", "Ngay bat dau", archive_fields.get("startdate") or "-"),
+        ("Ngay san xuat", archive_fields.get("madedate") or "-", "Ngay ket thuc", archive_fields.get("enddate") or "-"),
+        ("Thoi gian toi thieu", archive_fields.get("min_duration") or "-", "Dieu kien nhiet do", archive_fields.get("dis_condition") or "-"),
+    ]
+    for left_lbl, left_val, right_lbl, right_val in info_rows_data:
+        _set(r, 1, left_lbl, fill=fill_label, align="left")
+        _set(r, 2, left_val, align="left", merge_to=half)
+        _set(r, half + 1, right_lbl, fill=fill_label, align="left")
+        _set(r, half + 2, right_val, align="left", merge_to=total_cols)
+        r += 1
+
+    # Battery column headers
+    _set(r, 1, "", fill=fill_header)
+    for i, b in enumerate(batys):
+        _set(r, 2 + i, f"No.{b}", bold=True, fill=fill_header)
+    _set(r, 2 + num_batys, "Max", bold=True, fill=fill_header)
+    _set(r, 3 + num_batys, "Min", bold=True, fill=fill_header)
+    _set(r, 4 + num_batys, "Avge", bold=True, fill=fill_header)
+    r += 1
+
+    def _get_batt_field(baty, *keys):
+        row = battery_params.get(baty) or {}
+        for k in keys:
+            for kk in (k, k.upper(), k.lower()):
+                v = row.get(kk)
+                if v not in (None, "", "--"):
+                    return v
+        return None
+
+    # OCV row
+    ocv_vals = [_safe_float(_get_batt_field(b, "ocv", "OCV")) for b in batys]
+    mx, mn, av = _agg(ocv_vals)
+    _set(r, 1, "OCV V", fill=fill_label, align="left")
+    for i, v in enumerate(ocv_vals):
+        _set(r, 2 + i, _fmt_num(v))
+    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+    r += 1
+
+    # FCV row
+    fcv_vals = [_safe_float(_get_batt_field(b, "fcv", "FCV")) for b in batys]
+    mx, mn, av = _agg(fcv_vals)
+    _set(r, 1, "FCV V", fill=fill_label, align="left")
+    for i, v in enumerate(fcv_vals):
+        _set(r, 2 + i, _fmt_num(v))
+    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+    r += 1
+
+    # SOt mAh row
+    sot_vals = [_safe_float(_get_batt_field(b, "sot_mah", "sot", "SOT", "sh", "rql", "fdrl")) for b in batys]
+    mx, mn, av = _agg(sot_vals)
+    _set(r, 1, "SOt mAh", fill=fill_label, align="left")
+    for i, v in enumerate(sot_vals):
+        _set(r, 2 + i, _fmt_num(v))
+    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+    r += 1
+
+    # Duration section header
+    _set(r, 1, "The Duration of Series Designated Voltage (Unit: hour)", fill=fill_section, merge_to=total_cols, italic=True, align="left")
+    r += 1
+
+    def _get_tav(baty, threshold):
+        rows = time_at_volt_map.get(baty) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - threshold) < 0.001:
+                    mins = row.get("minutes") or row.get("MINUTES")
+                    if mins is not None:
+                        f = float(mins)
+                        return None if math.isnan(f) else f / 60.0
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    for threshold in THRESHOLDS:
+        tav_vals = [_get_tav(b, threshold) for b in batys]
+        mx, mn, av = _agg(tav_vals)
+        _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
+        for i, v in enumerate(tav_vals):
+            _set(r, 2 + i, round(v, 1) if v is not None else "-")
+        _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        r += 1
+
+    # Remarks
+    _set(r, 1, "Ghi chu", fill=fill_label, align="left")
+    _set(r, 2, archive_fields.get("remarks") or "-", align="left", merge_to=total_cols)
+
+    # Column widths
+    ws.column_dimensions["A"].width = 22
+    for col_idx in range(2, total_cols + 1):
+        ltr = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[ltr].width = 10
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@app.post("/dm2000/report-simple")
+def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
+    """Generate a preview-style Excel report without requiring a template file."""
+    _validate_dm2000_archname(payload.archname)
+
+    if not payload.batys:
+        raise HTTPException(status_code=400, detail="batys must not be empty")
+
+    batys = [b for b in payload.batys if isinstance(b, int) and 1 <= b <= 99]
+    if not batys:
+        raise HTTPException(status_code=400, detail="No valid battery numbers provided")
+
+    # Fetch archive metadata
+    try:
+        archive_rows = _read_dm2000_ls_multi([
+            ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,)),
+            ("SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        archive_rows = []
+    archive = archive_rows[0] if archive_rows else {}
+
+    def _to_date_text(v):
+        if v and hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)[:10] if v not in (None, "") else ""
+
+    def _apply_override(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
+
+    archive_fields = {
+        "archname": str(_dm2000_get_value(archive, "archname", "cdid", "id") or payload.archname),
+        "name": str(_dm2000_get_value(archive, "name", "dcmc") or ""),
+        "startdate": _to_date_text(_dm2000_get_value(archive, "startdate", "fdrq")),
+        "enddate": _to_date_text(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date")),
+        "dcxh": str(_apply_override(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type) or ""),
+        "fdfs": str(_dm2000_get_value(archive, "fdfs") or ""),
+        "unifrate": str(_dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws") or ""),
+        "manufacturer": str(_apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer) or ""),
+        "madedate": _to_date_text(_dm2000_get_value(archive, "madedate", "scrq")),
+        "serialno": str(_dm2000_get_value(archive, "serialno", "dcph") or ""),
+        "remarks": str(_dm2000_get_value(archive, "remarks", "bz") or ""),
+        "voltage_type": str(_dm2000_get_value(archive, "voltage_type", "bcdv", "dcdy", "dxy", "edy", "nominal_voltage") or ""),
+        "trademark": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
+        "load_resistance": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
+        "endpoint_voltage": str(_dm2000_get_value(archive, "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz", "endpoint_v", "vcut", "cutoffv") or ""),
+        "dis_condition": str(_dm2000_get_value(archive, "dis_condition", "wd", "fdwd", "hjwd", "wendu", "fdtj", "hjtj", "temperature", "temp_c") or ""),
+        "min_duration": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration") or ""),
+    }
+
+    # Fetch per-battery params (OCV/FCV/SOt)
+    try:
+        batt_rows = _read_dm2000_ls_multi([
+            ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (payload.archname,)),
+            ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (payload.archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        batt_rows = []
+
+    battery_params: dict = {}
+    for row in batt_rows:
+        b_raw = _dm2000_get_value(row, "baty", "gpp")
+        try:
+            b = int(float(str(b_raw)))
+        except (TypeError, ValueError):
+            continue
+        if b <= 0:
+            continue
+        if "ocv" not in row:
+            row["ocv"] = _dm2000_get_value(row, "ocv", "OCV")
+        if "fcv" not in row:
+            row["fcv"] = _dm2000_get_value(row, "fcv", "FCV")
+        row["sot_mah"] = _dm2000_get_value(row, "sh", "sot", "SOT", "sot_mah", "sotmah", "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl")
+        battery_params[b] = row
+
+    # Supplement OCV/FCV from ls_evolt
+    try:
+        evolt_rows = _read_dm2000_ls(
+            "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
+            " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+            (payload.archname,),
+        )
+        evolt_map: dict = {}
+        for er in evolt_rows:
+            dy = str(er.get("dy") or "").strip().upper()
+            if dy not in ("OCV", "FCV"):
+                continue
+            for i in range(1, 10):
+                raw_v = er.get(f"volt{i}")
+                if raw_v in (None, "", "--"):
+                    continue
+                try:
+                    fv = float(raw_v)
+                    if not math.isnan(fv):
+                        evolt_map.setdefault(i, {})[dy] = fv
+                except (TypeError, ValueError):
+                    pass
+        for b, evolt_data in evolt_map.items():
+            row = battery_params.setdefault(b, {"baty": b})
+            if row.get("ocv") is None:
+                row["ocv"] = evolt_data.get("OCV")
+            if row.get("fcv") is None:
+                row["fcv"] = evolt_data.get("FCV")
+    except (pyodbc.Error, HTTPException):
+        pass
+
+    stats_map: dict = {}
+    time_at_volt_map: dict = {}
+    for b in batys:
+        try:
+            stats_map[b] = compute_dm2000_stats(_read_dm2000_curve_rows(payload.archname, b))
+            pam2 = _get_pam2_ocv_fcv(payload.archname, b)
+            if pam2:
+                stats_map[b].update(pam2)
+                stats_map[b]["OCV"] = pam2["VOLT_MAX"]
+                stats_map[b]["FCV"] = pam2["VOLT_MIN"]
+        except (pyodbc.Error, HTTPException):
+            stats_map[b] = {}
+
+        row = battery_params.setdefault(b, {"baty": b})
+        if row.get("ocv") is None and stats_map[b].get("OCV") is not None:
+            row["ocv"] = stats_map[b]["OCV"]
+        if row.get("fcv") is None and stats_map[b].get("FCV") is not None:
+            row["fcv"] = stats_map[b]["FCV"]
+
+        tav: list = []
+        try:
+            tav = _read_dm2000_ls("SELECT * FROM ls_timev WHERE archname = ? AND baty = ?", (payload.archname, b))
+        except (pyodbc.Error, HTTPException):
+            pass
+        if not tav:
+            tim_col = f"tim_vot{b}"
+            try:
+                tav = _read_dm2000_ls(
+                    f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                    (payload.archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        if not tav:
+            time_col = f"time{b}"
+            try:
+                tav = _read_dm2000_ls(
+                    f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+                    (payload.archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        time_at_volt_map[b] = tav
+
+    workbook_bytes = _build_preview_workbook(
+        archive_fields=archive_fields,
+        company=DM2000_COMPANY_NAME or "",
+        batys=batys,
+        stats_map=stats_map,
+        time_at_volt_map=time_at_volt_map,
+        battery_params=battery_params,
+    )
+    filename = f"dm2000_preview_{payload.archname}.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

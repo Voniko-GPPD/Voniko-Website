@@ -557,6 +557,8 @@ export default {
   dm2000PreviewReport: '预览报告',
   dm2000ReportPreviewTitle: '报告预览',
   dm2000EditableFields: '归档信息（可编辑）',
+  dm2000ArchiveInfo: '归档信息',
+  dm2000DownloadPreview: '从预览下载',
   dm2000EndDate: '结束日期',
   dm2000VoltageType: '电压类型',
   dm2000Trademark: '商标',

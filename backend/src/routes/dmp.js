@@ -296,4 +296,28 @@ router.post('/dm2000/report', authenticateToken, async (req, res, next) => {
   }
 });
 
+router.post('/dm2000/report-simple', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/report-simple`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dm2000_preview.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try { return res.status(err.response.status).json(JSON.parse(msg)); }
+      catch { return res.status(err.response.status).send(msg); }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
 module.exports = router;

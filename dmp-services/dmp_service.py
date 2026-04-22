@@ -756,6 +756,63 @@ def _compute_average_curve(rows: list[dict]) -> list[dict]:
     ]
 
 
+def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> float | None:
+    """Compute approximate SOt mAh by trapezoidal integration over voltage thresholds.
+
+    tav_rows: list of dicts with 'sj'/'SJ' (voltage threshold, V) and
+              'minutes'/'MINUTES' (cumulative time from discharge start, min).
+    load_r_ohm: load resistance in Ohms.
+    fcv: final closed-circuit voltage in V (optional). When provided, an extra
+         segment from FCV at t=0 to the first threshold is included, which gives
+         a more accurate total capacity.
+
+    Returns SOt in mAh, or None if the data is insufficient.
+    """
+    if not tav_rows or not load_r_ohm or load_r_ohm <= 0:
+        return None
+
+    points: list[tuple] = []
+    for row in tav_rows:
+        sj = row.get("sj") or row.get("SJ")
+        mins = row.get("minutes") or row.get("MINUTES")
+        try:
+            v = float(sj)
+            t = float(mins)
+            if not math.isnan(v) and not math.isnan(t) and t >= 0:
+                points.append((v, t))
+        except (TypeError, ValueError):
+            continue
+
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda x: x[1])  # sort by time ascending
+
+    total_mah = 0.0
+
+    # Include initial segment from FCV (at t=0) to the first threshold
+    if fcv is not None:
+        try:
+            fcv_f = float(fcv)
+            if not math.isnan(fcv_f) and points[0][1] > 0 and fcv_f > points[0][0]:
+                dt_hours = points[0][1] / 60.0
+                v_avg = (fcv_f + points[0][0]) / 2.0
+                total_mah += (v_avg / load_r_ohm) * 1000.0 * dt_hours
+        except (TypeError, ValueError):
+            pass
+
+    # Sum all threshold-to-threshold segments
+    for i in range(len(points) - 1):
+        v1, t1 = points[i]
+        v2, t2 = points[i + 1]
+        if t2 > t1:
+            dt_hours = (t2 - t1) / 60.0
+            v_avg = (v1 + v2) / 2.0
+            total_mah += (v_avg / load_r_ohm) * 1000.0 * dt_hours
+
+    return total_mah if total_mah > 0 else None
+
+
 def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
     """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
     a single battery.
@@ -2045,14 +2102,33 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
                 pass
         time_at_volt_map[b] = tav
 
-    workbook_bytes = _build_preview_workbook(
-        archive_fields=archive_fields,
-        company=DM2000_COMPANY_NAME or "",
-        batys=batys,
-        stats_map=stats_map,
-        time_at_volt_map=time_at_volt_map,
-        battery_params=battery_params,
-    )
+    # Compute SOt mAh from time-at-voltage data for batteries missing it in ls_pam2
+    load_r_str = archive_fields.get("load_resistance", "")
+    try:
+        load_r = float(load_r_str) if load_r_str else None
+    except (TypeError, ValueError):
+        load_r = None
+    if load_r and load_r > 0:
+        for b in batys:
+            row = battery_params.setdefault(b, {"baty": b})
+            if row.get("sot_mah") is None:
+                fcv = row.get("fcv")
+                sot = _compute_sot_mah_from_tav(time_at_volt_map.get(b, []), load_r, fcv)
+                if sot is not None:
+                    row["sot_mah"] = sot
+
+    try:
+        workbook_bytes = _build_preview_workbook(
+            archive_fields=archive_fields,
+            company=DM2000_COMPANY_NAME or "",
+            batys=batys,
+            stats_map=stats_map,
+            time_at_volt_map=time_at_volt_map,
+            battery_params=battery_params,
+        )
+    except Exception as exc:
+        logger.exception("Error building preview workbook for archname=%s: %s", payload.archname, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}") from exc
     filename = f"dm2000_preview_{payload.archname}.xlsx"
     return StreamingResponse(
         BytesIO(workbook_bytes),

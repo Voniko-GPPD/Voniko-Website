@@ -85,11 +85,11 @@ export default function DM2000CurveTab({ stationId, selection }) {
   const [stats, setStats] = useState({});
   const [batteries, setBatteries] = useState([]);
   const [showThresholds, setShowThresholds] = useState(true);
-  const [selectedBaty, setSelectedBaty] = useState(0);
+  const [selectedBaty, setSelectedBaty] = useState(SHOW_ALL_VALUE);
   const [allCurves, setAllCurves] = useState({});
 
   useEffect(() => {
-    setSelectedBaty(0);
+    setSelectedBaty(SHOW_ALL_VALUE);
   }, [selection?.archname]);
 
   useEffect(() => {
@@ -229,7 +229,6 @@ export default function DM2000CurveTab({ stationId, selection }) {
   const batteryOptions = useMemo(() => {
     const unique = [...new Set(batteries)].sort((a, b) => a - b);
     return [
-      { value: 0, label: t('dm2000BatteryAverage') },
       { value: SHOW_ALL_VALUE, label: t('dm2000ShowAll') },
       ...unique.map((value) => ({ value, label: `${value}#` })),
     ];
@@ -317,7 +316,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
               <LineChart data={multilineChartData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} label={{ value: t('dm2000TimeMin'), position: 'insideBottom', offset: -5 }} />
-                <YAxis domain={[0.90, 1.60]} unit="V" />
+                <YAxis domain={['auto', 'auto']} unit="V" />
                 <Tooltip
                   formatter={(value, name) => [`${Number(value).toFixed(4)} V`, name]}
                   labelFormatter={(label) => `${Number(label).toFixed(4)} min`}
@@ -335,6 +334,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
                     stroke={BATTERY_COLORS[index % BATTERY_COLORS.length]}
                     strokeWidth={1.5}
                     dot={false}
+                    connectNulls
                   />
                 ))}
                 <Brush dataKey="TIM" height={24} stroke="#999" travellerWidth={8} />

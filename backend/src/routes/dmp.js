@@ -182,7 +182,7 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
         serial_filter: req.query.serial_filter,
         limit: req.query.limit,
       },
-      timeout: 30000,
+      timeout: 90000,
     });
     res.json(r.data);
   } catch (err) { handleProxyError(err, res, next); }

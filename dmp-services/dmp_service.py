@@ -513,6 +513,43 @@ def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
         _DM2000_LS_LOCK.release()
 
 
+def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
+    """Execute a list of (sql, params) queries against a **single** shadow copy of
+    dmdata_ls.mdb, returning the first successful result.
+
+    Using one shadow copy instead of calling :func:`_read_dm2000_ls` once per query
+    avoids duplicating the database file on disk for every fallback attempt, which
+    dramatically reduces latency when several table-name or schema variants must be
+    tried before finding a match (e.g. the archives list endpoint).
+
+    Raises HTTPException(404) when the .mdb file is missing.
+    Raises HTTPException(503) when the concurrency lock cannot be acquired.
+    Re-raises the last :class:`pyodbc.Error` when every query in *queries* fails.
+    """
+    ls_path = Path(get_dm2000_ls_path())
+    if not ls_path.exists():
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+    acquired = _DM2000_LS_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is busy with too many concurrent requests, please retry shortly",
+        )
+    last_exc: "pyodbc.Error | None" = None
+    try:
+        with shadow_copy_dm2000(str(ls_path)) as copied:
+            for sql, params in queries:
+                try:
+                    return query_mdb(copied, sql, params)
+                except pyodbc.Error as exc:
+                    last_exc = exc
+    finally:
+        _DM2000_LS_LOCK.release()
+    if last_exc is not None:
+        raise last_exc
+    return []  # only reached when queries is empty
+
+
 def _resolve_dm2000_template_path(template_name: str) -> str:
     if not _is_valid_template_name(template_name):
         raise HTTPException(status_code=400, detail="Invalid template")
@@ -691,34 +728,34 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
             if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
                 return rows
 
+    if baty <= 0 or baty > 99:
+        raise HTTPException(status_code=400, detail="Invalid baty")
+    time_col = f"time{baty}"
+    # Try both schema variants in a single shadow copy to avoid duplicate file
+    # copies when the primary archname-based schema is not present.
     try:
-        rows = _read_dm2000_ls(
-            "SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC",
-            (archname, baty),
-        )
-    except pyodbc.Error:
-        if baty <= 0 or baty > 99:
-            raise HTTPException(status_code=400, detail="Invalid baty")
-        time_col = f"time{baty}"
-        try:
-            rows = _read_dm2000_ls(
-                f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC",
-                (archname,),
-            )
-        except pyodbc.Error:
-            rows = []
-        curve = []
-        for row in rows:
+        raw = _read_dm2000_ls_multi([
+            ("SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC", (archname, baty)),
+            (f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC", (archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        raw = []
+
+    # Detect which schema was returned and normalise to {TIM, VOLT} dicts.
+    if raw and "dy" in raw[0]:
+        rows = []
+        for row in raw:
             tim = row.get("TIM")
             volt = row.get("dy")
             try:
                 t = float(tim)
                 v = float(volt)
                 if not math.isnan(t) and not math.isnan(v):
-                    curve.append({"TIM": t, "VOLT": v})
+                    rows.append({"TIM": t, "VOLT": v})
             except (TypeError, ValueError):
                 continue
-        rows = curve
+    else:
+        rows = raw
 
     with _DM2000_CURVE_CACHE_LOCK:
         _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (rows, time.time()))
@@ -734,24 +771,29 @@ def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
             if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
                 return rows
 
+    # Try both schema variants in a single shadow copy to avoid two separate file copies.
     try:
-        rows = _read_dm2000_ls(
-            "SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC",
-            (archname,),
-        )
-        avg_rows = _compute_average_curve(rows)
-    except pyodbc.Error:
-        rows = _read_dm2000_ls(
-            "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
-            (archname,),
-        )
+        raw = _read_dm2000_ls_multi([
+            ("SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC", (archname,)),
+            (
+                "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
+                (archname,),
+            ),
+        ])
+    except (pyodbc.Error, HTTPException):
+        raw = []
+
+    # Detect which schema was returned: cdid-based rows contain a "dy" voltage column.
+    if raw and "dy" in raw[0]:
         flattened: list[dict] = []
-        for row in rows:
+        for row in raw:
             volt = row.get("dy")
             for idx in range(1, 10):
                 tim = row.get(f"time{idx}")
                 flattened.append({"TIM": tim, "VOLT": volt})
         avg_rows = _compute_average_curve(flattened)
+    else:
+        avg_rows = _compute_average_curve(raw)
 
     with _DM2000_CURVE_CACHE_LOCK:
         _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (avg_rows, time.time()))
@@ -1050,12 +1092,14 @@ def get_dm2000_archives(
                 rows = cached_rows
 
     if rows is None:
-        for table_name in table_names_to_try:
-            try:
-                rows = _read_dm2000_ls(f"SELECT * FROM {table_name}")
-                break
-            except (pyodbc.Error, HTTPException):
-                continue
+        # Use a single shadow copy to try every candidate table name, avoiding
+        # the O(n) shadow-copy cost that previously caused proxy timeouts.
+        try:
+            rows = _read_dm2000_ls_multi([
+                (f"SELECT * FROM {t}", ()) for t in table_names_to_try
+            ])
+        except (pyodbc.Error, HTTPException):
+            rows = None
         if rows is None:
             return {"archives": [], "total": 0, "warning": "Archive table not found in dmdata_ls.mdb"}
         with _DM2000_ARCHIVES_CACHE_LOCK:
@@ -1183,18 +1227,12 @@ def get_dm2000_batteries(archname: str):
                 return {"batteries": rows, "archname": archname}
 
     try:
-        rows = _read_dm2000_ls(
-            "SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC",
-            (archname,),
-        )
-    except pyodbc.Error:
-        try:
-            rows = _read_dm2000_ls(
-                "SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC",
-                (archname,),
-            )
-        except pyodbc.Error:
-            rows = []
+        rows = _read_dm2000_ls_multi([
+            ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
+            ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        rows = []
     for row in rows:
         if "baty" not in row:
             row["baty"] = _dm2000_get_value(row, "baty", "gpp")

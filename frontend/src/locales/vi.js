@@ -557,4 +557,11 @@ export default {
   dm2000PreviewReport: 'Xem trước báo cáo',
   dm2000ReportPreviewTitle: 'Bản xem trước báo cáo',
   dm2000EditableFields: 'Thông tin archive (có thể chỉnh sửa)',
+  dm2000EndDate: 'Ngày kết thúc',
+  dm2000VoltageType: 'Loại điện áp',
+  dm2000Trademark: 'Nhãn hiệu',
+  dm2000LoadResistance: 'Điện trở tải',
+  dm2000EndpointVoltage: 'Điện áp kết thúc',
+  dm2000Temperature: 'Điều kiện nhiệt độ',
+  dm2000MinDuration: 'Thời gian tối thiểu',
 };

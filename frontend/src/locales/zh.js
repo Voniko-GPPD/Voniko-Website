@@ -557,4 +557,11 @@ export default {
   dm2000PreviewReport: '预览报告',
   dm2000ReportPreviewTitle: '报告预览',
   dm2000EditableFields: '归档信息（可编辑）',
+  dm2000EndDate: '结束日期',
+  dm2000VoltageType: '电压类型',
+  dm2000Trademark: '商标',
+  dm2000LoadResistance: '负载电阻',
+  dm2000EndpointVoltage: '截止电压',
+  dm2000Temperature: '放电条件',
+  dm2000MinDuration: '最短时长',
 };

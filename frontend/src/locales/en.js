@@ -557,4 +557,11 @@ export default {
   dm2000PreviewReport: 'Preview Report',
   dm2000ReportPreviewTitle: 'Report Preview',
   dm2000EditableFields: 'Archive Info (editable)',
+  dm2000EndDate: 'End Date',
+  dm2000VoltageType: 'Voltage Type',
+  dm2000Trademark: 'Trademark',
+  dm2000LoadResistance: 'Load Resistance',
+  dm2000EndpointVoltage: 'Endpoint Voltage',
+  dm2000Temperature: 'Dis-condition',
+  dm2000MinDuration: 'Minimum Duration',
 };

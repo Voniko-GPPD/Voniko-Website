@@ -31,16 +31,28 @@ DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
 DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
+# Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
+# every request reads from the cached copy instead of making a new shadow copy.
+DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "./dm2000_cache")
+# Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
+DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(5)
 _ACCESS_QUERY_TIMEOUT: float = 60.0  # seconds to wait for a DB slot before returning 503
-# Limit concurrent DM2000 shadow-copy + query operations to avoid memory/disk exhaustion
-# when many requests arrive simultaneously (e.g. when a user rapidly switches archives).
-# Each shadow copy duplicates dmdata_ls.mdb on disk and loads its query results into memory,
-# so limiting to 2 concurrent operations keeps peak resource usage predictable.
-_DM2000_LS_LOCK = threading.Semaphore(2)
+
+# ── Persistent local cache for dmdata_ls.mdb ─────────────────────────────────
+# Instead of creating a temporary shadow copy for every request (which caused
+# resource exhaustion and 503 errors after ~90 s of load), we maintain ONE
+# persistent local copy of the file.  A background watcher checks the source
+# mtime every WATCH_INTERVAL_SECONDS and atomically replaces the cached file
+# when the source has been updated.  All read operations use the cached path
+# directly; no per-request file copy or concurrency lock is needed.
+_DM2000_LS_CACHE_PATH: str = ""           # path to the current cached copy
+_DM2000_LS_SOURCE_MTIME: float = -1.0    # mtime of the last successfully cached source
+_DM2000_LS_CACHE_WRITE_LOCK = threading.Lock()   # one writer at a time
+_DM2000_LS_CACHE_READY = threading.Event()        # set once the first copy is done
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
@@ -135,7 +147,97 @@ def _watch_dmp_changes_loop() -> None:
                 if previous is None or mtime > previous:
                     _WATCHED_CHANGES[stem] = now
                 _WATCHED_MDB_MTIME[stem] = mtime
+        # Keep dm2000 local cache in sync with the source file
+        _dm2000_refresh_ls_cache()
         time.sleep(WATCH_INTERVAL_SECONDS)
+
+
+def _dm2000_refresh_ls_cache(force: bool = False) -> None:
+    """Copy dmdata_ls.mdb to the local cache directory if the source has changed.
+
+    Uses an atomic rename (os.replace) so readers always see a complete file.
+    Invalidates all DM2000 in-memory caches after a successful refresh.
+    If the source cannot be read but a previous cache exists, keeps using it.
+    """
+    global _DM2000_LS_CACHE_PATH, _DM2000_LS_SOURCE_MTIME  # noqa: PLW0603
+
+    ls_path = Path(get_dm2000_ls_path())
+    if not ls_path.exists():
+        # Source not present; signal ready using live path as fallback if cache exists
+        if not _DM2000_LS_CACHE_READY.is_set():
+            _DM2000_LS_CACHE_READY.set()
+        return
+
+    try:
+        current_mtime = ls_path.stat().st_mtime
+    except OSError:
+        if not _DM2000_LS_CACHE_READY.is_set():
+            _DM2000_LS_CACHE_READY.set()
+        return
+
+    with _DM2000_LS_CACHE_WRITE_LOCK:
+        if not force and current_mtime <= _DM2000_LS_SOURCE_MTIME and _DM2000_LS_CACHE_READY.is_set():
+            return  # source unchanged
+
+        cache_dir = Path(DM2000_CACHE_DIR).resolve()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("dm2000_cache: cannot create cache dir %s: %s", cache_dir, exc)
+            if not _DM2000_LS_CACHE_READY.is_set():
+                _DM2000_LS_CACHE_PATH = str(ls_path)
+                _DM2000_LS_CACHE_READY.set()
+            return
+
+        cache_final = str(cache_dir / "dmdata_ls.mdb")
+        cache_tmp = str(cache_dir / "dmdata_ls_new.mdb")
+        try:
+            shutil.copy2(str(ls_path), cache_tmp)
+        except (OSError, PermissionError) as exc:
+            logger.warning("dm2000_cache: copy failed (%s), continuing with existing cache: %s", ls_path, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DM2000_LS_CACHE_READY.is_set():
+                # Fallback: read directly from source (legacy behaviour)
+                _DM2000_LS_CACHE_PATH = str(ls_path)
+                _DM2000_LS_CACHE_READY.set()
+            return
+
+        # Validate magic bytes before replacing
+        try:
+            size = os.path.getsize(cache_tmp)
+            if size >= 32 * 1024:
+                with open(cache_tmp, "rb") as fh:
+                    magic = fh.read(4)
+                if magic != b"\x00\x01\x00\x00":
+                    raise ValueError(f"Not a valid Access DB (magic={magic!r})")
+        except (OSError, ValueError) as exc:
+            logger.warning("dm2000_cache: validation failed for %s: %s", cache_tmp, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DM2000_LS_CACHE_READY.is_set():
+                _DM2000_LS_CACHE_PATH = str(ls_path)
+                _DM2000_LS_CACHE_READY.set()
+            return
+
+        os.replace(cache_tmp, cache_final)
+        _DM2000_LS_CACHE_PATH = cache_final
+        _DM2000_LS_SOURCE_MTIME = current_mtime
+        logger.info("dm2000_cache: refreshed local copy from %s (mtime=%s)", ls_path, current_mtime)
+
+        # Invalidate all DM2000 in-memory caches
+        with _DM2000_CURVE_CACHE_LOCK:
+            _DM2000_CURVE_CACHE.clear()
+        with _DM2000_ARCHIVES_CACHE_LOCK:
+            _DM2000_ARCHIVES_CACHE.clear()
+        with _DM2000_BATTERIES_CACHE_LOCK:
+            _DM2000_BATTERIES_CACHE.clear()
+
+        _DM2000_LS_CACHE_READY.set()
 
 
 @asynccontextmanager
@@ -145,6 +247,8 @@ async def _lifespan(application):
     if VONIKO_SERVER_URL and DMP_STATION_NAME:
         t = threading.Thread(target=_registration_loop, daemon=True)
         t.start()
+    # Build the initial dm2000 local cache synchronously before serving requests
+    _dm2000_refresh_ls_cache(force=True)
     yield
 
 
@@ -497,54 +601,43 @@ def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
 
 
 def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
-    ls_path = Path(get_dm2000_ls_path())
-    if not ls_path.exists():
-        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
-    acquired = _DM2000_LS_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
-    if not acquired:
+    """Query the persistent local cache of dmdata_ls.mdb.
+
+    Waits up to 30 s for the initial cache to be built (startup), then reads
+    directly from the cached copy without creating a new shadow copy per request.
+    The global ACCESS_QUERY_LOCK inside query_mdb still caps concurrent ODBC
+    connections, but no per-request file duplication overhead exists.
+    """
+    if not _DM2000_LS_CACHE_READY.wait(timeout=30):
         raise HTTPException(
             status_code=503,
-            detail="Database is busy with too many concurrent requests, please retry shortly",
+            detail="DM2000 database not ready, please retry shortly",
         )
-    try:
-        with shadow_copy_dm2000(str(ls_path)) as copied:
-            return query_mdb(copied, sql, params)
-    finally:
-        _DM2000_LS_LOCK.release()
+    if not _DM2000_LS_CACHE_PATH:
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+    return query_mdb(_DM2000_LS_CACHE_PATH, sql, params)
 
 
 def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
-    """Execute a list of (sql, params) queries against a **single** shadow copy of
-    dmdata_ls.mdb, returning the first successful result.
+    """Execute a list of (sql, params) queries against the persistent local cache
+    of dmdata_ls.mdb, returning the first successful result.
 
-    Using one shadow copy instead of calling :func:`_read_dm2000_ls` once per query
-    avoids duplicating the database file on disk for every fallback attempt, which
-    dramatically reduces latency when several table-name or schema variants must be
-    tried before finding a match (e.g. the archives list endpoint).
-
-    Raises HTTPException(404) when the .mdb file is missing.
-    Raises HTTPException(503) when the concurrency lock cannot be acquired.
+    Raises HTTPException(503) when the cache is not yet ready.
     Re-raises the last :class:`pyodbc.Error` when every query in *queries* fails.
     """
-    ls_path = Path(get_dm2000_ls_path())
-    if not ls_path.exists():
-        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
-    acquired = _DM2000_LS_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
-    if not acquired:
+    if not _DM2000_LS_CACHE_READY.wait(timeout=30):
         raise HTTPException(
             status_code=503,
-            detail="Database is busy with too many concurrent requests, please retry shortly",
+            detail="DM2000 database not ready, please retry shortly",
         )
+    if not _DM2000_LS_CACHE_PATH:
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
     last_exc: "pyodbc.Error | None" = None
-    try:
-        with shadow_copy_dm2000(str(ls_path)) as copied:
-            for sql, params in queries:
-                try:
-                    return query_mdb(copied, sql, params)
-                except pyodbc.Error as exc:
-                    last_exc = exc
-    finally:
-        _DM2000_LS_LOCK.release()
+    for sql, params in queries:
+        try:
+            return query_mdb(_DM2000_LS_CACHE_PATH, sql, params)
+        except pyodbc.Error as exc:
+            last_exc = exc
     if last_exc is not None:
         raise last_exc
     return []  # only reached when queries is empty
@@ -1118,6 +1211,7 @@ def get_dm2000_archives(
         item = {
             "archname": _dm2000_get_value(row, "archname", "cdid", "id"),
             "startdate": _to_date_text(_dm2000_get_value(row, "startdate", "fdrq")),
+            "enddate": _to_date_text(_dm2000_get_value(row, "enddate", "fzdq", "jssj", "endrq")),
             "dcxh": _dm2000_get_value(row, "dcxh"),
             "name": _dm2000_get_value(row, "name", "dcmc"),
             "fdfs": _dm2000_get_value(row, "fdfs"),
@@ -1127,6 +1221,14 @@ def get_dm2000_archives(
             "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
             "serialno": _dm2000_get_value(row, "serialno", "dcph"),
             "remarks": _dm2000_get_value(row, "remarks", "bz"),
+            # Additional fields for report preview
+            "voltage_type": _dm2000_get_value(row, "voltage_type", "dianxin_leixing", "dxy", "nominal_voltage", "dianxin"),
+            "trademark": _dm2000_get_value(row, "trademark", "shangbiao", "sbmc", "pinpai"),
+            "load_resistance": _dm2000_get_value(row, "load_resistance", "fzdz", "fzlkdz", "dw"),
+            "endpoint_voltage": _dm2000_get_value(row, "endpoint_voltage", "jzdianyi", "jzdy", "jzdv", "endpoint_v"),
+            "dis_condition": _dm2000_get_value(row, "dis_condition", "fdtj", "wendu", "wd", "temperature"),
+            "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration"),
+            "company": DM2000_COMPANY_NAME or None,
         }
         archives.append(item)
 
@@ -1362,6 +1464,12 @@ def get_dm2000_time_at_voltage(archname: str, baty: int):
         return {"time_at_voltage": [], "archname": archname, "baty": baty}
 
 
+@app.get("/dm2000/config")
+def get_dm2000_config():
+    """Return station-level configuration (e.g. company name) for use in report previews."""
+    return {"company": DM2000_COMPANY_NAME or ""}
+
+
 @app.get("/dm2000/templates")
 def get_dm2000_templates():
     templates_dir = Path(DM2000_TEMPLATES_DIR).resolve()
@@ -1422,6 +1530,15 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
         "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "bz"), payload.override_remarks),
         "BATTERY_NO": baty_label,
+        # Extra fields for full template support
+        "COMPANY": DM2000_COMPANY_NAME or "",
+        "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq") or ""),
+        "VOLTAGE_TYPE": str(_dm2000_get_value(archive, "voltage_type", "dianxin_leixing", "dxy", "nominal_voltage", "dianxin") or ""),
+        "TRADEMARK": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
+        "LOAD_RESISTANCE": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
+        "ENDPOINT_VOLTAGE": str(_dm2000_get_value(archive, "endpoint_voltage", "jzdianyi", "jzdy", "jzdv", "endpoint_v") or ""),
+        "DIS_CONDITION": str(_dm2000_get_value(archive, "dis_condition", "fdtj", "wendu", "wd", "temperature") or ""),
+        "MIN_DURATION": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration") or ""),
         **stats,
         "HISTORY_DATA": curve_data,
     }

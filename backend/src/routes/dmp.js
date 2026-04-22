@@ -254,6 +254,15 @@ router.get('/dm2000/archives/:archname/time-at-voltage', authenticateToken, asyn
   } catch (err) { handleProxyError(err, res, next); }
 });
 
+router.get('/dm2000/config', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/config`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
 router.get('/dm2000/templates', authenticateToken, async (req, res, next) => {
   const stationUrl = getStationUrl(req.query.stationId, res);
   if (!stationUrl) return;

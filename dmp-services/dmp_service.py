@@ -756,7 +756,7 @@ def _compute_average_curve(rows: list[dict]) -> list[dict]:
     ]
 
 
-def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> "float | None":
+def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> float | None:
     """Compute approximate SOt mAh by trapezoidal integration over voltage thresholds.
 
     tav_rows: list of dicts with 'sj'/'SJ' (voltage threshold, V) and
@@ -771,7 +771,7 @@ def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> "f
     if not tav_rows or not load_r_ohm or load_r_ohm <= 0:
         return None
 
-    points: list[tuple[float, float]] = []
+    points: list[tuple] = []
     for row in tav_rows:
         sj = row.get("sj") or row.get("SJ")
         mins = row.get("minutes") or row.get("MINUTES")

@@ -404,11 +404,37 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
     return v != null ? fmt(v, 3) : '-';
   };
 
-  /** Get SOt mAh from ls_pam2. */
+  /** Get SOt mAh: try ls_pam2 row first, then compute from time-at-voltage data. */
   const getSot = (baty) => {
     const row = batteryParams[baty];
-    const v = getBatteryField(row, 'sot_mah', 'sot', 'SOT', 'sotmah', 'sh', 'rql', 'capacity');
-    return v != null ? fmt(v, 3) : '-';
+    const stored = getBatteryField(row, 'sot_mah', 'sot', 'SOT', 'sotmah', 'sh', 'rql', 'capacity');
+    if (stored != null) return fmt(stored, 3);
+    // Compute from time-at-voltage data when not stored in ls_pam2
+    const tav = timeAtVoltMap[baty];
+    if (!tav || tav.length === 0) return '-';
+    const r = safeNum(archiveFields.load_resistance);
+    if (!r || r <= 0) return '-';
+    const fcvRaw = statsMap[baty]?.FCV ?? getBatteryField(row, 'fcv', 'FCV');
+    const fcv = safeNum(fcvRaw);
+    const points = tav
+      .map((entry) => ({ v: safeNum(entry.sj ?? entry.SJ), t: safeNum(entry.minutes ?? entry.MINUTES) }))
+      .filter((p) => p.v != null && p.t != null && p.t >= 0)
+      .sort((a, b) => a.t - b.t);
+    if (points.length < 2) return '-';
+    let totalMah = 0;
+    // Include initial segment from FCV (at t=0) to first threshold
+    if (fcv != null && points[0].t > 0 && fcv > points[0].v) {
+      const dtH = points[0].t / 60;
+      const vAvg = (fcv + points[0].v) / 2;
+      totalMah += (vAvg / r) * 1000 * dtH;
+    }
+    for (let i = 0; i < points.length - 1; i++) {
+      const dt = points[i + 1].t - points[i].t;
+      if (dt <= 0) continue;
+      const vAvg = (points[i].v + points[i + 1].v) / 2;
+      totalMah += (vAvg / r) * 1000 * (dt / 60);
+    }
+    return totalMah > 0 ? fmt(totalMah, 3) : '-';
   };
 
   // Aggregate helpers
@@ -432,7 +458,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
 
   const [ocvMax, ocvMin, ocvAvg] = rowAgg((b) => statsMap[b]?.OCV ?? getBatteryField(batteryParams[b], 'ocv', 'OCV'), 3);
   const [fcvMax, fcvMin, fcvAvg] = rowAgg((b) => statsMap[b]?.FCV ?? getBatteryField(batteryParams[b], 'fcv', 'FCV'), 3);
-  const [sotMax, sotMin, sotAvg] = rowAgg((b) => getBatteryField(batteryParams[b], 'sot_mah', 'sot', 'SOT', 'sotmah', 'sh', 'rql', 'capacity'), 3);
+  const [sotMax, sotMin, sotAvg] = rowAgg((b) => safeNum(getSot(b)), 3);
 
   return (
     <div style={{ overflowX: 'auto', fontFamily: 'Arial, sans-serif' }}>

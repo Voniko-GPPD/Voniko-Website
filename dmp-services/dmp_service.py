@@ -751,12 +751,12 @@ def _compute_average_curve(rows: list[dict]) -> list[dict]:
 
 def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
     """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
-    a single battery from ls_pam2.
+    a single battery.
 
-    These two values are measured by the DM2000 instrument before and at the
-    start of the discharge cycle and stored directly in ls_pam2.  They must
-    NOT be confused with the daily discharge voltages in ls_evolt, which are
-    measurements taken during (not before) the discharge.
+    Tries ls_pam2 first (archname-based schema where ocv/fcv columns exist),
+    then falls back to ls_evolt (cdid-based schema) where the DM2000 stores the
+    initial OCV and FCV measurements as dedicated rows with dy='OCV' / dy='FCV'
+    and per-pin voltages in volt1..volt9 columns.
 
     Returns a dict with VOLT_MAX (OCV) and VOLT_MIN (FCV), or None if the
     data is unavailable.
@@ -770,7 +770,10 @@ def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
         except (TypeError, ValueError):
             return None
 
-    row = None
+    ocv = None
+    fcv = None
+
+    # --- Try ls_pam2 first (archname-based schema) ---
     # Query all pam2 rows for this archive and filter by battery position in
     # Python to handle both integer and text storage of the gpp/baty column.
     try:
@@ -782,18 +785,36 @@ def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
             gpp_val = _dm2000_get_value(r, "gpp", "baty")
             try:
                 if gpp_val is not None and int(float(str(gpp_val))) == baty:
-                    row = r
+                    ocv = safe_float(_dm2000_get_value(r, "ocv", "OCV"))
+                    fcv = safe_float(_dm2000_get_value(r, "fcv", "FCV"))
                     break
             except (TypeError, ValueError):
                 pass
     except (pyodbc.Error, HTTPException):
         pass
 
-    if row is None:
-        return None
-
-    ocv = safe_float(_dm2000_get_value(row, "ocv", "OCV"))
-    fcv = safe_float(_dm2000_get_value(row, "fcv", "FCV"))
+    # --- Fallback: read from ls_evolt (cdid-based schema) ---
+    # In the cdid-based schema the DM2000 instrument stores the open-circuit
+    # voltage (measured before discharge) and the loaded FCV (measured at the
+    # start of discharge) as special rows in ls_evolt with dy='OCV' / dy='FCV'.
+    # Each row has per-pin voltages in volt1..volt9.
+    if (ocv is None or fcv is None) and 1 <= baty <= 9:
+        volt_col = f"volt{baty}"
+        try:
+            evolt_rows = _read_dm2000_ls(
+                f"SELECT dy, {volt_col} AS val FROM ls_evolt"
+                f" WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+                (archname,),
+            )
+            for er in evolt_rows:
+                dy = str(er.get("dy") or "").strip().upper()
+                val = safe_float(er.get("val"))
+                if dy == "OCV" and ocv is None:
+                    ocv = val
+                elif dy == "FCV" and fcv is None:
+                    fcv = val
+        except (pyodbc.Error, HTTPException):
+            pass
 
     if ocv is None and fcv is None:
         return None
@@ -1410,6 +1431,45 @@ def get_dm2000_batteries(archname: str):
     has_battery = any(_baty_int(row.get("baty")) is not None for row in rows)
     if not has_battery:
         rows = _derive_dm2000_batteries_from_vtime(archname)
+
+    # Supplement OCV / FCV from ls_evolt for any battery still missing them.
+    # In the cdid-based schema the DM2000 stores the pre-discharge OCV and
+    # the initial loaded FCV as dedicated rows in ls_evolt (dy='OCV'/'FCV')
+    # with per-pin voltages in volt1..volt9.  ls_pam2 does not carry these
+    # per-pin measured values in the cdid schema.
+    try:
+        evolt_ocv_fcv = _read_dm2000_ls(
+            "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
+            " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+            (archname,),
+        )
+        evolt_map: dict[int, dict[str, float]] = {}
+        for er in evolt_ocv_fcv:
+            dy = str(er.get("dy") or "").strip().upper()
+            if dy not in ("OCV", "FCV"):
+                continue
+            for i in range(1, 10):
+                raw = er.get(f"volt{i}")
+                if raw in (None, "", "--"):
+                    continue
+                try:
+                    fv = float(raw)
+                    if not math.isnan(fv):
+                        evolt_map.setdefault(i, {})[dy] = fv
+                except (TypeError, ValueError):
+                    pass
+    except (pyodbc.Error, HTTPException):
+        evolt_map = {}
+
+    if evolt_map:
+        for row in rows:
+            b = _baty_int(row.get("baty"))
+            if b is None or b not in evolt_map:
+                continue
+            if row.get("ocv") is None:
+                row["ocv"] = evolt_map[b].get("OCV")
+            if row.get("fcv") is None:
+                row["fcv"] = evolt_map[b].get("FCV")
 
     with _DM2000_BATTERIES_CACHE_LOCK:
         _cache_set_with_cap(_DM2000_BATTERIES_CACHE, archname, (rows, time.time()))

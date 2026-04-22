@@ -389,8 +389,10 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
       return sj != null && Math.abs(sj - threshold) < 0.001;
     });
     if (!row) return '-';
+    // The time-at-voltage endpoint returns values in minutes; the report
+    // preview and DM2000 Excel export both display them in hours.
     const val = safeNum(row.minutes ?? row.MINUTES);
-    return val != null ? val.toFixed(1) : '-';
+    return val != null ? (val / 60).toFixed(1) : '-';
   };
 
   const fmtStat = (baty, key) => {

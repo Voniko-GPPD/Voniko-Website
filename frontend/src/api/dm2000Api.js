@@ -16,7 +16,7 @@ async function apiFetch(url, options = {}) {
   return res;
 }
 
-export async function fetchDM2000Archives(stationId, filters = {}) {
+export async function fetchDM2000Archives(stationId, filters = {}, { signal } = {}) {
   const params = new URLSearchParams({ stationId });
   if (filters.date_from) params.set('date_from', filters.date_from);
   if (filters.date_to) params.set('date_to', filters.date_to);
@@ -24,52 +24,52 @@ export async function fetchDM2000Archives(stationId, filters = {}) {
   if (filters.name_filter) params.set('name_filter', filters.name_filter);
   if (filters.mfr_filter) params.set('mfr_filter', filters.mfr_filter);
   if (filters.serial_filter) params.set('serial_filter', filters.serial_filter);
-  const res = await apiFetch(`${BASE}/archives?${params.toString()}`);
+  const res = await apiFetch(`${BASE}/archives?${params.toString()}`, { signal });
   const data = await res.json();
   return { archives: data.archives || [], total: data.total || 0 };
 }
 
-export async function fetchDM2000Batteries(stationId, archname) {
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/batteries?stationId=${encodeURIComponent(stationId)}`);
+export async function fetchDM2000Batteries(stationId, archname, { signal } = {}) {
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/batteries?stationId=${encodeURIComponent(stationId)}`, { signal });
   const data = await res.json();
   return data.batteries || [];
 }
 
-export async function fetchDM2000Curve(stationId, archname, baty) {
+export async function fetchDM2000Curve(stationId, archname, baty, { signal } = {}) {
   const params = new URLSearchParams({ stationId, baty });
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/curve?${params.toString()}`);
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/curve?${params.toString()}`, { signal });
   const data = await res.json();
   return data.curve || [];
 }
 
-export async function fetchDM2000AverageCurve(stationId, archname) {
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/average-curve?stationId=${encodeURIComponent(stationId)}`);
+export async function fetchDM2000AverageCurve(stationId, archname, { signal } = {}) {
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/average-curve?stationId=${encodeURIComponent(stationId)}`, { signal });
   const data = await res.json();
   return data.curve || [];
 }
 
-export async function fetchDM2000Stats(stationId, archname, baty) {
+export async function fetchDM2000Stats(stationId, archname, baty, { signal } = {}) {
   const params = new URLSearchParams({ stationId, baty });
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/stats?${params.toString()}`);
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/stats?${params.toString()}`, { signal });
   return res.json();
 }
 
-export async function fetchDM2000DailyVoltage(stationId, archname, baty) {
+export async function fetchDM2000DailyVoltage(stationId, archname, baty, { signal } = {}) {
   const params = new URLSearchParams({ stationId, baty });
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/daily-voltage?${params.toString()}`);
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/daily-voltage?${params.toString()}`, { signal });
   const data = await res.json();
   return data.daily_voltage || [];
 }
 
-export async function fetchDM2000TimeAtVoltage(stationId, archname, baty) {
+export async function fetchDM2000TimeAtVoltage(stationId, archname, baty, { signal } = {}) {
   const params = new URLSearchParams({ stationId, baty });
-  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/time-at-voltage?${params.toString()}`);
+  const res = await apiFetch(`${BASE}/archives/${encodeURIComponent(archname)}/time-at-voltage?${params.toString()}`, { signal });
   const data = await res.json();
   return data.time_at_voltage || [];
 }
 
-export async function fetchDM2000Templates(stationId) {
-  const res = await apiFetch(`${BASE}/templates?stationId=${encodeURIComponent(stationId)}`);
+export async function fetchDM2000Templates(stationId, { signal } = {}) {
+  const res = await apiFetch(`${BASE}/templates?stationId=${encodeURIComponent(stationId)}`, { signal });
   const data = await res.json();
   return data.templates || [];
 }

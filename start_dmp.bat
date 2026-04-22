@@ -7,7 +7,7 @@ cd /d "%~dp0"
 ::  Cau hinh may tram DMP — Chi can sua cac dong duoi day
 :: ============================================================
 
-set DMP_STATION_NAME=DMP Tram - Khong chon vao day
+set DMP_STATION_NAME=DMP1
 set VONIKO_SERVER_URL=http://10.4.1.31:3001
 set DMP_DATA_DIR=C:\DMP\Data
 set DMP_STATION_PORT=8766

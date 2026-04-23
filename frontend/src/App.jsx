@@ -26,6 +26,7 @@ import BackupViewerPage from './pages/BackupViewer/BackupViewerPage';
 import BarcodePage from './pages/Barcode/BarcodePage';
 import BatteryPage from './pages/Battery/BatteryPage';
 import BatteryDMPPage from './pages/BatteryDMP/BatteryDMPPage';
+import CountBatteriesPage from './pages/CountBatteries/CountBatteriesPage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -98,6 +99,7 @@ function AppRoutes() {
             <Route path="barcode" element={<BarcodePage />} />
             <Route path="battery" element={<BatteryPage />} />
             <Route path="battery-dmp" element={<BatteryDMPPage />} />
+            <Route path="count-batteries" element={<CountBatteriesPage />} />
             <Route path="dm2000" element={<Navigate to="/battery-dmp" replace />} />
           </Route>
           <Route

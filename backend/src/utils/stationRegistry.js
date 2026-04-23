@@ -42,11 +42,12 @@ function _loadFromDisk() {
     const list = JSON.parse(raw);
     if (Array.isArray(list)) {
       for (const s of list) {
-        if (s.id && s.name && s.url) {
-          // Backwards compat: entries without a type default to 'dmp'
-          if (!s.type) s.type = 'dmp';
-          registry.set(s.id, s);
-        }
+        if (!s.id || !s.name || !s.url) continue;
+        // Only load entries that already carry a known type prefix.
+        // Entries without a type (old format) are skipped so they don't
+        // pollute the wrong station list — they will re-register on next heartbeat.
+        if (!s.type) continue;
+        registry.set(s.id, s);
       }
     }
     logger.info('Station registry loaded from disk', { count: registry.size });

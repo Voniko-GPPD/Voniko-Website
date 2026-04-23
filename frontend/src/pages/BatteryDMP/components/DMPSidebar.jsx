@@ -115,6 +115,9 @@ export default function DMPSidebar({ stationId, onSelect }) {
     channelsByBatchRef.current = channelsByBatch;
   }, [channelsByBatch]);
 
+  // Track batch IDs currently being fetched to prevent duplicate in-flight requests
+  const fetchingBatchIds = useRef(new Set());
+
   // Reset state when station changes
   useEffect(() => {
     onSelect?.(null);
@@ -124,6 +127,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     setError('');
     setChannelError('');
     setSelectedDate(null);
+    fetchingBatchIds.current.clear();
   }, [stationId, onSelect]);
 
   useEffect(() => {
@@ -212,13 +216,22 @@ export default function DMPSidebar({ stationId, onSelect }) {
     // Walk the filtered tree to find batch nodes and pre-fetch their channels
     const loadChannelsForVisible = (nodes) => {
       nodes.forEach((node) => {
-        if (node.key?.startsWith('batch:') && node.batchId != null && !channelsByBatchRef.current[node.batchId]) {
+        if (
+          node.key?.startsWith('batch:')
+          && node.batchId != null
+          && !channelsByBatchRef.current[node.batchId]
+          && !fetchingBatchIds.current.has(node.batchId)
+        ) {
+          fetchingBatchIds.current.add(node.batchId);
           fetchChannels(stationId, node.batchId)
             .then((channels) => {
               setChannelsByBatch((prev) => ({ ...prev, [node.batchId]: channels }));
             })
             .catch((err) => {
               setChannelError(err.message || 'Failed to load channels');
+            })
+            .finally(() => {
+              fetchingBatchIds.current.delete(node.batchId);
             });
         }
         if (node.children) loadChannelsForVisible(node.children);

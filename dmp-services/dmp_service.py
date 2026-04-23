@@ -40,8 +40,8 @@ DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
 
 _WATCH_LOCK = threading.Lock()
-_ACCESS_QUERY_LOCK = threading.Semaphore(5)
-_ACCESS_QUERY_TIMEOUT: float = 60.0  # seconds to wait for a DB slot before returning 503
+_ACCESS_QUERY_LOCK = threading.Semaphore(3)
+_ACCESS_QUERY_TIMEOUT: float = 20.0  # seconds to wait for a DB slot before returning 503
 
 # ── Persistent local cache for dmdata_ls.mdb ─────────────────────────────────
 # Instead of creating a temporary shadow copy for every request (which caused
@@ -68,6 +68,9 @@ _DM2000_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
 _DM2000_BATTERIES_CACHE: dict[str, tuple[list, float]] = {}
 _DM2000_BATTERIES_CACHE_LOCK = threading.Lock()
 _DM2000_BATTERIES_CACHE_TTL: float = 60.0  # seconds
+_DM2000_STATS_CACHE: dict[tuple, tuple[dict, float]] = {}
+_DM2000_STATS_CACHE_LOCK = threading.Lock()
+_DM2000_STATS_CACHE_TTL: float = 300.0  # seconds
 _DM2000_CACHE_MAX_ENTRIES: int = 100
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
@@ -259,6 +262,8 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             _DM2000_ARCHIVES_CACHE.clear()
         with _DM2000_BATTERIES_CACHE_LOCK:
             _DM2000_BATTERIES_CACHE.clear()
+        with _DM2000_STATS_CACHE_LOCK:
+            _DM2000_STATS_CACHE.clear()
 
         _DM2000_LS_CACHE_READY.set()
 
@@ -1583,6 +1588,14 @@ def get_dm2000_average_curve(archname: str):
 @app.get("/dm2000/archives/{archname}/stats")
 def get_dm2000_stats(archname: str, baty: int = 0):
     _validate_dm2000_archname(archname)
+    cache_key = (archname, baty)
+    with _DM2000_STATS_CACHE_LOCK:
+        cached = _DM2000_STATS_CACHE.get(cache_key)
+        if cached is not None:
+            result, ts = cached
+            if time.time() - ts < _DM2000_STATS_CACHE_TTL:
+                return result
+
     if baty == 0:
         rows = _read_dm2000_average_curve_rows(archname)
     else:
@@ -1601,6 +1614,9 @@ def get_dm2000_stats(archname: str, baty: int = 0):
             # OCV/FCV independently of the curve VOLT_MAX/VOLT_MIN stats.
             stats["OCV"] = pam2_stats["VOLT_MAX"]
             stats["FCV"] = pam2_stats["VOLT_MIN"]
+
+    with _DM2000_STATS_CACHE_LOCK:
+        _cache_set_with_cap(_DM2000_STATS_CACHE, cache_key, (stats, time.time()))
     return stats
 
 
@@ -2070,6 +2086,55 @@ def _build_preview_workbook(  # noqa: C901
     # Remarks
     _set(r, 1, "Remark", fill=fill_label, align="left")
     _set(r, 2, archive_fields.get("remarks") or "-", align="left", merge_to=total_cols)
+
+    # ── Discharge-curve chart ────────────────────────────────────────────────
+    # Collect average-duration data points (voltage threshold vs average hours).
+    chart_points: list[tuple[float, float]] = []
+    for threshold in THRESHOLDS:
+        tav_vals = [_get_tav(b, threshold) for b in batys]
+        if all(v is None for v in tav_vals):
+            continue
+        _, _, av = _agg(tav_vals)
+        if isinstance(av, (int, float)):
+            chart_points.append((round(threshold, 3), round(av, 4)))
+
+    if len(chart_points) >= 2:
+        from openpyxl.chart import ScatterChart, Reference
+        from openpyxl.chart import Series as _ChartSeries
+
+        # Write chart data in two hidden columns to the right of the data table.
+        hidden_hrs_col = total_cols + 2   # X axis: average hours
+        hidden_volt_col = total_cols + 3  # Y axis: voltage threshold
+        chart_data_start = r + 2          # leave a blank row after Remarks
+        for idx, (volt, hrs) in enumerate(chart_points):
+            row_num = chart_data_start + idx
+            ws.cell(row=row_num, column=hidden_hrs_col, value=hrs)
+            ws.cell(row=row_num, column=hidden_volt_col, value=volt)
+        chart_data_end = chart_data_start + len(chart_points) - 1
+
+        # Hide the helper columns so they don't appear when the sheet is opened.
+        ws.column_dimensions[_get_col_letter(hidden_hrs_col)].hidden = True
+        ws.column_dimensions[_get_col_letter(hidden_volt_col)].hidden = True
+
+        chart = ScatterChart()
+        chart.title = "The Duration of Series Designated Voltage"
+        chart.style = 10
+        chart.xAxis.title = "Hour"
+        chart.yAxis.title = "Voltage (V)"
+        chart.legend = None
+
+        xvalues = Reference(ws, min_col=hidden_hrs_col, min_row=chart_data_start, max_row=chart_data_end)
+        yvalues = Reference(ws, min_col=hidden_volt_col, min_row=chart_data_start, max_row=chart_data_end)
+        series = _ChartSeries(yvalues, xvalues)
+        series.marker.symbol = "none"
+        series.graphicalProperties.line.solidFill = "000000"
+        series.graphicalProperties.line.width = 19050  # 1.5 pt in EMUs
+        chart.series.append(series)
+        chart.width = 15
+        chart.height = 10
+
+        # Place the chart below the data table, starting from column A.
+        ws.add_chart(chart, f"A{r + 2}")
 
     # Column widths
     ws.column_dimensions["A"].width = 22

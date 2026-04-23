@@ -180,6 +180,7 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
         name_filter: req.query.name_filter,
         mfr_filter: req.query.mfr_filter,
         serial_filter: req.query.serial_filter,
+        keyword: req.query.keyword,
         limit: req.query.limit,
       },
       timeout: 90000,

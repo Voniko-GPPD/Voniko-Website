@@ -6,10 +6,10 @@ cd /d "%~dp0"
 title Voniko-Web Deployment
 
 echo.
-echo  +======================================================+
-echo  ^|        VONIKO-WEB --- ONE-CLICK DEPLOY             ^|
-echo  ^|  Frontend :3000  ^|  Backend :3001  ^|  HW :8765    ^|
-echo  +======================================================+
+echo  +==============================================================+
+echo  ^|           VONIKO-WEB --- ONE-CLICK DEPLOY                  ^|
+echo  ^|  Frontend :3000  ^|  Backend :3001  ^|  HW :8765  ^|  AI :8001  ^|
+echo  +==============================================================+
 echo.
 
 :: -------------------------------------------------------
@@ -32,6 +32,10 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3001 " ^| findstr "LISTENIN
 )
 echo  [..] Releasing port 8765...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8765 " ^| findstr "LISTENING" 2^>nul') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+echo  [..] Releasing port 8001...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001 " ^| findstr "LISTENING" 2^>nul') do (
     taskkill /PID %%a /F >nul 2>&1
 )
 echo  [OK] Ports released.
@@ -62,6 +66,34 @@ if not exist "frontend\node_modules" (
     echo  [OK] Frontend dependencies installed.
 ) else (
     echo  [OK] Frontend node_modules already present.
+)
+
+echo  [..] Checking Python for count-batteries-service...
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo  [WARN] Python not found. count-batteries-service will not start.
+    echo         Please install Python 3.9+ and re-run start.bat.
+) else (
+    if not exist "count-batteries-service\venv" (
+        echo  [INSTALL] Creating Python venv for count-batteries-service...
+        python -m venv "count-batteries-service\venv"
+        if errorlevel 1 (
+            echo  [WARN] Failed to create venv. count-batteries-service may not start.
+        ) else (
+            echo  [OK] Python venv created.
+        )
+    ) else (
+        echo  [OK] count-batteries-service venv already present.
+    )
+    if exist "count-batteries-service\venv" (
+        echo  [INSTALL] Installing / updating count-batteries-service Python packages...
+        call "count-batteries-service\venv\Scripts\pip.exe" install -r "count-batteries-service\requirements.txt" --quiet
+        if errorlevel 1 (
+            echo  [WARN] pip install failed. count-batteries-service may not start.
+        ) else (
+            echo  [OK] count-batteries-service Python packages ready.
+        )
+    )
 )
 
 :: -------------------------------------------------------
@@ -108,9 +140,9 @@ echo [6/6] Starting services with PM2...
 
 if exist "frontend\dist" (
     echo  [MODE] Production -- backend serves static frontend files
-    call pm2 start ecosystem.config.js --only voniko-backend
+    call pm2 start ecosystem.config.js --only voniko-backend,voniko-count-batteries
 ) else (
-    echo  [MODE] Development -- running all 3 services
+    echo  [MODE] Development -- running all services
     call pm2 start ecosystem.config.js
 )
 
@@ -130,6 +162,7 @@ echo  ^|                                                     ^|
 echo  ^|  Web App  : http://localhost:3001                   ^|
 echo  ^|  API      : http://localhost:3001/api/health        ^|
 echo  ^|  Hardware : http://127.0.0.1:8765/docs              ^|
+echo  ^|  AI Count : http://127.0.0.1:8001/health            ^|
 echo  ^|                                                     ^|
 echo  ^|  Login    : admin / Admin@123456                    ^|
 echo  ^|                                                     ^|

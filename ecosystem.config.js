@@ -51,5 +51,23 @@ module.exports = {
       out_file: '../logs/hardware-out.log',
       merge_logs: true,
     },
+    {
+      name: 'voniko-count-batteries',
+      script: 'venv/Scripts/pythonw.exe',
+      args: '-m uvicorn main:app --host 127.0.0.1 --port 8001',
+      cwd: './count-batteries-service',
+      interpreter: 'none',
+      env: {
+        PYTHONUNBUFFERED: '1',
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/count-batteries-error.log',
+      out_file: '../logs/count-batteries-out.log',
+      merge_logs: true,
+    },
   ],
 };

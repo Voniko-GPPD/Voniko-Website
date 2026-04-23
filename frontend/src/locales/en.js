@@ -506,6 +506,7 @@ export default {
   dmpReportDownloaded: 'Report downloaded successfully',
   dmpReportDownloadFailed: 'Failed to download report',
   dmpSearchPlaceholder: 'Search model/date/batch/channel',
+  dmpFilterDate: 'Filter by date',
   dmpSelectStationToBrowse: 'Select a DMP station to browse batches.',
   dmpClickToLoadChannels: 'Click to load channels',
   dmpUnknownModel: 'Unknown Model',

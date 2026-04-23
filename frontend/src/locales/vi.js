@@ -506,6 +506,7 @@ export default {
   dmpReportDownloaded: 'Đã tải báo cáo thành công',
   dmpReportDownloadFailed: 'Tải báo cáo thất bại',
   dmpSearchPlaceholder: 'Tìm kiếm model/ngày/lô/kênh',
+  dmpFilterDate: 'Lọc theo ngày',
   dmpSelectStationToBrowse: 'Chọn trạm DMP để duyệt lô dữ liệu.',
   dmpClickToLoadChannels: 'Nhấp để tải kênh',
   dmpUnknownModel: 'Model không xác định',

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Input, Select, Spin, Tree } from 'antd';
-import { fetchBatches, fetchBatchYears, fetchChannels, fetchChanges } from '../../../api/dmpApi';
+import { Alert, DatePicker, Spin, Tree } from 'antd';
+import { fetchBatches, fetchChannels, fetchChanges } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 function buildBatchTree(batches, channelsByBatch, labels) {
@@ -95,31 +95,15 @@ export default function DMPSidebar({ stationId, onSelect }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [channelError, setChannelError] = useState('');
-  const [searchValue, setSearchValue] = useState('');
+  const [selectedDate, setSelectedDate] = useState(null);
   const [batches, setBatches] = useState([]);
   const [channelsByBatch, setChannelsByBatch] = useState({});
   const [expandedKeys, setExpandedKeys] = useState([]);
-  const [years, setYears] = useState([]);
-  const [selectedYear, setSelectedYear] = useState(null);
 
-  // Load available years when station changes
-  useEffect(() => {
-    setYears([]);
-    setSelectedYear(null);
-    if (!stationId) return () => {};
-    let mounted = true;
-    fetchBatchYears(stationId)
-      .then((result) => {
-        if (!mounted) return;
-        setYears(result || []);
-        if (result && result.length > 0) {
-          setSelectedYear(result[0]);
-        }
-      })
-      .catch(() => {});
-    return () => { mounted = false; };
-  }, [stationId]);
+  const selectedYear = selectedDate ? selectedDate.year() : null;
+  const dateString = selectedDate ? selectedDate.format('YYYY-MM-DD') : '';
 
+  // Reset state when station changes
   useEffect(() => {
     onSelect?.(null);
     setBatches([]);
@@ -127,7 +111,10 @@ export default function DMPSidebar({ stationId, onSelect }) {
     setExpandedKeys([]);
     setError('');
     setChannelError('');
+    setSelectedDate(null);
+  }, [stationId, onSelect]);
 
+  useEffect(() => {
     if (!stationId) {
       setLoading(false);
       return () => {};
@@ -154,7 +141,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     return () => {
       mounted = false;
     };
-  }, [stationId, selectedYear, onSelect]);
+  }, [stationId, selectedYear]);
 
   useEffect(() => {
     if (!stationId) return () => {};
@@ -200,13 +187,13 @@ export default function DMPSidebar({ stationId, onSelect }) {
     channel: t('dmpChannel'),
     clickToLoad: t('dmpClickToLoadChannels'),
   }), [batches, channelsByBatch, t]);
-  const filteredTreeData = useMemo(() => filterTree(treeData, searchValue), [treeData, searchValue]);
+  const filteredTreeData = useMemo(() => filterTree(treeData, dateString), [treeData, dateString]);
 
-  // Auto-expand all matching nodes when a search keyword is active
+  // Auto-expand all matching nodes when a date is selected
   useEffect(() => {
-    if (!searchValue) return;
+    if (!dateString) return;
     setExpandedKeys(collectAllParentKeys(filteredTreeData));
-  }, [searchValue, filteredTreeData]);
+  }, [dateString, filteredTreeData]);
 
   const handleExpand = async (nextExpandedKeys, info) => {
     setExpandedKeys(nextExpandedKeys);
@@ -237,19 +224,12 @@ export default function DMPSidebar({ stationId, onSelect }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
-      <Select
+      <DatePicker
         style={{ width: '100%' }}
-        placeholder={t('dmpAllYears')}
+        placeholder={t('dmpFilterDate')}
+        value={selectedDate}
+        onChange={(date) => setSelectedDate(date ?? null)}
         allowClear
-        value={selectedYear}
-        onChange={(val) => setSelectedYear(val ?? null)}
-        options={years.map((yr) => ({ value: yr, label: `${t('dmpFilterYear')}: ${yr}` }))}
-      />
-      <Input.Search
-        allowClear
-        placeholder={t('dmpSearchPlaceholder')}
-        value={searchValue}
-        onChange={(event) => setSearchValue(event.target.value)}
       />
 
       {error && <Alert type="error" message={error} showIcon />}

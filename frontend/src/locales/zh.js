@@ -506,6 +506,7 @@ export default {
   dmpReportDownloaded: '报告下载成功',
   dmpReportDownloadFailed: '报告下载失败',
   dmpSearchPlaceholder: '搜索型号/日期/批次/通道',
+  dmpFilterDate: '按日期筛选',
   dmpSelectStationToBrowse: '请选择DMP站点以浏览批次。',
   dmpClickToLoadChannels: '点击加载通道',
   dmpUnknownModel: '未知型号',

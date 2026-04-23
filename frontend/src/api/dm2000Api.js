@@ -175,3 +175,47 @@ export async function downloadDM2000SimpleReport({
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * entries: Array of { archname, batteryType, batys?, sheetName? }
+ * batteryType: "HP" | "UD" | "UD+"
+ * batys: optional array of battery numbers (empty = all)
+ * sheetName: optional sheet override
+ */
+export async function downloadDM2000PerfReport({ stationId, entries }) {
+  const token = localStorage.getItem('accessToken');
+  const body = {
+    stationId,
+    entries: (entries || []).map((e) => ({
+      archname: e.archname,
+      battery_type: e.batteryType,
+      batys: e.batys || [],
+      sheet_name: e.sheetName || '',
+    })),
+  };
+
+  const res = await fetch(`${BASE}/perf-report`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || err.detail || 'Report generation failed');
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const nameMatch = disposition.match(/filename="([^"]+)"/);
+  const filename = nameMatch ? nameMatch[1] : 'perf_report.xlsx';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

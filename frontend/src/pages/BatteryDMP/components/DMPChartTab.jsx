@@ -187,9 +187,9 @@ export default function DMPChartTab({ stationId, selection }) {
     () => telemetry
       .map((row, index) => ({
         index,
-        TIM: safeNum(row.TIM),
-        VOLT: safeNum(row.VOLT),
-        Im: safeNum(row.Im),
+        TIM: safeNum(row.TIM ?? row.tim),
+        VOLT: safeNum(row.VOLT ?? row.volt ?? row.Volt),
+        Im: safeNum(row.Im ?? row.IM ?? row.im),
       }))
       .filter((d) => d.TIM !== null),
     [telemetry]
@@ -199,16 +199,21 @@ export default function DMPChartTab({ stationId, selection }) {
   const batchChartData = useMemo(() => {
     if (!batchChannelTelemetry.length) return [];
     const lengths = batchChannelTelemetry.map((ch) => ch.rows.length);
-    const minLen = lengths.length ? Math.min(...lengths) : 0;
-    if (minLen === 0) return [];
-    return Array.from({ length: minLen }, (_, i) => {
-      const point = {
-        index: i,
-        TIM: safeNum(batchChannelTelemetry[0].rows[i]?.TIM),
-      };
+    const maxLen = lengths.length ? Math.max(...lengths) : 0;
+    if (maxLen === 0) return [];
+    return Array.from({ length: maxLen }, (_, i) => {
+      // Get TIM from the first channel that has a row at this index
+      let tim = null;
+      for (const ch of batchChannelTelemetry) {
+        if (ch.rows[i]) {
+          const t = safeNum(ch.rows[i].TIM ?? ch.rows[i].tim);
+          if (t !== null) { tim = t; break; }
+        }
+      }
+      const point = { index: i, TIM: tim };
       batchChannelTelemetry.forEach((ch) => {
-        point[`VOLT_${ch.channel}`] = safeNum(ch.rows[i]?.VOLT);
-        point[`Im_${ch.channel}`] = safeNum(ch.rows[i]?.Im);
+        point[`VOLT_${ch.channel}`] = safeNum(ch.rows[i]?.VOLT ?? ch.rows[i]?.volt ?? ch.rows[i]?.Volt);
+        point[`Im_${ch.channel}`] = safeNum(ch.rows[i]?.Im ?? ch.rows[i]?.IM ?? ch.rows[i]?.im);
       });
       return point;
     }).filter((d) => d.TIM !== null);
@@ -303,6 +308,7 @@ export default function DMPChartTab({ stationId, selection }) {
                           stroke={color}
                           strokeWidth={1.5}
                           dot={false}
+                          connectNulls
                           name={`VOLT CH${ch.channel}`}
                         />
                       )}
@@ -315,6 +321,7 @@ export default function DMPChartTab({ stationId, selection }) {
                           strokeWidth={1.5}
                           strokeDasharray="4 2"
                           dot={false}
+                          connectNulls
                           name={`Im CH${ch.channel}`}
                         />
                       )}
@@ -368,8 +375,8 @@ export default function DMPChartTab({ stationId, selection }) {
               <YAxis yAxisId="right" orientation="right" unit="mA" label={{ value: 'mA', angle: 90, position: 'insideRight' }} />
               <Tooltip formatter={tooltipFormatter} labelFormatter={tooltipLabelFormatter} />
               <Legend />
-              {visibleLines.includes('VOLT') && <Line yAxisId="left" type="monotone" dataKey="VOLT" stroke="#1677ff" strokeWidth={1.5} dot={false} />}
-              {visibleLines.includes('Im') && <Line yAxisId="right" type="monotone" dataKey="Im" stroke="#ff4d4f" strokeWidth={1.5} dot={false} />}
+              {visibleLines.includes('VOLT') && <Line yAxisId="left" type="monotone" dataKey="VOLT" stroke="#1677ff" strokeWidth={1.5} dot={false} connectNulls />}
+              {visibleLines.includes('Im') && <Line yAxisId="right" type="monotone" dataKey="Im" stroke="#ff4d4f" strokeWidth={1.5} dot={false} connectNulls />}
               <Brush dataKey="index" height={28} stroke="#999" travellerWidth={8} />
             </LineChart>
           </ResponsiveContainer>

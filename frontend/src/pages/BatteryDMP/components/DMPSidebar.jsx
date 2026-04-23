@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, DatePicker, Spin, Tree } from 'antd';
 import { fetchBatches, fetchChannels, fetchChanges } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
@@ -81,8 +81,13 @@ function filterTree(nodes, keyword) {
   return nodes
     .map((node) => {
       const title = String(node.title || '').toLowerCase();
+      // When a node itself matches, keep it with ALL its original descendants unfiltered
+      if (title.includes(lowerKeyword)) {
+        return node;
+      }
+      // Otherwise filter children and keep this node only if some descendant matches
       const children = node.children ? filterTree(node.children, keyword) : [];
-      if (title.includes(lowerKeyword) || children.length > 0) {
+      if (children.length > 0) {
         return { ...node, children };
       }
       return null;
@@ -103,6 +108,16 @@ export default function DMPSidebar({ stationId, onSelect }) {
   const selectedYear = selectedDate ? selectedDate.year() : null;
   const dateString = selectedDate ? selectedDate.format('YYYY-MM-DD') : '';
 
+  // Keep a ref to channelsByBatch to read the latest value inside effects without
+  // making channelsByBatch a dependency (which would cause infinite loops)
+  const channelsByBatchRef = useRef(channelsByBatch);
+  useEffect(() => {
+    channelsByBatchRef.current = channelsByBatch;
+  }, [channelsByBatch]);
+
+  // Track batch IDs currently being fetched to prevent duplicate in-flight requests
+  const fetchingBatchIds = useRef(new Set());
+
   // Reset state when station changes
   useEffect(() => {
     onSelect?.(null);
@@ -112,6 +127,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     setError('');
     setChannelError('');
     setSelectedDate(null);
+    fetchingBatchIds.current.clear();
   }, [stationId, onSelect]);
 
   useEffect(() => {
@@ -189,11 +205,40 @@ export default function DMPSidebar({ stationId, onSelect }) {
   }), [batches, channelsByBatch, t]);
   const filteredTreeData = useMemo(() => filterTree(treeData, dateString), [treeData, dateString]);
 
-  // Auto-expand all matching nodes when a date is selected
+  // Auto-expand all matching nodes when a date is selected, and load channels
+  // for batch nodes that become visible so users can pick a channel right away
   useEffect(() => {
     if (!dateString) return;
     setExpandedKeys(collectAllParentKeys(filteredTreeData));
-  }, [dateString, filteredTreeData]);
+
+    if (!stationId) return;
+
+    // Walk the filtered tree to find batch nodes and pre-fetch their channels
+    const loadChannelsForVisible = (nodes) => {
+      nodes.forEach((node) => {
+        if (
+          node.key?.startsWith('batch:')
+          && node.batchId != null
+          && !channelsByBatchRef.current[node.batchId]
+          && !fetchingBatchIds.current.has(node.batchId)
+        ) {
+          fetchingBatchIds.current.add(node.batchId);
+          fetchChannels(stationId, node.batchId)
+            .then((channels) => {
+              setChannelsByBatch((prev) => ({ ...prev, [node.batchId]: channels }));
+            })
+            .catch((err) => {
+              setChannelError(err.message || 'Failed to load channels');
+            })
+            .finally(() => {
+              fetchingBatchIds.current.delete(node.batchId);
+            });
+        }
+        if (node.children) loadChannelsForVisible(node.children);
+      });
+    };
+    loadChannelsForVisible(filteredTreeData);
+  }, [dateString, filteredTreeData, stationId]);
 
   const handleExpand = async (nextExpandedKeys, info) => {
     setExpandedKeys(nextExpandedKeys);

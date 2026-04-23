@@ -168,8 +168,8 @@ class AIEngine:
         if env_models_dir:
             models_dir = Path(env_models_dir)
         else:
-            # Default: look in ../models relative to service root
-            models_dir = Path(__file__).parent.parent.parent / "models"
+            # Default: look in models/ inside the service root (count-batteries-service/models)
+            models_dir = Path(__file__).parent.parent / "models"
         onnx_path = models_dir / "best.onnx"
         pt_path = models_dir / "best.pt"
         

@@ -191,6 +191,22 @@ export default function DMPSidebar({ stationId, onSelect }) {
   }), [batches, channelsByBatch, t]);
   const filteredTreeData = useMemo(() => filterTree(treeData, searchValue), [treeData, searchValue]);
 
+  // Auto-expand all matching nodes when a search keyword is active
+  useEffect(() => {
+    if (!searchValue) return;
+    const collectKeys = (nodes) => {
+      const keys = [];
+      nodes.forEach((node) => {
+        if (node.children && node.children.length > 0) {
+          keys.push(node.key);
+          keys.push(...collectKeys(node.children));
+        }
+      });
+      return keys;
+    };
+    setExpandedKeys(collectKeys(filteredTreeData));
+  }, [searchValue, filteredTreeData]);
+
   const handleExpand = async (nextExpandedKeys, info) => {
     setExpandedKeys(nextExpandedKeys);
     const node = info.node;

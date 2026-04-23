@@ -10,16 +10,18 @@ import {
   Tag,
   Typography,
 } from 'antd';
+import { ExperimentOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { fetchStations } from '../../api/dmpApi';
 import { useLang } from '../../contexts/LangContext';
 import DMPSidebar from './components/DMPSidebar';
 import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
 import DMPExportTab from './components/DMPExportTab';
+import DM2000Page from '../DM2000/DM2000Page';
 
 const { Sider, Content } = Layout;
 
-export default function BatteryDMPPage() {
+function DMPBridgeContent() {
   const { t } = useLang();
   const [stations, setStations] = useState([]);
   const [selectedStationId, setSelectedStationId] = useState(undefined);
@@ -68,10 +70,8 @@ export default function BatteryDMPPage() {
   ]), [selection, t]);
 
   return (
-    <Layout style={{ background: '#fff', minHeight: 'calc(100vh - 112px)' }}>
+    <Layout style={{ background: '#fff' }}>
       <Content style={{ padding: '0 16px' }}>
-        <Typography.Title level={4}>{t('dmpBridgeTitle')}</Typography.Title>
-
         {stationError && <Alert type="error" message={stationError} showIcon style={{ marginBottom: 12 }} />}
 
         <Card size="small" style={{ marginBottom: 12 }}>
@@ -141,5 +141,44 @@ export default function BatteryDMPPage() {
         </Layout>
       </Content>
     </Layout>
+  );
+}
+
+export default function BatteryDMPPage() {
+  const { t } = useLang();
+  const [activeMainTab, setActiveMainTab] = useState('dmp');
+
+  return (
+    <div style={{ background: '#fff', minHeight: 'calc(100vh - 112px)' }}>
+      <Tabs
+        activeKey={activeMainTab}
+        onChange={setActiveMainTab}
+        destroyInactiveTabPane
+        size="large"
+        style={{ padding: '0 16px' }}
+        items={[
+          {
+            key: 'dmp',
+            label: (
+              <span>
+                <ExperimentOutlined />
+                {t('dmpBridgeTitle')}
+              </span>
+            ),
+            children: <DMPBridgeContent />,
+          },
+          {
+            key: 'dm2000',
+            label: (
+              <span>
+                <DatabaseOutlined />
+                {t('dm2000Title')}
+              </span>
+            ),
+            children: <DM2000Page />,
+          },
+        ]}
+      />
+    </div>
   );
 }

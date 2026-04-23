@@ -16,7 +16,6 @@ import {
   QrcodeOutlined,
   ThunderboltOutlined,
   ExperimentOutlined,
-  DatabaseOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
@@ -55,8 +54,7 @@ export default function AppLayout() {
     ] : []),
     { key: '/barcode', icon: <QrcodeOutlined />, label: t('barcode') },
     { key: '/battery', icon: <ThunderboltOutlined />, label: t('batteryTest') },
-    { key: '/battery-dmp', icon: <ExperimentOutlined />, label: 'DMP Bridge' },
-    { key: '/dm2000', icon: <DatabaseOutlined />, label: 'DM2000 Historic' },
+    { key: '/battery-dmp', icon: <ExperimentOutlined />, label: 'DMP Bridge & DM2000' },
     ...(isAdmin ? [
       { key: '/users', icon: <TeamOutlined />, label: t('users') },
     ] : []),

@@ -599,6 +599,8 @@ export default {
   cbSelectImage: '请先选择图片',
   cbCameraError: '无法打开摄像头',
   cbServiceOnline: 'AI服务: 在线',
+  cbServiceNoModel: 'AI服务: 无模型',
+  cbServiceNoModelDesc: 'AI服务正在运行，但未找到模型文件（best.onnx / best.pt）。请将模型文件放入 models/ 目录并重启服务。',
   cbServiceOffline: 'AI服务离线',
   cbServiceOfflineDesc: '无法连接电池计数AI服务，请启动 count-batteries-service。',
   cbTotalDetections: '总计数次数',

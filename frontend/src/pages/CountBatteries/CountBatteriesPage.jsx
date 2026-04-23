@@ -31,13 +31,16 @@ export default function CountBatteriesPage() {
 
   // ─── Service health ─────────────────────────────────────────────────────────
   const [serviceOnline, setServiceOnline] = useState(null); // null=checking
+  const [modelLoaded, setModelLoaded] = useState(null); // null=checking
 
   const checkServiceHealth = useCallback(async () => {
     try {
-      await checkHealth();
+      const res = await checkHealth();
       setServiceOnline(true);
+      setModelLoaded(res.data?.model_loaded === true);
     } catch {
       setServiceOnline(false);
+      setModelLoaded(null);
     }
   }, []);
 
@@ -326,7 +329,9 @@ export default function CountBatteriesPage() {
   const serviceStatusBadge = serviceOnline === null
     ? <Badge status="processing" text={t('loading')} />
     : serviceOnline
-    ? <Badge status="success" text={t('cbServiceOnline')} />
+    ? modelLoaded === false
+      ? <Badge status="warning" text={t('cbServiceNoModel')} />
+      : <Badge status="success" text={t('cbServiceOnline')} />
     : <Badge status="error" text={t('cbServiceOffline')} />;
 
   return (
@@ -350,6 +355,16 @@ export default function CountBatteriesPage() {
           showIcon
           message={t('cbServiceOffline')}
           description={t('cbServiceOfflineDesc')}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {serviceOnline && modelLoaded === false && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('cbServiceNoModel')}
+          description={t('cbServiceNoModelDesc')}
           style={{ marginBottom: 16 }}
         />
       )}
@@ -458,7 +473,7 @@ export default function CountBatteriesPage() {
                       size="large"
                       icon={<ScanOutlined />}
                       loading={predicting}
-                      disabled={!selectedFile || !serviceOnline}
+                      disabled={!selectedFile || !serviceOnline || modelLoaded === false}
                       onClick={runDetection}
                       block
                     >

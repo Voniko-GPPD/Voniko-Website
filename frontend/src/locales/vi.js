@@ -599,6 +599,8 @@ export default {
   cbSelectImage: 'Vui lòng chọn ảnh trước',
   cbCameraError: 'Không thể mở camera',
   cbServiceOnline: 'Dịch vụ AI: hoạt động',
+  cbServiceNoModel: 'Dịch vụ AI: không có mô hình',
+  cbServiceNoModelDesc: 'Dịch vụ AI đang chạy nhưng không tìm thấy file mô hình (best.onnx / best.pt). Vui lòng đặt file mô hình vào thư mục models/ rồi khởi động lại dịch vụ.',
   cbServiceOffline: 'Dịch vụ AI ngoại tuyến',
   cbServiceOfflineDesc: 'Không thể kết nối tới dịch vụ AI đếm pin. Vui lòng khởi động count-batteries-service.',
   cbTotalDetections: 'Tổng lần đếm',

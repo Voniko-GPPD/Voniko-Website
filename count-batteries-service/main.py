@@ -17,6 +17,7 @@ from pathlib import Path
 
 from models.database import init_db
 from routers import predict, history
+from services.ai_engine import ai_engine
 
 STATIC_DIR = Path(os.getenv("COUNT_BATTERIES_STATIC_DIR", "./static"))
 
@@ -62,7 +63,12 @@ app.include_router(history.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "Count Batteries Service"}
+    model_loaded = ai_engine.is_model_loaded
+    return {
+        "status": "healthy",
+        "service": "Count Batteries Service",
+        "model_loaded": model_loaded,
+    }
 
 
 if __name__ == "__main__":

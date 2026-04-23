@@ -102,6 +102,11 @@ class AIEngine:
     def __init__(self):
         if self._session is None and self._model is None:
             self._load_model()
+
+    @property
+    def is_model_loaded(self) -> bool:
+        """Return True only when a real AI model (ONNX or YOLO) is loaded."""
+        return self._session is not None or self._model is not None
     
     # ==================== ADAPTIVE IMAGE ANALYSIS ====================
     
@@ -862,7 +867,8 @@ class AIEngine:
             confidence = self.DEFAULT_CONFIDENCE
             
         if self._session is None and self._model is None:
-            return self._mock_detection(image)
+            print("No model loaded – cannot detect batteries.")
+            return 0, []
         
         try:
             h, w = image.shape[:2]
@@ -1022,6 +1028,16 @@ class AIEngine:
     
     def process_image(self, image_bytes: bytes, confidence: float = 0.5, po_number: str = None) -> dict:
         """Full processing pipeline - optimized"""
+        if not self.is_model_loaded:
+            return {
+                "error": (
+                    "No AI model loaded. "
+                    "Please place best.onnx (or best.pt) in the models/ directory "
+                    "and restart the service."
+                ),
+                "count": 0,
+            }
+
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         

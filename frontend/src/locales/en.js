@@ -599,6 +599,8 @@ export default {
   cbSelectImage: 'Please select an image first',
   cbCameraError: 'Cannot open camera',
   cbServiceOnline: 'AI Service: online',
+  cbServiceNoModel: 'AI Service: no model',
+  cbServiceNoModelDesc: 'The AI service is running but no model file was found (best.onnx / best.pt). Please place the model file in the models/ directory and restart the service.',
   cbServiceOffline: 'AI Service offline',
   cbServiceOfflineDesc: 'Cannot connect to the battery counting AI service. Please start count-batteries-service.',
   cbTotalDetections: 'Total Detections',

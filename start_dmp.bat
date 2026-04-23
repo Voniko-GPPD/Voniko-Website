@@ -90,6 +90,7 @@ if errorlevel 1 (
 
 echo [PM2] Dung process cu neu co...
 call pm2 delete dmp-service >nul 2>&1
+call pm2 delete dmp-watchdog >nul 2>&1
 
 echo [PM2] Khoi dong DMP Service...
 call pm2 start "%~dp0dmp-services\venv\Scripts\pythonw.exe" ^
@@ -99,6 +100,12 @@ call pm2 start "%~dp0dmp-services\venv\Scripts\pythonw.exe" ^
     --host 0.0.0.0 ^
     --port %DMP_STATION_PORT% ^
     --app-dir "%~dp0dmp-services"
+
+echo [PM2] Khoi dong DMP Watchdog (tu dong khoi dong lai khi server bi treo)...
+call pm2 start "%~dp0dmp-services\venv\Scripts\python.exe" ^
+    --name "dmp-watchdog" ^
+    --restart-delay 5000 ^
+    -- "%~dp0dmp-services\dmp_watchdog.py"
 
 call pm2 save
 
@@ -118,15 +125,16 @@ if errorlevel 1 (
 call pm2 save
 
 echo.
-echo [OK] DMP Service dang chay voi PM2.
+echo [OK] DMP Service va Watchdog dang chay voi PM2.
 echo      Ten tram : %DMP_STATION_NAME%
 echo      Server   : %VONIKO_SERVER_URL%
 echo      Data Dir : %DMP_DATA_DIR%
 echo.
 echo  Lenh quan ly:
-echo    pm2 logs dmp-service      (xem log)
-echo    pm2 restart dmp-service   (khoi dong lai)
-echo    pm2 stop dmp-service      (dung)
+echo    pm2 logs dmp-service      (xem log service)
+echo    pm2 logs dmp-watchdog     (xem log watchdog)
+echo    pm2 restart dmp-service   (khoi dong lai service)
+echo    pm2 stop dmp-service      (dung service)
 echo    pm2 monit                 (giam sat)
 echo.
 pause

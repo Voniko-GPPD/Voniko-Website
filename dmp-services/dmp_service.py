@@ -2119,8 +2119,8 @@ def _build_preview_workbook(  # noqa: C901
         chart = ScatterChart()
         chart.title = "The Duration of Series Designated Voltage"
         chart.style = 10
-        chart.xAxis.title = "Hour"
-        chart.yAxis.title = "Voltage (V)"
+        chart.x_axis.title = "Hour"
+        chart.y_axis.title = "Voltage (V)"
         chart.legend = None
 
         xvalues = Reference(ws, min_col=hidden_hrs_col, min_row=chart_data_start, max_row=chart_data_end)

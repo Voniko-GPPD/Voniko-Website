@@ -511,6 +511,8 @@ export default {
   dmpUnknownModel: 'Unknown Model',
   dmpUnknownDate: 'Unknown Date',
   dmpUnknownPattern: 'Unknown Pattern',
+  dmpFilterYear: 'Year',
+  dmpAllYears: 'All years',
 
   dm2000Title: 'DM2000 Historic Query',
   dm2000CurveTab: 'Chart',

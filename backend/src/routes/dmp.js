@@ -57,12 +57,27 @@ function handleProxyError(err, res, next) {
   next(err);
 }
 
+// GET /api/dmp/batches/years?stationId=
+router.get('/batches/years', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/batches/years`, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
 // GET /api/dmp/batches?stationId=
 router.get('/batches', authenticateToken, async (req, res, next) => {
   const stationUrl = getStationUrl(req.query.stationId, res);
   if (!stationUrl) return;
   try {
-    const r = await axios.get(`${stationUrl}/batches`, { timeout: 30000 });
+    const r = await axios.get(`${stationUrl}/batches`, {
+      params: { year: req.query.year },
+      timeout: 30000,
+    });
     res.json(r.data);
   } catch (err) {
     handleProxyError(err, res, next);

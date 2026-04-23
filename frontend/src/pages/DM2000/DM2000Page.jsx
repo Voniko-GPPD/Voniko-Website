@@ -7,7 +7,6 @@ import DM2000CurveTab from './components/DM2000CurveTab';
 import DM2000DataTab from './components/DM2000DataTab';
 import DM2000DailyVoltTab from './components/DM2000DailyVoltTab';
 import DM2000ExportTab from './components/DM2000ExportTab';
-import DM2000PerfReportTab from './components/DM2000PerfReportTab';
 
 const SEARCH_TAB_KEY = 'search';
 const CURVE_TAB_KEY = 'curve';
@@ -29,7 +28,7 @@ export default function DM2000Page() {
         if (!mounted) return;
         setStations(result || []);
         const online = (result || []).filter((station) => station.online);
-        setSelectedStationId(online[0]?.id);
+        setSelectedStationId((prev) => prev ?? online[0]?.id);
       } catch (err) {
         if (!mounted) return;
         setStationError(err.message || 'Failed to load stations');
@@ -37,8 +36,10 @@ export default function DM2000Page() {
     };
 
     loadStations();
+    const pollId = setInterval(loadStations, 30000);
     return () => {
       mounted = false;
+      clearInterval(pollId);
     };
   }, []);
 
@@ -152,15 +153,6 @@ export default function DM2000Page() {
               <DM2000ExportTab
                 stationId={selectedStationId}
                 selection={selection}
-              />
-            ),
-          },
-          {
-            key: 'perf',
-            label: t('dm2000PerfReportTab'),
-            children: (
-              <DM2000PerfReportTab
-                stationId={selectedStationId}
               />
             ),
           },

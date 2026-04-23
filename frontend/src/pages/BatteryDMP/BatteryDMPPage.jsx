@@ -31,20 +31,27 @@ function DMPBridgeContent() {
 
   useEffect(() => {
     let mounted = true;
-    fetchStations()
-      .then((result) => {
-        if (!mounted) return;
-        setStations(result || []);
-        const online = (result || []).filter((station) => station.online);
-        setSelectedStationId(online[0]?.id);
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setStationError(err.message || 'Failed to load stations');
-      });
+
+    const loadStations = () => {
+      fetchStations()
+        .then((result) => {
+          if (!mounted) return;
+          setStations(result || []);
+          const online = (result || []).filter((station) => station.online);
+          setSelectedStationId((prev) => prev ?? online[0]?.id);
+        })
+        .catch((err) => {
+          if (!mounted) return;
+          setStationError(err.message || 'Failed to load stations');
+        });
+    };
+
+    loadStations();
+    const pollId = setInterval(loadStations, 30000);
 
     return () => {
       mounted = false;
+      clearInterval(pollId);
     };
   }, []);
 

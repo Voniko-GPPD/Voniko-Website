@@ -42,6 +42,8 @@ DMPDATA_CACHE_DIR: str = os.environ.get("DMPDATA_CACHE_DIR", "./dmpdata_cache")
 # Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
 DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
+# Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
+MAX_BATTERY_NUMBER: int = 99
 
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
@@ -659,6 +661,17 @@ class DM2000SimpleReportRequest(BaseModel):
     batys: list[int] = Field(default=[])
     override_battery_type: Optional[str] = None
     override_manufacturer: Optional[str] = None
+
+
+class PerfReportEntry(BaseModel):
+    archname: str
+    battery_type: str  # e.g. "HP", "UD", "UD+"
+    batys: list[int] = Field(default=[])  # empty = use all detected batteries
+    sheet_name: str = ""  # auto-derived from dcxh+serialno when empty
+
+
+class PerfReportRequest(BaseModel):
+    entries: list[PerfReportEntry]
 
 
 def render_excel_template(template_path: str, context: dict) -> bytes:
@@ -2501,6 +2514,341 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         logger.exception("Error building preview workbook for archname=%s: %s", payload.archname, exc)
         raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}") from exc
     filename = f"dm2000_preview_{payload.archname}.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── Performance Monitoring Report ──────────────────────────────────────────
+
+def _get_batys_for_archive(archname: str) -> list[int]:
+    """Return sorted list of battery numbers that have data in the archive."""
+    rows = _derive_dm2000_batteries_from_vtime(archname)
+    if not rows:
+        try:
+            rows = _read_dm2000_ls_multi([
+                ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
+                ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
+            ])
+        except (pyodbc.Error, HTTPException):
+            rows = []
+    result: list[int] = []
+    for row in rows:
+        raw = _dm2000_get_value(row, "baty", "gpp")
+        try:
+            b = int(float(str(raw)))
+            if b > 0:
+                result.append(b)
+        except (TypeError, ValueError):
+            pass
+    return sorted(set(result))
+
+
+def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[dict]]:
+    """Return time-at-voltage data for each battery number in batys."""
+    result: dict[int, list[dict]] = {}
+    for b in batys:
+        tav: list[dict] = []
+        try:
+            tav = _read_dm2000_ls(
+                "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+                (archname, b),
+            )
+        except (pyodbc.Error, HTTPException):
+            pass
+        if not tav:
+            tim_col = f"tim_vot{b}"
+            try:
+                tav = _read_dm2000_ls(
+                    f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                    (archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        if not tav:
+            time_col = f"time{b}"
+            try:
+                tav = _read_dm2000_ls(
+                    f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+                    (archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        result[b] = tav
+    return result
+
+
+def _compute_perf_values(
+    endpoint_voltage_str: str,
+    tav_map: dict[int, list[dict]],
+    batys: list[int],
+) -> dict:
+    """Compute average hours at endpoint voltage and uniform rate for a battery group.
+
+    Returns {"avg_hours": float|None, "uniform_rate": float|None}.
+    """
+    try:
+        ep = float(str(endpoint_voltage_str or "").strip().split()[0])
+    except (IndexError, TypeError, ValueError):
+        return {"avg_hours": None, "uniform_rate": None}
+
+    minutes_list: list[float] = []
+    for b in batys:
+        rows = tav_map.get(b) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - ep) < 0.001:
+                    mins = row.get("minutes") or row.get("MINUTES")
+                    if mins is not None:
+                        f = float(mins)
+                        if not math.isnan(f) and f >= 0:
+                            minutes_list.append(f)
+                    break
+            except (TypeError, ValueError):
+                pass
+
+    if not minutes_list:
+        return {"avg_hours": None, "uniform_rate": None}
+
+    avg_min = sum(minutes_list) / len(minutes_list)
+    avg_hours = round(avg_min / 60.0, 3)
+
+    uniform_rate: Optional[float] = None
+    if len(minutes_list) >= 2:
+        max_t = max(minutes_list)
+        min_t = min(minutes_list)
+        if avg_min > 0:
+            uniform_rate = round((1.0 - (max_t - min_t) / avg_min) * 100.0, 2)
+
+    return {"avg_hours": avg_hours, "uniform_rate": uniform_rate}
+
+
+def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
+    """Build the performance monitoring Excel workbook.
+
+    ``groups`` structure::
+
+        {
+            sheet_name: {                           # e.g. "LR6 501"
+                (date_str, battery_type): {         # e.g. ("2026-01-06", "UD")
+                    fdfs_label: {
+                        "avg_hours": float | None,
+                        "uniform_rate": float | None,
+                    },
+                    ...
+                },
+                ...
+            },
+            ...
+        }
+    """
+    from openpyxl import Workbook as _Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter as _gcl
+
+    thin = Side(style="thin")
+    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    fill_title = PatternFill("solid", fgColor="1F4E79")   # dark blue
+    fill_header1 = PatternFill("solid", fgColor="2E75B6")  # blue
+    fill_header2 = PatternFill("solid", fgColor="BDD7EE")  # light blue
+    fill_hp = PatternFill("solid", fgColor="FFF2CC")       # light yellow
+    fill_ud = PatternFill("solid", fgColor="E2EFDA")       # light green
+    fill_udplus = PatternFill("solid", fgColor="FCE4D6")   # light orange
+
+    TYPE_FILLS = {"HP": fill_hp, "UD": fill_ud, "UD+": fill_udplus}
+
+    wb = _Workbook()
+    wb.remove(wb.active)
+
+    for sheet_name, date_type_map in groups.items():
+        ws = wb.create_sheet(title=sheet_name[:31])
+
+        # Collect all unique fdfs labels in this sheet (sorted for consistency)
+        all_fdfs: list[str] = []
+        seen_fdfs: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen_fdfs:
+                    seen_fdfs.add(lbl)
+                    all_fdfs.append(lbl)
+        all_fdfs.sort()
+
+        # Column layout: col1=Date, col2=Type, then 2 cols per fdfs
+        num_fdfs = len(all_fdfs)
+        total_cols = 2 + num_fdfs * 2
+
+        def _cell(row, col, value="", bold=False, fill=None, font_color="000000",
+                  align="center", merge_to_col=None, wrap=False, size=10, italic=False):
+            c = ws.cell(row=row, column=col, value=value)
+            c.border = bdr
+            c.font = Font(bold=bold, italic=italic, name="Arial", size=size,
+                          color=font_color)
+            c.alignment = Alignment(horizontal=align, vertical="center",
+                                    wrap_text=wrap)
+            if fill:
+                c.fill = fill
+            if merge_to_col and merge_to_col > col:
+                ws.merge_cells(start_row=row, start_column=col,
+                               end_row=row, end_column=merge_to_col)
+            return c
+
+        # Row 1: Title
+        title_text = f"BẢNG THEO DÕI HIỆU SUẤT PIN - {sheet_name}"
+        _cell(1, 1, title_text, bold=True, fill=fill_title, font_color="FFFFFF",
+              size=13, merge_to_col=total_cols)
+        ws.row_dimensions[1].height = 24
+
+        # Row 2: "Ngày", "Loại", then fdfs headers (each spans 2 cols)
+        _cell(2, 1, "Ngày", bold=True, fill=fill_header1, font_color="FFFFFF", size=11)
+        _cell(2, 2, "Loại", bold=True, fill=fill_header1, font_color="FFFFFF", size=11)
+        for i, lbl in enumerate(all_fdfs):
+            col_start = 3 + i * 2
+            _cell(2, col_start, lbl, bold=True, fill=fill_header1, font_color="FFFFFF",
+                  size=9, wrap=True, merge_to_col=col_start + 1)
+        ws.row_dimensions[2].height = 40
+
+        # Row 3: Sub-headers ("Kết quả (h)", "Tỉ lệ (%)" per fdfs)
+        _cell(3, 1, "", fill=fill_header2)
+        _cell(3, 2, "", fill=fill_header2)
+        for i in range(num_fdfs):
+            col_r = 3 + i * 2
+            col_u = col_r + 1
+            _cell(3, col_r, "Kết quả (h)", bold=True, fill=fill_header2, size=9)
+            _cell(3, col_u, "Tỉ lệ (%)", bold=True, fill=fill_header2, size=9)
+        ws.row_dimensions[3].height = 18
+
+        # Data rows — sort by (date, battery_type)
+        sorted_keys = sorted(date_type_map.keys(), key=lambda k: (k[0], k[1]))
+        for row_key in sorted_keys:
+            row_data = date_type_map[row_key]
+            date_str, btype = row_key
+            excel_row = ws.max_row + 1
+
+            row_fill = TYPE_FILLS.get(btype.upper()) if btype.upper() in TYPE_FILLS else None
+            _cell(excel_row, 1, date_str, fill=row_fill, align="left")
+            _cell(excel_row, 2, btype, fill=row_fill)
+
+            for i, lbl in enumerate(all_fdfs):
+                col_r = 3 + i * 2
+                col_u = col_r + 1
+                entry = row_data.get(lbl, {})
+                avg_h = entry.get("avg_hours")
+                ur = entry.get("uniform_rate")
+                _cell(excel_row, col_r, avg_h if avg_h is not None else "", fill=row_fill)
+                _cell(excel_row, col_u, ur if ur is not None else "", fill=row_fill)
+
+        # Column widths
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 8
+        for i in range(num_fdfs):
+            col_r = 3 + i * 2
+            col_u = col_r + 1
+            ws.column_dimensions[_gcl(col_r)].width = 13
+            ws.column_dimensions[_gcl(col_u)].width = 10
+
+    if not wb.sheetnames:
+        wb.create_sheet("Empty")
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@app.post("/dm2000/perf-report")
+def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
+    """Generate a performance monitoring report (Bảng theo dõi hiệu suất pin).
+
+    For each entry the caller specifies the archive name, battery type label
+    (HP/UD/UD+) and optionally a subset of battery channel numbers.  The
+    endpoint computes the average discharge hours at the endpoint voltage and
+    the uniform rate for the chosen batteries, then generates a multi-sheet
+    Excel workbook grouped by sheet_name (defaulting to dcxh + serialno).
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    # groups[sheet_name][(date_str, battery_type)][fdfs_label] = {avg_hours, uniform_rate}
+    groups: dict[str, dict] = {}
+
+    for entry in payload.entries:
+        _validate_dm2000_archname(entry.archname)
+
+        # Fetch archive metadata
+        try:
+            archive_rows = _read_dm2000_ls(
+                "SELECT * FROM ls_jb_cs WHERE cdid = ?", (entry.archname,)
+            )
+        except pyodbc.Error:
+            archive_rows = []
+        if not archive_rows:
+            try:
+                archive_rows = _read_dm2000_ls(
+                    "SELECT * FROM ls_jb_cs WHERE archname = ?", (entry.archname,)
+                )
+            except pyodbc.Error:
+                archive_rows = []
+        if not archive_rows:
+            raise HTTPException(
+                status_code=404, detail=f"Archive not found: {entry.archname}"
+            )
+        archive = archive_rows[0]
+
+        def _to_date_text(v):
+            if v and hasattr(v, "strftime"):
+                return v.strftime("%Y-%m-%d")
+            return str(v)[:10] if v not in (None, "") else ""
+
+        startdate = _to_date_text(
+            _dm2000_get_value(archive, "startdate", "fdrq")
+        )
+        fdfs = str(_dm2000_get_value(archive, "fdfs") or "").strip() or entry.archname
+        dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
+        serialno = str(_dm2000_get_value(archive, "serialno", "dcph") or "").strip()
+        endpoint_voltage_raw = _dm2000_get_value(
+            archive,
+            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+        )
+        endpoint_voltage_str = str(endpoint_voltage_raw or "").strip()
+
+        # Determine sheet name
+        if entry.sheet_name:
+            sheet_name = entry.sheet_name.strip()[:31]
+        else:
+            parts = [p for p in (dcxh, serialno) if p]
+            sheet_name = " ".join(parts)[:31] if parts else entry.archname[:31]
+
+        # Resolve battery list
+        batys = [b for b in entry.batys if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+        if not batys:
+            batys = _get_batys_for_archive(entry.archname)
+        if not batys:
+            continue
+
+        # Get time-at-voltage data
+        tav_map = _get_tav_for_batteries(entry.archname, batys)
+
+        # Compute performance values
+        perf = _compute_perf_values(endpoint_voltage_str, tav_map, batys)
+
+        # Insert into groups structure
+        sheet_group = groups.setdefault(sheet_name, {})
+        row_key = (startdate, entry.battery_type)
+        row_data = sheet_group.setdefault(row_key, {})
+        row_data[fdfs] = perf
+
+    if not groups:
+        raise HTTPException(
+            status_code=422, detail="No data could be extracted for any entry"
+        )
+
+    workbook_bytes = _build_perf_workbook(groups)
+    filename = "perf_report.xlsx"
     return StreamingResponse(
         BytesIO(workbook_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

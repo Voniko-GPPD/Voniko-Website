@@ -230,6 +230,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
     const unique = [...new Set(batteries)].sort((a, b) => a - b);
     return [
       { value: SHOW_ALL_VALUE, label: t('dm2000ShowAll') },
+      { value: 0, label: t('dm2000BatteryAverage') },
       ...unique.map((value) => ({ value, label: `${value}#` })),
     ];
   }, [batteries, t]);

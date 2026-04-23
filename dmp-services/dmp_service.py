@@ -2112,46 +2112,32 @@ def _build_preview_workbook(  # noqa: C901
             chart_points.append((round(threshold, 3), round(av, 4)))
 
     if len(chart_points) >= 2:
-        from openpyxl.chart import ScatterChart, Reference
-        from openpyxl.chart import Series as _ChartSeries
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from openpyxl.drawing.image import Image as _XLImage
 
-        # Write chart data in two helper columns to the right of the data table
-        # (hidden afterwards so they don't clutter the visible sheet area).
-        hidden_hrs_col = total_cols + 2   # X axis: average hours
-        hidden_volt_col = total_cols + 3  # Y axis: voltage threshold
-        chart_data_start = r + 2          # leave a blank row after Remarks
-        for idx, (volt, hrs) in enumerate(chart_points):
-            row_num = chart_data_start + idx
-            ws.cell(row=row_num, column=hidden_hrs_col, value=hrs)
-            ws.cell(row=row_num, column=hidden_volt_col, value=volt)
-        chart_data_end = chart_data_start + len(chart_points) - 1
+        # chart_points = [(voltage, hours), ...] — X axis is hours, Y is voltage
+        xs = [p[1] for p in chart_points]
+        ys = [p[0] for p in chart_points]
 
-        chart = ScatterChart()
-        chart.title = "The Duration of Series Designated Voltage"
-        chart.style = 10
-        chart.x_axis.title = "Hour"
-        chart.y_axis.title = "Voltage (V)"
-        chart.legend = None
-        # Include data from all cells (not just visible ones) so the chart
-        # renders correctly even when the helper columns are hidden later.
-        chart.plot_vis_only = False
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(xs, ys, color="#1677ff", linewidth=1.5, marker="o", markersize=3)
+        ax.set_xlabel("Hour")
+        ax.set_ylabel("Voltage (V)")
+        ax.set_title("The Duration of Series Designated Voltage")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
 
-        xvalues = Reference(ws, min_col=hidden_hrs_col, min_row=chart_data_start, max_row=chart_data_end)
-        yvalues = Reference(ws, min_col=hidden_volt_col, min_row=chart_data_start, max_row=chart_data_end)
-        series = _ChartSeries(yvalues, xvalues)
-        series.marker.symbol = "none"
-        series.graphicalProperties.line.solidFill = "000000"
-        series.graphicalProperties.line.width = 19050  # 1.5 pt (19050 EMUs = 1.5 × 12700)
-        chart.series.append(series)
-        chart.width = 15
-        chart.height = 10
+        img_buf = BytesIO()
+        fig.savefig(img_buf, format="png", dpi=100)
+        plt.close(fig)
+        img_buf.seek(0)
 
-        # Hide the helper columns so they don't clutter the visible sheet area.
-        ws.column_dimensions[_get_col_letter(hidden_hrs_col)].hidden = True
-        ws.column_dimensions[_get_col_letter(hidden_volt_col)].hidden = True
-
-        # Place the chart below both the Remarks row and the hidden chart data rows.
-        ws.add_chart(chart, f"A{chart_data_end + 2}")
+        xl_img = _XLImage(img_buf)
+        xl_img.width = 480
+        xl_img.height = 320
+        ws.add_image(xl_img, f"A{r + 2}")
 
     # Column widths
     ws.column_dimensions["A"].width = 22

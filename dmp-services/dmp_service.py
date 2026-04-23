@@ -1575,6 +1575,14 @@ def get_dm2000_batteries(archname: str):
 def get_dm2000_curve(archname: str, baty: int):
     _validate_dm2000_archname(archname)
     rows = _read_dm2000_curve_rows(archname, baty)
+    # Prepend the initial loaded voltage (FCV) at t=0 so the chart shows the
+    # full discharge curve starting from the actual measured starting voltage.
+    if not rows or rows[0].get("TIM", 0) > 0:
+        pam2 = _get_pam2_ocv_fcv(archname, baty)
+        if pam2:
+            fcv = pam2.get("VOLT_MIN")  # FCV = closed-circuit voltage at discharge start
+            if fcv is not None:
+                rows = [{"TIM": 0.0, "VOLT": round(float(fcv), 6)}] + rows
     return {"curve": rows, "archname": archname, "baty": baty, "time_unit": "minutes"}
 
 
@@ -2089,7 +2097,12 @@ def _build_preview_workbook(  # noqa: C901
 
     # ── Discharge-curve chart ────────────────────────────────────────────────
     # Collect average-duration data points (voltage threshold vs average hours).
+    # Prepend the average FCV at t=0 so the curve starts at the initial voltage.
     chart_points: list[tuple[float, float]] = []
+    _, _, avg_fcv_raw = _agg(fcv_vals)
+    avg_fcv = _safe_float(avg_fcv_raw)
+    if avg_fcv is not None:
+        chart_points.append((round(avg_fcv, 4), 0.0))
     for threshold in THRESHOLDS:
         tav_vals = [_get_tav(b, threshold) for b in batys]
         if all(v is None for v in tav_vals):
@@ -2102,7 +2115,7 @@ def _build_preview_workbook(  # noqa: C901
         from openpyxl.chart import ScatterChart, Reference
         from openpyxl.chart import Series as _ChartSeries
 
-        # Write chart data in two hidden columns to the right of the data table.
+        # Write chart data in two columns to the right of the data table.
         hidden_hrs_col = total_cols + 2   # X axis: average hours
         hidden_volt_col = total_cols + 3  # Y axis: voltage threshold
         chart_data_start = r + 2          # leave a blank row after Remarks
@@ -2112,16 +2125,15 @@ def _build_preview_workbook(  # noqa: C901
             ws.cell(row=row_num, column=hidden_volt_col, value=volt)
         chart_data_end = chart_data_start + len(chart_points) - 1
 
-        # Hide the helper columns so they don't appear when the sheet is opened.
-        ws.column_dimensions[_get_col_letter(hidden_hrs_col)].hidden = True
-        ws.column_dimensions[_get_col_letter(hidden_volt_col)].hidden = True
-
         chart = ScatterChart()
         chart.title = "The Duration of Series Designated Voltage"
         chart.style = 10
         chart.x_axis.title = "Hour"
         chart.y_axis.title = "Voltage (V)"
         chart.legend = None
+        # Include data from all cells (not just visible ones) so the chart
+        # renders correctly even when the helper columns are hidden later.
+        chart.plot_vis_only = False
 
         xvalues = Reference(ws, min_col=hidden_hrs_col, min_row=chart_data_start, max_row=chart_data_end)
         yvalues = Reference(ws, min_col=hidden_volt_col, min_row=chart_data_start, max_row=chart_data_end)
@@ -2132,6 +2144,10 @@ def _build_preview_workbook(  # noqa: C901
         chart.series.append(series)
         chart.width = 15
         chart.height = 10
+
+        # Hide the helper columns so they don't clutter the visible sheet area.
+        ws.column_dimensions[_get_col_letter(hidden_hrs_col)].hidden = True
+        ws.column_dimensions[_get_col_letter(hidden_volt_col)].hidden = True
 
         # Place the chart below both the Remarks row and the hidden chart data rows.
         ws.add_chart(chart, f"A{chart_data_end + 2}")

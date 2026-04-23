@@ -352,7 +352,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} label={{ value: t('dm2000TimeMin'), position: 'insideBottom', offset: -5 }} />
-              <YAxis domain={[0.90, 1.60]} unit="V" />
+              <YAxis domain={[0.90, 'auto']} unit="V" />
               <Tooltip
                 formatter={(value) => [`${Number(value).toFixed(4)} V`, t('dm2000VoltV')]}
                 labelFormatter={(label) => `${Number(label).toFixed(4)} min`}

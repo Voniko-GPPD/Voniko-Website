@@ -47,3 +47,6 @@ export const deleteBatch = (ids) =>
 
 /** Health check */
 export const checkHealth = () => api.get('/health');
+
+/** Force reload the AI model without restarting the service */
+export const reloadModel = () => api.post('/reload-model');

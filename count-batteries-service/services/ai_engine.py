@@ -55,6 +55,7 @@ class AIEngine:
     _model = None
     _session = None  # ONNX Runtime session
     _use_onnx = False
+    _load_error = None  # Last model load error message (None when loaded successfully)
     
     # Preprocessing configuration
     TARGET_SIZE = 1280  # Updated to match retrained model at 1280px
@@ -102,6 +103,15 @@ class AIEngine:
     def __init__(self):
         if self._session is None and self._model is None:
             self._load_model()
+
+    def reload_model(self):
+        """Force reload the model (useful for hot-reload without service restart)."""
+        self._session = None
+        self._model = None
+        self._use_onnx = False
+        self._load_error = None
+        self.__class__._load_error = None
+        self._load_model()
 
     @property
     def is_model_loaded(self) -> bool:
@@ -211,6 +221,7 @@ class AIEngine:
                     providers=providers
                 )
                 self._use_onnx = True
+                self.__class__._load_error = None
                 
                 # Get input/output info
                 self._input_name = self._session.get_inputs()[0].name
@@ -223,21 +234,34 @@ class AIEngine:
                 return
                 
             except Exception as e:
-                print(f"Error loading ONNX model: {e}")
+                onnx_err = str(e)
+                print(f"Error loading ONNX model: {onnx_err}")
+                self.__class__._load_error = f"ONNX load failed: {onnx_err}"
                 self._session = None
         
-        # Fallback to YOLO
-        if YOLO_AVAILABLE and pt_path.exists():
+        # Fallback to YOLO (.pt model) – try even when onnxruntime is installed
+        if pt_path.exists():
             try:
                 from ultralytics import YOLO
                 self._model = YOLO(str(pt_path))
                 self._use_onnx = False
+                self.__class__._load_error = None
                 print(f"Loaded YOLO model (fallback): {pt_path}")
+                return
             except Exception as e:
-                print(f"Error loading YOLO model: {e}")
+                yolo_err = str(e)
+                print(f"Error loading YOLO model: {yolo_err}")
+                self.__class__._load_error = (
+                    (self.__class__._load_error + " | " if self.__class__._load_error else "")
+                    + f"YOLO load failed: {yolo_err}"
+                )
                 self._model = None
-        else:
-            print("No model available. Please ensure best.onnx or best.pt exists in models/")
+        
+        if not self.__class__._load_error:
+            self.__class__._load_error = (
+                f"No model file found. Expected best.onnx or best.pt in: {models_dir}"
+            )
+        print(f"No model available. {self.__class__._load_error}")
     
     # ==================== ONNX INFERENCE ====================
     

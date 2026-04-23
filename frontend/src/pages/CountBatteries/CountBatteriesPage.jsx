@@ -15,7 +15,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useLang } from '../../contexts/LangContext';
 import {
   predict, getHistory, getStats, exportExcel,
-  deleteRecord, deleteBatch, checkHealth,
+  deleteRecord, deleteBatch, checkHealth, reloadModel,
 } from '../../api/countBatteries';
 
 const { Title, Text } = Typography;
@@ -32,17 +32,39 @@ export default function CountBatteriesPage() {
   // ─── Service health ─────────────────────────────────────────────────────────
   const [serviceOnline, setServiceOnline] = useState(null); // null=checking
   const [modelLoaded, setModelLoaded] = useState(null); // null=checking
+  const [modelLoadError, setModelLoadError] = useState(null); // error message when model fails
+  const [reloading, setReloading] = useState(false);
 
   const checkServiceHealth = useCallback(async () => {
     try {
       const res = await checkHealth();
       setServiceOnline(true);
       setModelLoaded(res.data?.model_loaded === true);
+      setModelLoadError(res.data?.load_error || null);
     } catch {
       setServiceOnline(false);
       setModelLoaded(null);
+      setModelLoadError(null);
     }
   }, []);
+
+  const handleReloadModel = useCallback(async () => {
+    setReloading(true);
+    try {
+      const res = await reloadModel();
+      setModelLoaded(res.data?.model_loaded === true);
+      setModelLoadError(res.data?.load_error || null);
+      if (res.data?.model_loaded) {
+        notification.success({ message: t('cbModelReloaded') });
+      } else {
+        notification.warning({ message: t('cbModelReloadFailed') });
+      }
+    } catch (e) {
+      notification.error({ message: t('cbModelReloadFailed'), description: e.message });
+    } finally {
+      setReloading(false);
+    }
+  }, [t]);
 
   useEffect(() => {
     checkServiceHealth();
@@ -364,7 +386,20 @@ export default function CountBatteriesPage() {
           type="warning"
           showIcon
           message={t('cbServiceNoModel')}
-          description={t('cbServiceNoModelDesc')}
+          description={
+            <div>
+              <div>{modelLoadError || t('cbServiceNoModelDesc')}</div>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={reloading}
+                onClick={handleReloadModel}
+                style={{ marginTop: 8 }}
+              >
+                {t('cbReloadModel')}
+              </Button>
+            </div>
+          }
           style={{ marginBottom: 16 }}
         />
       )}

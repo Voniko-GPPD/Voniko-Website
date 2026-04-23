@@ -68,6 +68,17 @@ async def health():
         "status": "healthy",
         "service": "Count Batteries Service",
         "model_loaded": model_loaded,
+        "load_error": ai_engine._load_error if not model_loaded else None,
+    }
+
+
+@app.post("/reload-model")
+async def reload_model():
+    """Force reload the AI model without restarting the service."""
+    ai_engine.reload_model()
+    return {
+        "model_loaded": ai_engine.is_model_loaded,
+        "load_error": ai_engine._load_error,
     }
 
 

@@ -1580,7 +1580,7 @@ def get_dm2000_curve(archname: str, baty: int):
     if not rows or rows[0].get("TIM", 0) > 0:
         pam2 = _get_pam2_ocv_fcv(archname, baty)
         if pam2:
-            fcv = pam2.get("VOLT_MIN")  # FCV = closed-circuit voltage at discharge start
+            fcv = pam2.get("VOLT_MIN")  # _get_pam2_ocv_fcv maps FCV → VOLT_MIN, OCV → VOLT_MAX
             if fcv is not None:
                 rows = [{"TIM": 0.0, "VOLT": round(float(fcv), 6)}] + rows
     return {"curve": rows, "archname": archname, "baty": baty, "time_unit": "minutes"}
@@ -2115,7 +2115,8 @@ def _build_preview_workbook(  # noqa: C901
         from openpyxl.chart import ScatterChart, Reference
         from openpyxl.chart import Series as _ChartSeries
 
-        # Write chart data in two columns to the right of the data table.
+        # Write chart data in two helper columns to the right of the data table
+        # (hidden afterwards so they don't clutter the visible sheet area).
         hidden_hrs_col = total_cols + 2   # X axis: average hours
         hidden_volt_col = total_cols + 3  # Y axis: voltage threshold
         chart_data_start = r + 2          # leave a blank row after Remarks

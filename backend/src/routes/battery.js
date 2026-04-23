@@ -69,13 +69,13 @@ router.post('/register', (req, res) => {
   if (!name || !url) {
     return res.status(400).json({ error: 'name and url are required' });
   }
-  const id = upsertStation(name, url);
+  const id = upsertStation(name, url, 'battery');
   res.json({ ok: true, id });
 });
 
-// GET /api/battery/stations — return list of registered stations with online flag
+// GET /api/battery/stations — return list of registered battery stations with online flag
 router.get('/stations', authenticateToken, (req, res) => {
-  res.json({ stations: getStations() });
+  res.json({ stations: getStations('battery') });
 });
 
 // All remaining battery routes require authentication

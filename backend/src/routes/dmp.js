@@ -18,14 +18,14 @@ router.post('/register', (req, res) => {
   } catch (_) {
     return res.status(400).json({ error: 'Invalid url' });
   }
-  const id = upsertStation(name, url);
+  const id = upsertStation(name, url, 'dmp');
   logger.info('DMP station registered', { id, name });
   res.json({ ok: true, id });
 });
 
 // GET /api/dmp/stations — list all registered DMP stations
 router.get('/stations', authenticateToken, (req, res) => {
-  res.json({ stations: getStations() });
+  res.json({ stations: getStations('dmp') });
 });
 
 // Helper: resolve station URL or return 404

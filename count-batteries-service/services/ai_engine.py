@@ -1031,8 +1031,9 @@ class AIEngine:
         if not self.is_model_loaded:
             return {
                 "error": (
-                    "Không tìm thấy mô hình AI. "
-                    "Vui lòng đặt file best.onnx (hoặc best.pt) vào thư mục models/."
+                    "No AI model loaded. "
+                    "Please place best.onnx (or best.pt) in the models/ directory "
+                    "and restart the service."
                 ),
                 "count": 0,
             }

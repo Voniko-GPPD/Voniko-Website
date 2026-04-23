@@ -37,7 +37,7 @@ export default function CountBatteriesPage() {
     try {
       const res = await checkHealth();
       setServiceOnline(true);
-      setModelLoaded(res.data?.model_loaded !== false);
+      setModelLoaded(res.data?.model_loaded === true);
     } catch {
       setServiceOnline(false);
       setModelLoaded(null);

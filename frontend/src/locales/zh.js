@@ -514,6 +514,7 @@ export default {
   dmpUnknownPattern: '未知模式',
   dmpFilterYear: '年份',
   dmpAllYears: '所有年份',
+  dmpAllChannels: '所有通道',
 
   dm2000Title: 'DM2000历史查询',
   dm2000CurveTab: '图表',

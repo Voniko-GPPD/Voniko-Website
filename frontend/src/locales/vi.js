@@ -514,6 +514,7 @@ export default {
   dmpUnknownPattern: 'Kịch bản không xác định',
   dmpFilterYear: 'Năm',
   dmpAllYears: 'Tất cả các năm',
+  dmpAllChannels: 'Tất cả các kênh',
 
   dm2000Title: 'Tra cứu lịch sử DM2000',
   dm2000CurveTab: 'Biểu đồ',

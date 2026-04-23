@@ -37,10 +37,16 @@ function buildBatchTree(batches, channelsByBatch, labels) {
           return {
             key: batchKey,
             title: `${labels.batch} ${batch.id}`,
-            selectable: false,
+            selectable: true,
             batchId: batch.id,
             model,
             date,
+            selection: {
+              isBatch: true,
+              batchId: batch.id,
+              model,
+              date,
+            },
             children: channels.length
               ? channels.map((channel) => ({
                 key: `channel:${batch.id}:${channel.baty}`,

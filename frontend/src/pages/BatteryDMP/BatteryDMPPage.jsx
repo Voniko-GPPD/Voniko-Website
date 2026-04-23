@@ -66,7 +66,7 @@ function DMPBridgeContent() {
     { title: `${t('dmpModel')}: ${selection?.model || '-'}` },
     { title: `${t('dmpDate')}: ${selection?.date || '-'}` },
     { title: `${t('dmpBatch')}: ${selection?.batchId || '-'}` },
-    { title: `${t('dmpChannel')}: ${selection?.channel ?? '-'}` },
+    { title: selection?.isBatch ? `${t('dmpChannel')}: ${t('dmpAllChannels')}` : `${t('dmpChannel')}: ${selection?.channel ?? '-'}` },
   ]), [selection, t]);
 
   return (
@@ -121,7 +121,7 @@ function DMPBridgeContent() {
                     <Tag color="blue">{selection.model}</Tag>
                     <Tag color="purple">{selection.date}</Tag>
                     <Tag color="cyan">{t('dmpBatch')} {selection.batchId}</Tag>
-                    <Tag color="green">CH {selection.channel}</Tag>
+                    <Tag color="green">{selection.isBatch ? t('dmpAllChannels') : `CH ${selection.channel}`}</Tag>
                     <Badge status={selectedStation?.online ? 'success' : 'error'} text={selectedStation?.name || t('dmpNoStation')} />
                   </div>
                 )}

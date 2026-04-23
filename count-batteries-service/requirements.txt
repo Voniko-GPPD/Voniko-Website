@@ -1,6 +1,6 @@
-fastapi==0.109.0
+fastapi==0.109.1
 uvicorn[standard]==0.27.0
-python-multipart==0.0.6
+python-multipart==0.0.22
 sqlalchemy==2.0.25
 onnxruntime-directml>=1.20.0
 ultralytics==8.1.0; python_version < "3.13"
@@ -10,4 +10,4 @@ opencv-python>=4.12.0.88; python_version >= "3.13"
 numpy>=2.2,<2.3; python_version >= "3.13"
 pandas>=2.1.4
 openpyxl==3.1.2
-Pillow==10.2.0
+Pillow==10.3.0

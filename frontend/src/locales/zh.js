@@ -534,6 +534,8 @@ export default {
   dm2000NameFilter: '名称筛选',
   dm2000MfrFilter: '制造商筛选',
   dm2000SerialFilter: '序列号',
+  dm2000KeywordFilter: '搜索',
+  dm2000KeywordFilterPlaceholder: '型号、名称、制造商、序列号...',
   dm2000SelectArchive: '选择档案以查看数据',
   dm2000BatteryAverage: '平均',
   dm2000BatteryNo: '电池编号',

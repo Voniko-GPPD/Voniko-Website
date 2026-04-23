@@ -534,6 +534,8 @@ export default {
   dm2000NameFilter: 'Name Filter',
   dm2000MfrFilter: 'Manufacturer Filter',
   dm2000SerialFilter: 'Serial No.',
+  dm2000KeywordFilter: 'Search',
+  dm2000KeywordFilterPlaceholder: 'Type, Name, Manufacturer, Serial No...',
   dm2000SelectArchive: 'Select an archive to view data',
   dm2000BatteryAverage: 'Average',
   dm2000BatteryNo: 'Battery No.',

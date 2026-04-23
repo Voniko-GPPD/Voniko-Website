@@ -534,6 +534,8 @@ export default {
   dm2000NameFilter: 'Lọc tên lô',
   dm2000MfrFilter: 'Lọc NSX',
   dm2000SerialFilter: 'Số seri',
+  dm2000KeywordFilter: 'Tìm kiếm',
+  dm2000KeywordFilterPlaceholder: 'Kiểu pin, tên lô, NSX, số seri...',
   dm2000SelectArchive: 'Chọn archive để xem dữ liệu',
   dm2000BatteryAverage: 'Trung bình',
   dm2000BatteryNo: 'Pin số',

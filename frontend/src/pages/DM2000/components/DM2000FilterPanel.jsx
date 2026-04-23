@@ -22,10 +22,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     const filters = {
       date_from: values.date_from ? dayjs(values.date_from).format(dateFormat) : undefined,
       date_to: values.date_to ? dayjs(values.date_to).format(dateFormat) : undefined,
-      type_filter: values.type_filter?.trim() || undefined,
-      name_filter: values.name_filter?.trim() || undefined,
-      mfr_filter: values.mfr_filter?.trim() || undefined,
-      serial_filter: values.serial_filter?.trim() || undefined,
+      keyword: values.keyword?.trim() || undefined,
     };
 
     setLoading(true);
@@ -94,24 +91,9 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
               <DatePicker style={{ width: '100%' }} />
             </Form.Item>
           </Col>
-          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-            <Form.Item name="type_filter" label={t('dm2000TypeFilter')} style={{ marginBottom: 8 }}>
-              <Input allowClear />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-            <Form.Item name="name_filter" label={t('dm2000NameFilter')} style={{ marginBottom: 8 }}>
-              <Input allowClear />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-            <Form.Item name="mfr_filter" label={t('dm2000MfrFilter')} style={{ marginBottom: 8 }}>
-              <Input allowClear />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-            <Form.Item name="serial_filter" label={t('dm2000SerialFilter')} style={{ marginBottom: 8 }}>
-              <Input allowClear />
+          <Col xs={24} sm={12} md={8} lg={6} xl={8}>
+            <Form.Item name="keyword" label={t('dm2000KeywordFilter')} style={{ marginBottom: 8 }}>
+              <Input allowClear placeholder={t('dm2000KeywordFilterPlaceholder')} />
             </Form.Item>
           </Col>
         </Row>

@@ -1299,6 +1299,7 @@ def get_dm2000_archives(
     name_filter: str = None,
     mfr_filter: str = None,
     serial_filter: str = None,
+    keyword: str = None,
     limit: int = 500,
 ):
     table_names_to_try = ["ls_jb_cs", "ls_pam2", "ls_cs", "ls_jbcs", "ls_archive"]
@@ -1354,7 +1355,7 @@ def get_dm2000_archives(
             # Multiple aliases cover different DM2000 schema versions.
             "voltage_type": _dm2000_get_value(
                 row,
-                "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+                "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
                 "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
                 "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
             ),
@@ -1402,6 +1403,13 @@ def get_dm2000_archives(
             continue
         if not _contains(row.get("serialno"), serial_filter):
             continue
+        if keyword:
+            kw = keyword.lower()
+            if not any(
+                kw in str(row.get(field) or "").lower()
+                for field in ("dcxh", "name", "manufacturer", "serialno", "archname")
+            ):
+                continue
         filtered.append(row)
 
     filtered.sort(key=lambda r: str(r.get("startdate") or ""), reverse=True)
@@ -1774,18 +1782,18 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date", "fzrq", "stopdate", "fdend") or ""),
         "VOLTAGE_TYPE": str(_dm2000_get_value(
             archive,
-            "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+            "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
             "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
             "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
         ) or ""),
         "TRADEMARK": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
-        "LOAD_RESISTANCE": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
-        "ENDPOINT_VOLTAGE": str(_dm2000_get_value(
+        "LOAD_RESISTANCE": _append_unit(str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""), "ohm"),
+        "ENDPOINT_VOLTAGE": _append_unit(str(_dm2000_get_value(
             archive,
             "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
             "endpoint_v", "vcut", "cutoffv", "cutoff_v",
             "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-        ) or ""),
+        ) or ""), "V"),
         "DIS_CONDITION": str(_dm2000_get_value(
             archive,
             "dis_condition", "wd", "fdwd", "hjwd", "wendu",
@@ -1849,6 +1857,16 @@ def _compute_uniform_rate_from_tav(
         return None
 
     return round((1.0 - (max_t - min_t) / avg_t) * 100.0, 2)
+
+
+def _append_unit(val: str, unit: str) -> str:
+    """Append a physical unit to a value string if not already present."""
+    if not val or val == "-":
+        return val or ""
+    val_stripped = val.strip()
+    if val_stripped.lower().endswith(unit.lower()):
+        return val_stripped
+    return f"{val_stripped} {unit}"
 
 
 def _build_preview_workbook(  # noqa: C901
@@ -1948,11 +1966,15 @@ def _build_preview_workbook(  # noqa: C901
     else:
         _unifrate_display = f"{_unifrate_val:.2f} %" if _unifrate_val is not None else str(_unifrate_raw)
 
+    _voltage_type_val = archive_fields.get("voltage_type") or "-"
+    _load_resistance_val = _append_unit(archive_fields.get("load_resistance") or "", "ohm")
+    _endpoint_voltage_val = _append_unit(archive_fields.get("endpoint_voltage") or "", "V")
+
     info_rows_data = [
         ("Name", archive_fields.get("name") or "-", "Record Name", archive_fields.get("archname") or "-"),
         ("Type", archive_fields.get("dcxh") or "-", "Discharge Pattern", archive_fields.get("fdfs") or "-"),
-        ("Voltage Type", archive_fields.get("voltage_type") or "-", "Load Resistance", archive_fields.get("load_resistance") or "-"),
-        ("Trademark", archive_fields.get("trademark") or "-", "End-point Voltage", archive_fields.get("endpoint_voltage") or "-"),
+        ("Voltage Type", _voltage_type_val, "Load Resistance", _load_resistance_val),
+        ("Trademark", archive_fields.get("trademark") or "-", "End-point Voltage", _endpoint_voltage_val),
         ("Serial No", archive_fields.get("serialno") or "-", "Uniform Rate", _unifrate_display),
         ("Manufacturer", archive_fields.get("manufacturer") or "-", "Start Date", archive_fields.get("startdate") or "-"),
         ("Made date", archive_fields.get("madedate") or "-", "Last Date", archive_fields.get("enddate") or "-"),
@@ -2035,6 +2057,9 @@ def _build_preview_workbook(  # noqa: C901
 
     for threshold in THRESHOLDS:
         tav_vals = [_get_tav(b, threshold) for b in batys]
+        # Skip rows where no battery has data for this threshold
+        if all(v is None for v in tav_vals):
+            continue
         mx, mn, av = _agg(tav_vals)
         _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
         for i, v in enumerate(tav_vals):
@@ -2101,7 +2126,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         "remarks": str(_dm2000_get_value(archive, "remarks", "bz") or ""),
         "voltage_type": str(_dm2000_get_value(
             archive,
-            "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+            "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
             "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
             "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
         ) or ""),

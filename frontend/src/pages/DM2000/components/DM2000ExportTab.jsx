@@ -366,6 +366,14 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
   const headerCellStyle = { ...cellStyle, background: '#fafafa', fontWeight: 600 };
   const labelStyle = { ...cellStyle, background: '#f5f5f5', color: '#666' };
 
+  const appendUnit = (val, unit) => {
+    if (!val) return '-';
+    const s = String(val).trim();
+    if (!s || s === '-') return '-';
+    if (s.toLowerCase().endsWith(unit.toLowerCase())) return s;
+    return `${s} ${unit}`;
+  };
+
   const numCols = previewBatys.length + 3; // label + No.1..N + Max + Min + Avge
 
   const getTimeAtVolt = (baty, threshold) => {
@@ -535,13 +543,13 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
             <td style={labelStyle}>{t('dm2000VoltageType')}</td>
             <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.voltage_type || '-'}</td>
             <td style={labelStyle}>{t('dm2000LoadResistance')}</td>
-            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.load_resistance || '-'}</td>
+            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{appendUnit(archiveFields.load_resistance, 'ohm')}</td>
           </tr>
           <tr>
             <td style={labelStyle}>{t('dm2000Trademark')}</td>
             <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.trademark || '-'}</td>
             <td style={labelStyle}>{t('dm2000EndpointVoltage')}</td>
-            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.endpoint_voltage || '-'}</td>
+            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{appendUnit(archiveFields.endpoint_voltage, 'V')}</td>
           </tr>
           <tr>
             <td style={labelStyle}>{t('dm2000SerialNo')}</td>
@@ -616,6 +624,8 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
             const numericVals = cellVals
               .map((v) => safeNum(v))
               .filter((v) => v != null);
+            // Hide rows where no battery has data for this threshold
+            if (numericVals.length === 0 && cellVals.every((v) => v === '-')) return null;
             return (
               <tr key={threshold}>
                 <td style={labelStyle}>{threshold.toFixed(3)}</td>

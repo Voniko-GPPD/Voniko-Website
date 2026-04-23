@@ -35,6 +35,10 @@ DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_tem
 # Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
 # every request reads from the cached copy instead of making a new shadow copy.
 DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "./dm2000_cache")
+# Local cache directory: persistent copy of DMPDATA.mdb is kept here so that
+# every batch/channel request reads from the cached copy instead of making a
+# new shadow copy each time.
+DMPDATA_CACHE_DIR: str = os.environ.get("DMPDATA_CACHE_DIR", "./dmpdata_cache")
 # Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
 DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
@@ -56,6 +60,17 @@ _DM2000_LS_CACHE_WRITE_LOCK = threading.Lock()   # one writer at a time
 _DM2000_LS_CACHE_READY = threading.Event()        # set once the first copy is done
 # Seconds to wait for the initial cache build before returning 503 to callers.
 _DM2000_LS_CACHE_READY_TIMEOUT: float = 30.0
+
+# ── Persistent local cache for DMPDATA.mdb ───────────────────────────────────
+# DMPDATA.mdb accumulates data since 2019 and grows very large.  Maintaining a
+# single persistent local copy eliminates the per-request shadow-copy overhead
+# and lets the year-filter fast-path work entirely against the local file.
+# The background watcher refreshes the copy whenever the source mtime changes.
+_DMPDATA_CACHE_PATH: str = ""
+_DMPDATA_SOURCE_MTIME: float = -1.0
+_DMPDATA_CACHE_WRITE_LOCK = threading.Lock()
+_DMPDATA_CACHE_READY = threading.Event()
+_DMPDATA_CACHE_READY_TIMEOUT: float = 30.0
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
@@ -154,8 +169,9 @@ def _watch_dmp_changes_loop() -> None:
                     if previous is None or mtime > previous:
                         _WATCHED_CHANGES[stem] = now
                     _WATCHED_MDB_MTIME[stem] = mtime
-            # Keep dm2000 local cache in sync with the source file
+            # Keep dm2000 and dmpdata local caches in sync with source files
             _dm2000_refresh_ls_cache()
+            _dmpdata_refresh_cache()
         except (OSError, ValueError, pyodbc.Error, HTTPException) as exc:
             # Never let the watcher thread die — log and continue.
             logger.warning("watch_loop: unexpected error (will retry): %s", exc)
@@ -268,17 +284,112 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
         _DM2000_LS_CACHE_READY.set()
 
 
+def _dmpdata_refresh_cache(force: bool = False) -> None:
+    """Copy DMPDATA.mdb to the local cache directory if the source has changed.
+
+    Uses an atomic rename (os.replace) so readers always see a complete file.
+    Invalidates the DMPDATA in-memory caches after a successful refresh.
+    If the source cannot be read but a previous cache exists, keeps using it.
+    """
+    global _DMPDATA_CACHE_PATH, _DMPDATA_SOURCE_MTIME  # noqa: PLW0603
+
+    dmpdata_path = Path(get_dmpdata_path())
+    if not dmpdata_path.exists():
+        if not _DMPDATA_CACHE_READY.is_set():
+            _DMPDATA_CACHE_READY.set()
+        return
+
+    try:
+        current_mtime = dmpdata_path.stat().st_mtime
+    except OSError:
+        if not _DMPDATA_CACHE_READY.is_set():
+            _DMPDATA_CACHE_READY.set()
+        return
+
+    with _DMPDATA_CACHE_WRITE_LOCK:
+        if not force and current_mtime <= _DMPDATA_SOURCE_MTIME and _DMPDATA_CACHE_READY.is_set():
+            return  # source unchanged
+
+        cache_dir = Path(DMPDATA_CACHE_DIR).resolve()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("dmpdata_cache: cannot create cache dir %s: %s", cache_dir, exc)
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_READY.set()
+            return
+
+        cache_final = str(cache_dir / "DMPDATA.mdb")
+        cache_tmp = str(cache_dir / "DMPDATA_new.mdb")
+        try:
+            shutil.copy2(str(dmpdata_path), cache_tmp)
+        except (OSError, PermissionError) as exc:
+            logger.warning("dmpdata_cache: copy failed (%s), continuing with existing cache: %s", dmpdata_path, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_READY.set()
+            return
+
+        # Validate magic bytes before replacing.
+        try:
+            size = os.path.getsize(cache_tmp)
+            if size >= 32 * 1024:
+                with open(cache_tmp, "rb") as fh:
+                    magic = fh.read(4)
+                if magic != b"\x00\x01\x00\x00":
+                    raise ValueError(f"Not a valid Access DB (magic={magic!r})")
+        except (OSError, ValueError) as exc:
+            logger.warning("dmpdata_cache: validation failed for %s: %s", cache_tmp, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_READY.set()
+            return
+
+        try:
+            os.replace(cache_tmp, cache_final)
+        except OSError as exc:
+            logger.warning("dmpdata_cache: rename failed (file in use?), keeping old cache: %s", exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_READY.set()
+            return
+
+        _DMPDATA_CACHE_PATH = cache_final
+        _DMPDATA_SOURCE_MTIME = current_mtime
+        logger.info("dmpdata_cache: refreshed local copy from %s (mtime=%s)", dmpdata_path, current_mtime)
+
+        # Invalidate HAS_PARA_PUB_CDMC so schema is re-detected from new cache
+        global _HAS_PARA_PUB_CDMC  # noqa: PLW0603
+        with _HAS_PARA_PUB_CDMC_LOCK:
+            _HAS_PARA_PUB_CDMC = None
+
+        _DMPDATA_CACHE_READY.set()
+
+
 @asynccontextmanager
 async def _lifespan(application):
     watcher_thread = threading.Thread(target=_watch_dmp_changes_loop, daemon=True)
     watcher_thread.start()
-    # Build the initial dm2000 local cache in a thread executor so the async
-    # event loop is not blocked during startup.  Simple endpoints (templates,
-    # config) can respond immediately; DB-backed endpoints wait for
-    # _DM2000_LS_CACHE_READY as usual.
+    # Build the initial local caches in thread executors so the async event loop
+    # is not blocked during startup.  Simple endpoints (templates, config) can
+    # respond immediately; DB-backed endpoints wait for the *_CACHE_READY events.
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: _dm2000_refresh_ls_cache(force=True))
-    # Register with the Voniko server only AFTER the local cache is ready so
+    await loop.run_in_executor(None, lambda: _dmpdata_refresh_cache(force=True))
+    # Register with the Voniko server only AFTER the local caches are ready so
     # that requests proxied to this station are not met with a premature 503.
     if VONIKO_SERVER_URL and DMP_STATION_NAME:
         t = threading.Thread(target=_registration_loop, daemon=True)
@@ -634,6 +745,17 @@ def _resolve_template_path(template_name: str) -> str:
 
 
 def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
+    """Query the persistent local cache of DMPDATA.mdb.
+
+    Waits up to _DMPDATA_CACHE_READY_TIMEOUT seconds for the initial cache to be
+    built on startup, then reads directly from the cached copy without creating a
+    new shadow copy per request.  Falls back to a fresh shadow copy of the source
+    file when the cache has not been built (e.g. DMPDATA_CACHE_DIR unavailable).
+    """
+    if _DMPDATA_CACHE_READY.wait(timeout=_DMPDATA_CACHE_READY_TIMEOUT):
+        if _DMPDATA_CACHE_PATH:
+            return query_mdb(_DMPDATA_CACHE_PATH, sql, params)
+    # Fallback: original shadow-copy path (cache not available)
     dmpdata = Path(get_dmpdata_path())
     if not dmpdata.exists():
         raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
@@ -1135,25 +1257,48 @@ def health_check():
     return {"status": "ok", "service": "DMP Battery Data Bridge"}
 
 
+@app.get("/batches/years")
+def get_batch_years():
+    """Return a sorted list of distinct years found in para_pub.fdrq."""
+    try:
+        rows = _read_dmpdata("SELECT fdrq FROM para_pub")
+    except (pyodbc.Error, HTTPException) as exc:
+        logger.warning("get_batch_years: query failed: %s", exc)
+        return {"years": []}
+
+    years: set[int] = set()
+    for row in rows:
+        fdrq = row.get("fdrq")
+        if fdrq is None:
+            continue
+        try:
+            if hasattr(fdrq, "year"):
+                years.add(int(fdrq.year))
+            else:
+                yr = int(str(fdrq)[:4])
+                if 1990 <= yr <= 2100:
+                    years.add(yr)
+        except (TypeError, ValueError):
+            pass
+    return {"years": sorted(years, reverse=True)}
+
+
 @app.get("/batches")
-def get_batches():
+def get_batches(year: Optional[int] = None):
     global _HAS_PARA_PUB_CDMC
 
     # Determine schema once and cache for the lifetime of the process
     with _HAS_PARA_PUB_CDMC_LOCK:
         if _HAS_PARA_PUB_CDMC is None:
             detected = True  # default: assume cdmc column exists
-            dmpdata = Path(get_dmpdata_path())
-            if dmpdata.exists():
-                try:
-                    with shadow_copy(str(dmpdata)) as copied:
-                        try:
-                            para_pub_columns = _get_table_columns(copied, "para_pub")
-                            detected = "cdmc" in para_pub_columns
-                        except (pyodbc.Error, HTTPException) as exc:
-                            logger.debug("Could not inspect para_pub schema, using query fallback: %s", exc)
-                except (pyodbc.Error, HTTPException) as exc:
-                    logger.debug("Could not create shadow copy for schema inspection: %s", exc)
+            try:
+                para_pub_columns = _get_table_columns(
+                    _DMPDATA_CACHE_PATH if _DMPDATA_CACHE_PATH else get_dmpdata_path(),
+                    "para_pub",
+                )
+                detected = "cdmc" in para_pub_columns
+            except (pyodbc.Error, HTTPException) as exc:
+                logger.debug("Could not inspect para_pub schema, using query fallback: %s", exc)
             _HAS_PARA_PUB_CDMC = detected
 
     has_para_pub_cdmc = _HAS_PARA_PUB_CDMC
@@ -1169,15 +1314,28 @@ def get_batches():
         except pyodbc.Error as exc:
             logger.error("get_batches: fallback query also failed: %s", exc)
             raise HTTPException(status_code=500, detail="Database query failed") from exc
+
+    result = []
     for row in rows:
         fdrq = row.get("fdrq")
         if fdrq is None:
-            continue
-        if hasattr(fdrq, "strftime"):
+            row_year = None
+            row["fdrq"] = None
+        elif hasattr(fdrq, "strftime"):
+            row_year = int(fdrq.year)
             row["fdrq"] = fdrq.strftime("%Y-%m-%d")
         else:
-            row["fdrq"] = str(fdrq)[:10]
-    return {"batches": rows}
+            date_str = str(fdrq)[:10]
+            row["fdrq"] = date_str
+            try:
+                row_year = int(date_str[:4])
+            except (TypeError, ValueError):
+                row_year = None
+
+        if year is not None and row_year != year:
+            continue
+        result.append(row)
+    return {"batches": result}
 
 
 @app.get("/batches/{batch_id}/channels")

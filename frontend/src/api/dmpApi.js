@@ -22,8 +22,16 @@ export async function fetchStations() {
   return data.stations || [];
 }
 
-export async function fetchBatches(stationId) {
-  const res = await apiFetch(`${BASE}/batches?stationId=${encodeURIComponent(stationId)}`);
+export async function fetchBatchYears(stationId) {
+  const res = await apiFetch(`${BASE}/batches/years?stationId=${encodeURIComponent(stationId)}`);
+  const data = await res.json();
+  return data.years || [];
+}
+
+export async function fetchBatches(stationId, year) {
+  const params = new URLSearchParams({ stationId });
+  if (year != null) params.set('year', String(year));
+  const res = await apiFetch(`${BASE}/batches?${params.toString()}`);
   const data = await res.json();
   return data.batches || [];
 }

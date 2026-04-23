@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Input, Spin, Tree } from 'antd';
-import { fetchBatches, fetchChannels, fetchChanges } from '../../../api/dmpApi';
+import { Alert, Input, Select, Spin, Tree } from 'antd';
+import { fetchBatches, fetchBatchYears, fetchChannels, fetchChanges } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 function buildBatchTree(batches, channelsByBatch, labels) {
@@ -88,6 +88,26 @@ export default function DMPSidebar({ stationId, onSelect }) {
   const [batches, setBatches] = useState([]);
   const [channelsByBatch, setChannelsByBatch] = useState({});
   const [expandedKeys, setExpandedKeys] = useState([]);
+  const [years, setYears] = useState([]);
+  const [selectedYear, setSelectedYear] = useState(null);
+
+  // Load available years when station changes
+  useEffect(() => {
+    setYears([]);
+    setSelectedYear(null);
+    if (!stationId) return () => {};
+    let mounted = true;
+    fetchBatchYears(stationId)
+      .then((result) => {
+        if (!mounted) return;
+        setYears(result || []);
+        if (result && result.length > 0) {
+          setSelectedYear(result[0]);
+        }
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, [stationId]);
 
   useEffect(() => {
     onSelect?.(null);
@@ -106,7 +126,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     setLoading(true);
     setError('');
 
-    fetchBatches(stationId)
+    fetchBatches(stationId, selectedYear)
       .then((result) => {
         if (!mounted) return;
         setBatches(result);
@@ -123,7 +143,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
     return () => {
       mounted = false;
     };
-  }, [stationId, onSelect]);
+  }, [stationId, selectedYear, onSelect]);
 
   useEffect(() => {
     if (!stationId) return () => {};
@@ -138,7 +158,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
         if (!active) return;
         setError('');
         if (!changes.length) return;
-        const updatedBatches = await fetchBatches(stationId);
+        const updatedBatches = await fetchBatches(stationId, selectedYear);
         if (!active) return;
         setBatches(updatedBatches);
         setChannelsByBatch((prev) => {
@@ -159,7 +179,7 @@ export default function DMPSidebar({ stationId, onSelect }) {
       active = false;
       clearInterval(intervalId);
     };
-  }, [stationId]);
+  }, [stationId, selectedYear]);
 
   const treeData = useMemo(() => buildBatchTree(batches, channelsByBatch, {
     unknownModel: t('dmpUnknownModel'),
@@ -200,6 +220,14 @@ export default function DMPSidebar({ stationId, onSelect }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
+      <Select
+        style={{ width: '100%' }}
+        placeholder={t('dmpAllYears')}
+        allowClear
+        value={selectedYear}
+        onChange={(val) => setSelectedYear(val ?? null)}
+        options={years.map((yr) => ({ value: yr, label: `${t('dmpFilterYear')}: ${yr}` }))}
+      />
       <Input.Search
         allowClear
         placeholder={t('dmpSearchPlaceholder')}

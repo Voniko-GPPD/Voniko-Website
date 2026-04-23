@@ -511,6 +511,8 @@ export default {
   dmpUnknownModel: 'Model không xác định',
   dmpUnknownDate: 'Ngày không xác định',
   dmpUnknownPattern: 'Kịch bản không xác định',
+  dmpFilterYear: 'Năm',
+  dmpAllYears: 'Tất cả các năm',
 
   dm2000Title: 'Tra cứu lịch sử DM2000',
   dm2000CurveTab: 'Biểu đồ',

@@ -511,6 +511,8 @@ export default {
   dmpUnknownModel: '未知型号',
   dmpUnknownDate: '未知日期',
   dmpUnknownPattern: '未知模式',
+  dmpFilterYear: '年份',
+  dmpAllYears: '所有年份',
 
   dm2000Title: 'DM2000历史查询',
   dm2000CurveTab: '图表',

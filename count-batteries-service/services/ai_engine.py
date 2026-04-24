@@ -94,7 +94,7 @@ class AIEngine:
     MAX_AREA_RATIO = 0.25     # Relaxed: allow larger detections
     MIN_ASPECT_RATIO = 0.3    # Relaxed: more shape tolerance
     MAX_ASPECT_RATIO = 3.0    # Relaxed: more shape tolerance
-    CENTER_DISTANCE_RATIO = 1.02  # Stronger duplicate suppression; threshold is ~1.02r vs adjacent spacing ~2.0r (about half)
+    CENTER_DISTANCE_RATIO = 1.02  # Stronger duplicate suppression; threshold is ~1.02r vs adjacent spacing ~2.0r (~51%)
     MIN_RADIUS_RATIO = 0.50   # Relaxed: allow more size variation
     
     def __new__(cls):

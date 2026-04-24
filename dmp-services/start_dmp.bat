@@ -102,7 +102,7 @@ call pm2 start "%~dp0venv\Scripts\pythonw.exe" ^
     --app-dir "%~dp0"
 
 echo [PM2] Khoi dong DMP Watchdog (tu dong khoi dong lai khi server bi treo)...
-call pm2 start "%~dp0venv\Scripts\python.exe" ^
+call pm2 start "%~dp0venv\Scripts\pythonw.exe" ^
     --name "dmp-watchdog" ^
     --restart-delay 5000 ^
     -- "%~dp0dmp_watchdog.py"

@@ -121,9 +121,9 @@ call pm2 save
 :: Tao Task Scheduler tu dong chay PM2 khi Windows khoi dong
 schtasks /query /tn "PM2-BatteryService" >nul 2>&1
 if errorlevel 1 (
-    echo [TASK] Tao Windows Task tu dong khoi dong...
+    echo [TASK] Tao Windows Task tu dong khoi dong (an cua so CMD)...
     schtasks /create /tn "PM2-BatteryService" ^
-        /tr "pm2 resurrect" ^
+        /tr "wscript.exe \"%~dp0pm2_resurrect_hidden.vbs\"" ^
         /sc onlogon ^
         /rl highest ^
         /f >nul

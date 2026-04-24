@@ -102,7 +102,7 @@ call pm2 start "%~dp0venv\Scripts\pythonw.exe" ^
     --app-dir "%~dp0"
 
 echo [PM2] Khoi dong DMP Watchdog (tu dong khoi dong lai khi server bi treo)...
-call pm2 start "%~dp0venv\Scripts\python.exe" ^
+call pm2 start "%~dp0venv\Scripts\pythonw.exe" ^
     --name "dmp-watchdog" ^
     --restart-delay 5000 ^
     -- "%~dp0dmp_watchdog.py"
@@ -112,9 +112,9 @@ call pm2 save
 :: Tao Task Scheduler
 schtasks /query /tn "PM2-DMPService" >nul 2>&1
 if errorlevel 1 (
-    echo [TASK] Tao Windows Task tu dong khoi dong...
+    echo [TASK] Tao Windows Task tu dong khoi dong (an cua so CMD)...
     schtasks /create /tn "PM2-DMPService" ^
-        /tr "pm2 resurrect" ^
+        /tr "wscript.exe \"%~dp0pm2_resurrect_hidden.vbs\"" ^
         /sc onlogon ^
         /rl highest ^
         /f >nul

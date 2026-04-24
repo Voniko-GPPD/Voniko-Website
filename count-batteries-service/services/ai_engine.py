@@ -820,45 +820,31 @@ class AIEngine:
     
     def _sahi_batch_onnx(self, image: np.ndarray, slices: List[Tuple[int, int, int, int]], 
                          confidence: float) -> List[dict]:
-        """Process SAHI slices in batches for ONNX Runtime"""
+        """Process SAHI slices one-by-one using ONNX Runtime.
+
+        Note: Batching multiple slices in a single ONNX session.run() call requires
+        the model to be exported with dynamic=True (dynamic batch dimension).
+        The recommended export uses dynamic=False (fixed batch=1), so we always
+        process one slice at a time to avoid shape-mismatch errors that would cause
+        the entire SAHI path to silently return 0 detections.
+        """
         all_detections = []
         
-        # Prepare all slices
-        slice_data = []  # [(tensor, metadata, x1, y1), ...]
         for x1, y1, x2, y2 in slices:
             slice_img = image[y1:y2, x1:x2]
             processed_slice, _ = self.preprocess_image(slice_img, apply_letterbox=False)
             tensor, metadata = self._preprocess_for_onnx(processed_slice)
-            slice_data.append((tensor, metadata, x1, y1))
-        
-        # Process in batches
-        for batch_start in range(0, len(slice_data), self.BATCH_SIZE):
-            batch_end = min(batch_start + self.BATCH_SIZE, len(slice_data))
-            batch = slice_data[batch_start:batch_end]
             
-            # Stack tensors for batch inference
-            batch_tensors = np.concatenate([s[0] for s in batch], axis=0)
+            outputs = self._session.run(self._output_names, {self._input_name: tensor})
+            dets = self._postprocess_onnx(outputs, metadata, confidence)
             
-            # Run batch inference
-            outputs = self._session.run(self._output_names, {self._input_name: batch_tensors})
-            
-            # Process each result in batch
-            batch_output = outputs[0]  # Shape: [batch_size, 5, 8400]
-            
-            for i, (_, metadata, offset_x, offset_y) in enumerate(batch):
-                # Get single output from batch
-                single_output = batch_output[i:i+1]  # Keep batch dim for postprocess
-                
-                # Postprocess
-                dets = self._postprocess_onnx([single_output], metadata, confidence)
-                
-                # Add offset to convert to original image coordinates
-                for det in dets:
-                    det["bbox"][0] += offset_x
-                    det["bbox"][1] += offset_y
-                    det["bbox"][2] += offset_x
-                    det["bbox"][3] += offset_y
-                    all_detections.append(det)
+            # Add slice offset to convert to original image coordinates
+            for det in dets:
+                det["bbox"][0] += x1
+                det["bbox"][1] += y1
+                det["bbox"][2] += x1
+                det["bbox"][3] += y1
+                all_detections.append(det)
         
         return all_detections
     

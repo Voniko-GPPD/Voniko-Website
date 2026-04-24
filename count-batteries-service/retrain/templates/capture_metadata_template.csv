@@ -1,0 +1,4 @@
+image_path,capture_session,capture_date,shift,camera_id,lighting_condition,tray_type,notes
+/path/to/image_0001.jpg,session_2026_04_24_a,2026-04-24,morning,cam_top_01,bright,standard,
+/path/to/image_0002.jpg,session_2026_04_24_b,2026-04-24,morning,cam_top_01,low_light,reflective,
+/path/to/image_0003.jpg,session_2026_04_24_c,2026-04-24,night,cam_top_02,low_light,standard,edge-shadow

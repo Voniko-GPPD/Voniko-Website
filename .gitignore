@@ -69,3 +69,9 @@ backend/station_registry.json
 *.egg-info/
 dist/
 build/
+
+# Count batteries retrain artifacts
+count-batteries-service/retrain/datasets/
+count-batteries-service/retrain/runs/
+count-batteries-service/retrain/exports/
+count-batteries-service/retrain/benchmarks/*.generated.csv

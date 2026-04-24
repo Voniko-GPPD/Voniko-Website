@@ -94,7 +94,7 @@ class AIEngine:
     MAX_AREA_RATIO = 0.25     # Relaxed: allow larger detections
     MIN_ASPECT_RATIO = 0.3    # Relaxed: more shape tolerance
     MAX_ASPECT_RATIO = 3.0    # Relaxed: more shape tolerance
-    CENTER_DISTANCE_RATIO = 0.85  # Per-pair max radius threshold (adjacent batteries are ~2R apart, so this is safe)
+    CENTER_DISTANCE_RATIO = 0.78  # More aggressive duplicate suppression while still far from adjacent-battery distance
     MIN_RADIUS_RATIO = 0.50   # Relaxed: allow more size variation
     
     def __new__(cls):
@@ -762,7 +762,7 @@ class AIEngine:
                     continue
                 dist = np.sqrt((cx[i] - cx[j])**2 + (cy[i] - cy[j])**2)
                 # Per-pair threshold: use LARGER radius of the two detections
-                pair_threshold = max(radii[i], radii[j]) * 0.85
+                pair_threshold = max(radii[i], radii[j]) * 0.78
                 if dist < pair_threshold:
                     suppressed.add(int(j))
         
@@ -895,9 +895,6 @@ class AIEngine:
         """
         Detect batteries with ONNX Runtime GPU acceleration
         """
-        if confidence is None:
-            confidence = self.DEFAULT_CONFIDENCE
-            
         if self._session is None and self._model is None:
             print("No model loaded – cannot detect batteries.")
             return 0, []
@@ -908,14 +905,27 @@ class AIEngine:
             
             t_start = time.time()
             
-            # Auto-adjust confidence based on image quality
+            # Auto-adjust confidence based on image quality.
+            # User-selected confidence (from UI slider) must be respected when provided.
             adaptive_confidence = self.get_adaptive_confidence(image)
+            if confidence is None:
+                effective_confidence = adaptive_confidence
+                confidence_source = "adaptive"
+                user_conf_log = "N/A"
+            else:
+                effective_confidence = max(0.05, min(0.95, float(confidence)))
+                confidence_source = "user"
+                user_conf_log = f"{float(confidence):.3f}"
+            print(
+                f"[CONF] source={confidence_source}, "
+                f"user={user_conf_log}, adaptive={adaptive_confidence:.3f}, "
+                f"effective={effective_confidence:.3f}"
+            )
             
             # Skip PASS 1 for large images if configured (production mode)
             if use_sahi is None and self.SKIP_PASS1_FOR_LARGE_TRAYS and max_dim >= self.SAHI_MIN_IMAGE_SIZE:
                 print(f"[SKIP PASS 1] Large image {w}x{h} -> Direct SAHI")
                 use_sahi = True
-                confidence = adaptive_confidence
             # Density-based two-pass detection (for mixed use cases)
             elif use_sahi is None and self.DENSITY_CHECK_ENABLED and self.SAHI_ENABLED:
                 print(f"[PASS 1] Quick detection for {w}x{h} image...")
@@ -925,7 +935,6 @@ class AIEngine:
                 if quick_count >= self.SAHI_MIN_COUNT and max_dim >= self.SAHI_MIN_IMAGE_SIZE:
                     print(f"[PASS 2] Using SAHI for {quick_count} objects")
                     use_sahi = True
-                    confidence = adaptive_confidence
                 else:
                     print(f"[RESULT] Standard detection: {quick_count} objects")
                     filtered = self.filter_by_area(quick_detections, (h, w))
@@ -935,7 +944,7 @@ class AIEngine:
                     return len(filtered), filtered
             
             if use_sahi:
-                count, dets = self.detect_with_sahi(image, confidence)
+                count, dets = self.detect_with_sahi(image, effective_confidence)
                 print(f"Total time: {time.time()-t_start:.3f}s")
                 return count, dets
             
@@ -949,10 +958,10 @@ class AIEngine:
             
             # Use ONNX or YOLO
             if self._use_onnx and self._session:
-                detections = self._run_onnx_inference(processed_image, confidence)
+                detections = self._run_onnx_inference(processed_image, effective_confidence)
                 detections = self._nms(detections, self.DEFAULT_IOU_THRESHOLD)
             elif self._model:
-                results = self._model(processed_image, conf=confidence, 
+                results = self._model(processed_image, conf=effective_confidence, 
                                       iou=self.DEFAULT_IOU_THRESHOLD, verbose=False)
                 detections = []
                 for result in results:

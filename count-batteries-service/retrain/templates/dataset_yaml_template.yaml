@@ -1,0 +1,10 @@
+# Copy this file to dataset.yaml and update absolute paths.
+# YOLO dataset format
+path: /absolute/path/to/yolo_dataset
+train: images/train
+val: images/val
+test: images/test
+
+# Single class for battery counting object
+names:
+  0: battery

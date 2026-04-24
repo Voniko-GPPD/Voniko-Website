@@ -911,12 +911,14 @@ class AIEngine:
             if confidence is None:
                 effective_confidence = adaptive_confidence
                 confidence_source = "adaptive"
+                user_conf_log = "N/A"
             else:
                 effective_confidence = max(0.05, min(0.95, float(confidence)))
                 confidence_source = "user"
+                user_conf_log = f"{float(confidence):.3f}"
             print(
                 f"[CONF] source={confidence_source}, "
-                f"user={confidence}, adaptive={adaptive_confidence:.3f}, "
+                f"user={user_conf_log}, adaptive={adaptive_confidence:.3f}, "
                 f"effective={effective_confidence:.3f}"
             )
             

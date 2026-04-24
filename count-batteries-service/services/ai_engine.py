@@ -94,7 +94,7 @@ class AIEngine:
     MAX_AREA_RATIO = 0.25     # Relaxed: allow larger detections
     MIN_ASPECT_RATIO = 0.3    # Relaxed: more shape tolerance
     MAX_ASPECT_RATIO = 3.0    # Relaxed: more shape tolerance
-    CENTER_DISTANCE_RATIO = 0.78  # More aggressive duplicate suppression while still far from adjacent-battery distance
+    CENTER_DISTANCE_RATIO = 1.02  # Stronger duplicate suppression; threshold is ~1.02r vs adjacent spacing ~2.0r (~51%)
     MIN_RADIUS_RATIO = 0.50   # Relaxed: allow more size variation
     
     def __new__(cls):
@@ -762,7 +762,7 @@ class AIEngine:
                     continue
                 dist = np.sqrt((cx[i] - cx[j])**2 + (cy[i] - cy[j])**2)
                 # Per-pair threshold: use LARGER radius of the two detections
-                pair_threshold = max(radii[i], radii[j]) * 0.78
+                pair_threshold = max(radii[i], radii[j]) * self.CENTER_DISTANCE_RATIO
                 if dist < pair_threshold:
                     suppressed.add(int(j))
         
@@ -939,7 +939,9 @@ class AIEngine:
                     print(f"[RESULT] Standard detection: {quick_count} objects")
                     filtered = self.filter_by_area(quick_detections, (h, w))
                     filtered = self.filter_concentric_detections(filtered)
+                    filtered = self.filter_edge_duplicates(filtered)
                     filtered = self.filter_by_center_distance(filtered)
+                    filtered = self.filter_small_circles(filtered)
                     print(f"Total time: {time.time()-t_start:.3f}s")
                     return len(filtered), filtered
             
@@ -976,6 +978,10 @@ class AIEngine:
                 detections = []
             
             detections = self.filter_by_area(detections, original_shape)
+            detections = self.filter_concentric_detections(detections)
+            detections = self.filter_edge_duplicates(detections)
+            detections = self.filter_by_center_distance(detections)
+            detections = self.filter_small_circles(detections)
             
             print(f"Total time: {time.time()-t_start:.3f}s")
             return len(detections), detections

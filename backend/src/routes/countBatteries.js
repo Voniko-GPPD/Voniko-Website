@@ -143,6 +143,23 @@ router.get('/history/export/excel', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /reload-model – force reload AI model without restarting service
+// ---------------------------------------------------------------------------
+router.post('/reload-model', async (req, res) => {
+  try {
+    const result = await axios.post(`${PYTHON_BASE}/reload-model`, null, {
+      headers: userHeaders(req),
+      timeout: 30000,
+    });
+    res.json(result.data);
+  } catch (e) {
+    logger.error('Count batteries /reload-model error', { error: e.message });
+    if (e.response) return res.status(e.response.status).json(e.response.data);
+    res.status(503).json({ error: 'Count batteries service unavailable', detail: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /history/batch
 // ---------------------------------------------------------------------------
 router.delete('/history/batch', async (req, res) => {

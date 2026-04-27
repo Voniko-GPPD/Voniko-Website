@@ -588,6 +588,17 @@ export default {
   dm2000PerfReportNoSelection: '请先选择存档',
   dm2000PerfReportNoValidEntries: '请至少填写一行的存档名称和等级',
   dm2000PerfReportInfo: '将导出 {count} 行有效数据',
+  dm2000PerfExportSection: '导出性能报告',
+  dm2000PerfTemplateUpload: '上传性能模板 (.xlsx)',
+  dm2000PerfTemplateUploadHint: '拖放或点击选择 .xlsx 文件',
+  dm2000PerfTemplateUploading: '上传中...',
+  dm2000PerfTemplateUploaded: '性能模板已保存',
+  dm2000PerfTemplateUploadFailed: '上传失败',
+  dm2000PerfTemplateNotFound: '未找到性能模板 — 将使用自动格式',
+  dm2000PerfTemplateCurrent: '性能模板：{name}',
+  dm2000PerfTemplateNone: '（无模板 — 使用自动格式）',
+  dm2000PerfTemplateTagsHint: '模板标签说明',
+  dm2000PerfTemplateTagsBody: '在模板文件的对应单元格中放置以下标签：\n• {{#PERF_ROWS}} — 标记数据行（将被展开）\n• {{DATE}} — 测试日期 (YYYY-MM-DD)\n• {{TYPE}} — 电池等级 (HP / UD / UD+)\n• {{RESULT_0}}、{{RATE_0}} — 第1放电条件的结果(h)和均匀率(%)\n• {{RESULT_1}}、{{RATE_1}} — 第2放电条件（依此类推 _2、_3 ...）\n• {{PERF_SHEET_NAME}} — Sheet名称（电池系列，如 LR6 501）\n模板中的Sheet名称必须与生成的Sheet名称匹配（电池类型+序列号）。',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',

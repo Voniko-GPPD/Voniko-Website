@@ -7,7 +7,6 @@ import DM2000CurveTab from './components/DM2000CurveTab';
 import DM2000DataTab from './components/DM2000DataTab';
 import DM2000DailyVoltTab from './components/DM2000DailyVoltTab';
 import DM2000ExportTab from './components/DM2000ExportTab';
-import DM2000PerfReportTab from './components/DM2000PerfReportTab';
 
 const SEARCH_TAB_KEY = 'search';
 const CURVE_TAB_KEY = 'curve';
@@ -152,16 +151,6 @@ export default function DM2000Page() {
             label: t('dm2000ExportTab'),
             children: (
               <DM2000ExportTab
-                stationId={selectedStationId}
-                selection={selection}
-              />
-            ),
-          },
-          {
-            key: 'perf',
-            label: t('dm2000PerfReportTab'),
-            children: (
-              <DM2000PerfReportTab
                 stationId={selectedStationId}
                 selection={selection}
               />

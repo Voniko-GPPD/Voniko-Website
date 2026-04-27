@@ -1,10 +1,15 @@
 const express = require('express');
 const axios = require('axios');
+const multer = require('multer');
+const FormData = require('form-data');
 const { authenticateToken } = require('../middleware/auth');
 const { upsertStation, getStations, resolveUrl } = require('../utils/stationRegistry');
 const logger = require('../utils/logger');
 
 const router = express.Router();
+
+// In-memory multer for proxying uploaded files to the DMP station
+const upload = multer({ storage: multer.memoryStorage() });
 
 // POST /api/dmp/register — called by dmp_service.py heartbeat, no auth
 router.post('/register', (req, res) => {
@@ -368,6 +373,35 @@ router.post('/dm2000/perf-report', authenticateToken, async (req, res, next) => 
     if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
     next(err);
   }
+});
+
+// GET /api/dmp/dm2000/perf-templates?stationId=
+router.get('/dm2000/perf-templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/perf-templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+// POST /api/dmp/dm2000/perf-template/upload?stationId=
+router.post('/dm2000/perf-template/upload', authenticateToken, upload.single('file'), async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const form = new FormData();
+    form.append('file', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const r = await axios.post(`${stationUrl}/dm2000/perf-template/upload`, form, {
+      headers: form.getHeaders(),
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
 });
 
 module.exports = router;

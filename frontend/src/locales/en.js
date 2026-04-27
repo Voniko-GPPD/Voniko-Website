@@ -588,6 +588,17 @@ export default {
   dm2000PerfReportNoSelection: 'Please select an archive first',
   dm2000PerfReportNoValidEntries: 'Please fill in archive name and grade for at least one row',
   dm2000PerfReportInfo: '{count} valid rows will be exported',
+  dm2000PerfExportSection: 'Export Performance Report',
+  dm2000PerfTemplateUpload: 'Upload performance template (.xlsx)',
+  dm2000PerfTemplateUploadHint: 'Drag & drop or click to select .xlsx file',
+  dm2000PerfTemplateUploading: 'Uploading...',
+  dm2000PerfTemplateUploaded: 'Performance template saved',
+  dm2000PerfTemplateUploadFailed: 'Upload failed',
+  dm2000PerfTemplateNotFound: 'No performance template — auto format will be used',
+  dm2000PerfTemplateCurrent: 'Performance template: {name}',
+  dm2000PerfTemplateNone: '(No template — auto format)',
+  dm2000PerfTemplateTagsHint: 'Template tags reference',
+  dm2000PerfTemplateTagsBody: 'Place these tags in the corresponding cells of the template file:\n• {{#PERF_ROWS}} — marks the data row (will be expanded)\n• {{DATE}} — test date (YYYY-MM-DD)\n• {{TYPE}} — battery grade (HP / UD / UD+)\n• {{RESULT_0}}, {{RATE_0}} — result (h) & rate (%) for 1st discharge condition\n• {{RESULT_1}}, {{RATE_1}} — 2nd condition (continue with _2, _3 ...)\n• {{PERF_SHEET_NAME}} — sheet name (battery series, e.g. LR6 501)\nSheet names in the template must match the generated sheet names (battery type + serial).',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',

@@ -1125,7 +1125,10 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                         ur = entry.get("uniform_rate")
 
                         if r_col is not None:
-                            # Choose unit from the column header: (m)/(t) → minutes, else hours
+                            # Choose unit from the column header:
+                            #   (h)  → hours   (e.g. "10ohm 24h/d-0.9V(h)")
+                            #   (m)  → minutes (e.g. "1000mA 24h/d-0.9V(m)")
+                            #   (t)  → minutes ("thời gian" / time in minutes)
                             h_lower = header.lower()
                             if h_lower.endswith("(m)") or h_lower.endswith("(t)"):
                                 val = avg_m if avg_m is not None else ""
@@ -2962,8 +2965,8 @@ def _compute_perf_values(
     raw_ep = str(endpoint_voltage_str or "").strip()
     if raw_ep:
         token = raw_ep.split()[0] if raw_ep.split() else raw_ep
-        # Remove trailing non-numeric chars (unit like 'V', 'v')
-        token = re.sub(r"[^0-9.\-]$", "", token)
+        # Remove all trailing non-numeric chars (e.g. "mV", "Volts" → numeric part)
+        token = re.sub(r"[^0-9.\-]+$", "", token)
         try:
             ep = float(token)
         except (TypeError, ValueError):
@@ -2984,8 +2987,10 @@ def _compute_perf_values(
         else:
             return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
 
-    # For each battery find the TAV row whose voltage is closest to ep
-    # (within a 0.05 V tolerance to handle minor rounding differences).
+    # For each battery find the TAV row whose voltage is closest to ep.
+    # A tolerance of 0.05 V is used to handle minor rounding differences
+    # between the stored endpoint voltage (e.g. "0.9") and the TAV row
+    # voltage thresholds (which may be stored as 0.90, 0.900, etc.).
     TOLERANCE = 0.05
     minutes_list: list[float] = []
     for b in batys:

@@ -580,7 +580,7 @@ export default {
   dm2000PerfReportAddFromSelection: 'Add current archive',
   dm2000PerfReportAddManual: 'Add manually',
   dm2000PerfReportArchname: 'Archive name',
-  dm2000PerfReportBatteryGrade: 'Grade 等级 (HP/UD/UD+)',
+  dm2000PerfReportBatteryGrade: 'Grade (HP/UD/UD+)',
   dm2000PerfReportSheetName: 'Sheet name (blank = auto)',
   dm2000PerfReportSheetNamePlaceholder: 'Auto from battery type + serial',
   dm2000PerfReportGenerate: 'Export battery performance report',

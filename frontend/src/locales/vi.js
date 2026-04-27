@@ -580,13 +580,13 @@ export default {
   dm2000PerfReportAddFromSelection: 'Thêm archive hiện tại',
   dm2000PerfReportAddManual: 'Thêm thủ công',
   dm2000PerfReportArchname: 'Mã archive',
-  dm2000PerfReportBatteryGrade: 'Loại 等级 (HP/UD/UD+)',
+  dm2000PerfReportBatteryGrade: 'Loại (HP/UD/UD+)',
   dm2000PerfReportSheetName: 'Tên sheet (để trống = tự động)',
   dm2000PerfReportSheetNamePlaceholder: 'Tự động theo kiểu pin + số seri',
   dm2000PerfReportGenerate: 'Xuất báo cáo hiệu suất pin',
   dm2000PerfReportNoEntries: 'Chưa có dữ liệu. Chọn archive từ tab "Tải dữ liệu" rồi nhấn "Thêm archive hiện tại", hoặc nhấn "Thêm thủ công".',
   dm2000PerfReportNoSelection: 'Vui lòng chọn archive trước',
-  dm2000PerfReportNoValidEntries: 'Vui lòng điền đầy đủ mã archive và loại 等级 cho ít nhất một dòng',
+  dm2000PerfReportNoValidEntries: 'Vui lòng điền đầy đủ mã archive và loại cho ít nhất một dòng',
   dm2000PerfReportInfo: '{count} dòng hợp lệ sẽ được xuất',
 
   // Count Batteries (AI image-based battery counting)

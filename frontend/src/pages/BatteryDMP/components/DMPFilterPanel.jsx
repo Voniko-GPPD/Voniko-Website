@@ -14,6 +14,7 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
   const [error, setError] = useState('');
   const [batches, setBatches] = useState([]);
   const [searched, setSearched] = useState(false);
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
 
   const onSearch = async () => {
     if (!stationId) return;
@@ -39,6 +40,7 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
         );
       }
       setBatches(filtered);
+      setPagination((prev) => ({ ...prev, current: 1 }));
     } catch (err) {
       setError(err.message || 'Failed to load batches');
       setBatches([]);
@@ -52,11 +54,17 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
     setSearched(false);
     setError('');
     setBatches([]);
+    setPagination((prev) => ({ ...prev, current: 1 }));
     onSelect?.(null);
   };
 
   const columns = [
-    { title: '#', key: 'idx', width: 60, render: (_v, _r, i) => i + 1 },
+    {
+      title: '#',
+      key: 'idx',
+      width: 60,
+      render: (_v, _r, i) => (pagination.current - 1) * pagination.pageSize + i + 1,
+    },
     { title: t('dm2000StartDate'), dataIndex: 'fdrq', key: 'fdrq', width: 140 },
     { title: t('dm2000Type'), dataIndex: 'dcxh', key: 'dcxh', width: 140 },
     { title: t('dmpBatchId'), dataIndex: 'id', key: 'id', width: 180 },
@@ -115,7 +123,12 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
             columns={columns}
             dataSource={batches}
             loading={loading}
-            pagination={{ pageSize: 50 }}
+            pagination={{
+              current: pagination.current,
+              pageSize: pagination.pageSize,
+              showSizeChanger: true,
+              onChange: (page, pageSize) => setPagination({ current: page, pageSize }),
+            }}
             scroll={{ x: 'max-content', y: 500 }}
             onRow={(record) => ({
               onClick: () => onSelect?.(record),

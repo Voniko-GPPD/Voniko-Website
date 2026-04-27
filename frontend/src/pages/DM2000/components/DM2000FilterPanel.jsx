@@ -15,6 +15,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   const [archives, setArchives] = useState([]);
   const [total, setTotal] = useState(0);
   const [searched, setSearched] = useState(false);
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
 
   const onSearch = async () => {
     if (!stationId) return;
@@ -32,6 +33,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       const result = await fetchDM2000Archives(stationId, filters);
       setArchives(result.archives || []);
       setTotal(result.total || 0);
+      setPagination((prev) => ({ ...prev, current: 1 }));
     } catch (err) {
       setError(err.message || 'Failed to load archives');
       setArchives([]);
@@ -47,11 +49,17 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     setError('');
     setArchives([]);
     setTotal(0);
+    setPagination((prev) => ({ ...prev, current: 1 }));
     onSelect?.(null);
   };
 
   const columns = [
-    { title: '#', key: 'idx', width: 60, render: (_v, _r, i) => i + 1 },
+    {
+      title: '#',
+      key: 'idx',
+      width: 60,
+      render: (_v, _r, i) => (pagination.current - 1) * pagination.pageSize + i + 1,
+    },
     { title: t('dm2000StartDate'), dataIndex: 'startdate', key: 'startdate', width: 140 },
     { title: t('dm2000Type'), dataIndex: 'dcxh', key: 'dcxh', width: 120 },
     { title: t('dm2000Name'), dataIndex: 'name', key: 'name', width: 140 },
@@ -119,7 +127,12 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
             columns={columns}
             dataSource={archives}
             loading={loading}
-            pagination={{ pageSize: 50 }}
+            pagination={{
+              current: pagination.current,
+              pageSize: pagination.pageSize,
+              showSizeChanger: true,
+              onChange: (page, pageSize) => setPagination({ current: page, pageSize }),
+            }}
             scroll={{ x: 'max-content', y: 500 }}
             onRow={(record) => ({
               onClick: () => onSelect?.(record),

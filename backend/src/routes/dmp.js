@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const multer = require('multer');
 const FormData = require('form-data');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const { upsertStation, getStations, resolveUrl } = require('../utils/stationRegistry');
 const logger = require('../utils/logger');
 
@@ -402,6 +402,59 @@ router.post('/dm2000/perf-template/upload', authenticateToken, upload.single('fi
     });
     res.json(r.data);
   } catch (err) { handleProxyError(err, res, next); }
+});
+
+// ─── DM2000 Dropdown Options (Type / Manufacturer) ───────────────────────────
+
+// GET /api/dmp/dm2000/options?field=type|manufacturer
+router.get('/dm2000/options', authenticateToken, (req, res) => {
+  const { field } = req.query;
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const rows = field
+      ? db.prepare('SELECT id, field, value FROM dm2000_options WHERE field = ? ORDER BY value ASC').all(field)
+      : db.prepare('SELECT id, field, value FROM dm2000_options ORDER BY field, value ASC').all();
+    res.json({ options: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/dm2000/options — admin only
+router.post('/dm2000/options', authenticateToken, requireAdmin, (req, res) => {
+  const { field, value } = req.body || {};
+  if (!field || !['type', 'manufacturer'].includes(field)) {
+    return res.status(400).json({ error: 'field must be "type" or "manufacturer"' });
+  }
+  if (!value || typeof value !== 'string' || !value.trim()) {
+    return res.status(400).json({ error: 'value is required' });
+  }
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const db = getDb();
+  try {
+    const id = uuidv4();
+    db.prepare('INSERT OR IGNORE INTO dm2000_options (id, field, value, created_by) VALUES (?, ?, ?, ?)')
+      .run(id, field, value.trim(), req.user.id);
+    const row = db.prepare('SELECT id, field, value FROM dm2000_options WHERE field = ? AND value = ?').get(field, value.trim());
+    res.json({ option: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dmp/dm2000/options/:id — admin only
+router.delete('/dm2000/options/:id', authenticateToken, requireAdmin, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const result = db.prepare('DELETE FROM dm2000_options WHERE id = ?').run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Option not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

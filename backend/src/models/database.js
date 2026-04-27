@@ -183,6 +183,19 @@ function createTables() {
 
     CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
     CREATE INDEX IF NOT EXISTS idx_file_subscriptions_file_id ON file_subscriptions(file_id);
+
+    -- DM2000 dropdown options (Type / Manufacturer)
+    CREATE TABLE IF NOT EXISTS dm2000_options (
+      id TEXT PRIMARY KEY,
+      field TEXT NOT NULL,
+      value TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(field, value),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dm2000_options_field ON dm2000_options(field);
   `);
 
   // Safe migration: add folder_id column to files if not present

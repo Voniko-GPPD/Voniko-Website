@@ -229,3 +229,25 @@ export async function uploadDM2000PerfTemplate(stationId, file) {
   }
   return res.json();
 }
+
+export async function fetchDM2000Options(field) {
+  const params = field ? `?field=${encodeURIComponent(field)}` : '';
+  const res = await apiFetch(`${BASE}/options${params}`);
+  const data = await res.json();
+  return data.options || [];
+}
+
+export async function addDM2000Option(field, value) {
+  const res = await apiFetch(`${BASE}/options`, {
+    method: 'POST',
+    body: JSON.stringify({ field, value }),
+  });
+  return res.json();
+}
+
+export async function deleteDM2000Option(id) {
+  const res = await apiFetch(`${BASE}/options/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  return res.json();
+}

@@ -576,6 +576,8 @@ export default {
   dm2000Temperature: 'Dis-condition',
   dm2000MinDuration: 'Minimum Duration',
   dm2000MeasureInstrument: 'Measure Instrument',
+  dm2000DurationEndpoint: 'Duration End-point',
+  dm2000DurationEndpointAll: 'All',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',

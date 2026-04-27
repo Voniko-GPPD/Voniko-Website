@@ -576,6 +576,8 @@ export default {
   dm2000Temperature: 'Điều kiện nhiệt độ',
   dm2000MinDuration: 'Thời gian tối thiểu',
   dm2000MeasureInstrument: 'Thiết bị đo lường',
+  dm2000DurationEndpoint: 'Điểm cuối thời lượng',
+  dm2000DurationEndpointAll: 'Tất cả',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',

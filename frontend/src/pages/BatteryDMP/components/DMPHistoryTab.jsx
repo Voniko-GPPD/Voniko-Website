@@ -20,6 +20,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
   const [channels, setChannels] = useState([]);
   const [selectedBaty, setSelectedBaty] = useState(SHOW_ALL_VALUE);
   const [allRows, setAllRows] = useState([]);
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 100 });
 
   useEffect(() => {
     setSelectedBaty(SHOW_ALL_VALUE);
@@ -90,6 +91,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
         }
         if (!active) return;
         setAllRows(rows);
+        setPagination((prev) => ({ ...prev, current: 1 }));
       } catch (err) {
         if (!active) return;
         setError(err.message || 'Failed to load telemetry');
@@ -134,7 +136,12 @@ export default function DMPHistoryTab({ stationId, selection }) {
   }, [allRows, search]);
 
   const columns = useMemo(() => [
-    { title: '#', key: 'idx', width: 60, render: (_value, _record, index) => index + 1 },
+    {
+      title: '#',
+      key: 'idx',
+      width: 60,
+      render: (_value, _record, index) => (pagination.current - 1) * pagination.pageSize + index + 1,
+    },
     ...(showBatyColumn ? [{
       title: t('dmpChannel'),
       dataIndex: 'baty',
@@ -165,7 +172,7 @@ export default function DMPHistoryTab({ stationId, selection }) {
       sorter: (a, b) => Number(a.Im ?? 0) - Number(b.Im ?? 0),
       render: (value) => (value != null ? Number(value).toFixed(4) : '-'),
     },
-  ], [showBatyColumn, t]);
+  ], [showBatyColumn, t, pagination.current, pagination.pageSize]);
 
   if (!selection) {
     return <Empty description={t('dmpSelectBatchToView')} />;
@@ -201,7 +208,12 @@ export default function DMPHistoryTab({ stationId, selection }) {
           size="small"
           columns={columns}
           dataSource={filteredRows}
-          pagination={{ pageSize: 100 }}
+          pagination={{
+            current: pagination.current,
+            pageSize: pagination.pageSize,
+            showSizeChanger: true,
+            onChange: (page, pageSize) => setPagination({ current: page, pageSize }),
+          }}
           scroll={{ y: 500 }}
           summary={() => (
             <Table.Summary.Row>

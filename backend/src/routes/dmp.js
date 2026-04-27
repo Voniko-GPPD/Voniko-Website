@@ -158,6 +158,34 @@ router.get('/templates', authenticateToken, async (req, res, next) => {
   }
 });
 
+// POST /api/dmp/report-simple — proxy basic xlsx download (no template required)
+router.post('/report-simple', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/report-simple`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try {
+        return res.status(err.response.status).json(JSON.parse(msg));
+      } catch {
+        return res.status(err.response.status).send(msg);
+      }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
 // POST /api/dmp/report — proxy xlsx binary download
 router.post('/report', authenticateToken, async (req, res, next) => {
   const { stationId, ...reportBody } = req.body || {};

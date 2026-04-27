@@ -17,6 +17,7 @@ export default function DM2000DataTab({ stationId, selection }) {
   const [rows, setRows] = useState([]);
   const [batteries, setBatteries] = useState([]);
   const [selectedBaty, setSelectedBaty] = useState(0);
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 100 });
 
   useEffect(() => {
     setSelectedBaty(0);
@@ -78,6 +79,7 @@ export default function DM2000DataTab({ stationId, selection }) {
         }
         if (!active) return;
         setRows(result || []);
+        setPagination((prev) => ({ ...prev, current: 1 }));
       } catch (err) {
         if (!active || err.name === 'AbortError') return;
         setError(err.message || 'Failed to load table data');
@@ -122,7 +124,12 @@ export default function DM2000DataTab({ stationId, selection }) {
   }, [rows, search]);
 
   const columns = useMemo(() => [
-    { title: '#', key: 'idx', width: 60, render: (_value, _record, index) => index + 1 },
+    {
+      title: '#',
+      key: 'idx',
+      width: 60,
+      render: (_value, _record, index) => (pagination.current - 1) * pagination.pageSize + index + 1,
+    },
     ...(showBatyColumn ? [{
       title: t('dm2000BatteryName'),
       dataIndex: 'BATY',
@@ -146,7 +153,7 @@ export default function DM2000DataTab({ stationId, selection }) {
       sorter: (a, b) => Number(a.VOLT) - Number(b.VOLT),
       render: (value) => Number(value).toFixed(4),
     },
-  ], [showBatyColumn, t]);
+  ], [showBatyColumn, t, pagination.current, pagination.pageSize]);
 
   if (!selection) {
     return <Empty description={t('dm2000SelectArchive')} />;
@@ -182,7 +189,12 @@ export default function DM2000DataTab({ stationId, selection }) {
           size="small"
           columns={columns}
           dataSource={filteredRows}
-          pagination={{ pageSize: 100 }}
+          pagination={{
+            current: pagination.current,
+            pageSize: pagination.pageSize,
+            showSizeChanger: true,
+            onChange: (page, pageSize) => setPagination({ current: page, pageSize }),
+          }}
           scroll={{ y: 500 }}
           summary={() => (
             <Table.Summary.Row>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Breadcrumb, Button, Card, Empty, Radio, Select, Space, Spin, Typography, notification } from 'antd';
-import { downloadReport, fetchChannels, fetchTemplates } from '../../../api/dmpApi';
+import { DownloadOutlined } from '@ant-design/icons';
+import { downloadReport, downloadSimpleReport, fetchChannels, fetchTemplates } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 export default function DMPExportTab({ stationId, selection }) {
@@ -8,6 +9,7 @@ export default function DMPExportTab({ stationId, selection }) {
   const [loading, setLoading] = useState(false);
   const [channelLoading, setChannelLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
   const [error, setError] = useState('');
   const [templates, setTemplates] = useState([]);
   const [templateName, setTemplateName] = useState('');
@@ -79,10 +81,29 @@ export default function DMPExportTab({ stationId, selection }) {
 
   const selectedChannel = channels.find((ch) => Number(ch.baty) === selectedBaty);
 
-  const handleDownload = async () => {
-    if (!stationId || !selection || !templateName || !selectedChannel) return;
+  const handleDownloadSimple = async () => {
+    if (!stationId || !selection || !selectedChannel) return;
 
     setDownloading(true);
+    try {
+      await downloadSimpleReport({
+        stationId,
+        batchId: selection.id,
+        cdmc: selectedChannel.cdmc,
+        channel: selectedChannel.baty,
+      });
+      notification.success({ message: t('dmpReportDownloaded') });
+    } catch (err) {
+      notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleDownloadTemplate = async () => {
+    if (!stationId || !selection || !templateName || !selectedChannel) return;
+
+    setDownloadingTemplate(true);
     try {
       await downloadReport({
         stationId,
@@ -95,7 +116,7 @@ export default function DMPExportTab({ stationId, selection }) {
     } catch (err) {
       notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
     } finally {
-      setDownloading(false);
+      setDownloadingTemplate(false);
     }
   };
 
@@ -133,38 +154,38 @@ export default function DMPExportTab({ stationId, selection }) {
             />
           </div>
 
-          <Alert
-            type="info"
-            showIcon
-            message={t('dmpTemplateInfo')}
-          />
-
-          {templates.length === 0 ? (
-            <Empty description={t('dmpNoTemplates')} />
-          ) : (
-            <Radio.Group value={templateName} onChange={(event) => setTemplateName(event.target.value)} style={{ width: '100%' }}>
-              <Space direction="vertical" style={{ width: '100%' }}>
-                {templates.map((name) => (
-                  <Card key={name} size="small">
-                    <Radio value={name}>{name}</Radio>
-                  </Card>
-                ))}
-              </Space>
-            </Radio.Group>
-          )}
-
           <Button
             type="primary"
-            onClick={handleDownload}
+            icon={<DownloadOutlined />}
+            onClick={handleDownloadSimple}
             loading={downloading}
-            disabled={!stationId || !selection || !templateName || !selectedChannel}
+            disabled={!selectedChannel}
           >
             {t('dmpDownloadReport')}
           </Button>
 
-          <Typography.Text type="secondary">
-            {t('dmpSelectedTemplate', { name: templateName || '-' })}
-          </Typography.Text>
+          {templates.length > 0 && (
+            <Card size="small" title={t('dmpTemplateInfo')}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Radio.Group value={templateName} onChange={(event) => setTemplateName(event.target.value)} style={{ width: '100%' }}>
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    {templates.map((name) => (
+                      <Card key={name} size="small">
+                        <Radio value={name}>{name}</Radio>
+                      </Card>
+                    ))}
+                  </Space>
+                </Radio.Group>
+                <Button
+                  onClick={handleDownloadTemplate}
+                  loading={downloadingTemplate}
+                  disabled={!templateName || !selectedChannel}
+                >
+                  {t('dmpDownloadReport')} ({templateName || '-'})
+                </Button>
+              </Space>
+            </Card>
+          )}
         </>
       )}
     </Space>

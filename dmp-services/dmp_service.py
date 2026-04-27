@@ -643,6 +643,12 @@ class ReportRequest(BaseModel):
     template_name: str
 
 
+class DMPSimpleReportRequest(BaseModel):
+    batch_id: str
+    cdmc: str
+    channel: int
+
+
 class DM2000ReportRequest(BaseModel):
     archname: str
     baty: int = Field(ge=0)
@@ -1811,6 +1817,85 @@ def generate_report(payload: ReportRequest):
     )
 
 
+@app.post("/report-simple")
+def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
+    """Generate a basic Excel report for a DMP channel without requiring a template file."""
+    from openpyxl import Workbook  # already imported at module level via load_workbook
+
+    if not (1 <= payload.channel <= 99):
+        raise HTTPException(status_code=400, detail="Invalid channel")
+
+    batch_rows = _read_dmpdata(
+        "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
+        (payload.batch_id,),
+    )
+    if not batch_rows:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    batch = batch_rows[0]
+
+    telemetry = _read_telemetry(payload.cdmc, payload.channel)
+    stats = compute_stats(telemetry)
+
+    duration = None
+    if telemetry:
+        try:
+            duration = max(
+                float(r.get("TIM") or 0)
+                for r in telemetry
+                if r.get("TIM") not in (None, "", "--")
+            )
+        except (TypeError, ValueError):
+            duration = None
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"CH{payload.channel}"
+
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 30
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 16
+
+    for label, value in [
+        ("Batch ID", str(batch.get("id") or "")),
+        ("Type / Model", str(batch.get("dcxh") or "")),
+        ("Date", str(batch.get("fdrq") or "")),
+        ("Discharge Pattern", str(batch.get("fdfs") or "")),
+        ("Channel", str(payload.channel)),
+    ]:
+        ws.append([label, value])
+    ws.append([])
+
+    ws.append(["Statistics"])
+    for label, value in [
+        ("Duration (h)", round(duration, 4) if duration is not None else None),
+        ("Voltage Max (V)", stats.get("VOLT_MAX")),
+        ("Voltage Min (V)", stats.get("VOLT_MIN")),
+        ("Voltage Avg (V)", stats.get("VOLT_AVG")),
+        ("Current Max (mA)", stats.get("IM_MAX")),
+        ("Current Min (mA)", stats.get("IM_MIN")),
+        ("Current Avg (mA)", stats.get("IM_AVG")),
+    ]:
+        ws.append([label, value])
+    ws.append([])
+
+    ws.append(["#", "Time (h)", "Voltage (V)", "Current (mA)"])
+    for idx, row in enumerate(telemetry, 1):
+        tim = row.get("TIM")
+        volt = row.get("VOLT") or row.get("volt") or row.get("Volt")
+        im = row.get("Im") or row.get("IM") or row.get("im")
+        ws.append([idx, tim, volt, im])
+
+    buf = BytesIO()
+    wb.save(buf)
+    filename = f"dmp_report_{payload.batch_id}_{payload.channel}.xlsx"
+    return StreamingResponse(
+        BytesIO(buf.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ─── DM2000 Historic Database Routes ────────────────────────────────────────
 
 @app.get("/dm2000/archives")
@@ -1822,7 +1907,7 @@ def get_dm2000_archives(
     mfr_filter: str = None,
     serial_filter: str = None,
     keyword: str = None,
-    limit: int = 500,
+    limit: Optional[int] = None,
 ):
     table_names_to_try = ["ls_jb_cs", "ls_pam2", "ls_cs", "ls_jbcs", "ls_archive"]
     rows = None

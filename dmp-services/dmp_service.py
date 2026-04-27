@@ -1900,10 +1900,7 @@ def get_dm2000_archives(
         }
         # Build database file path from archname and data directory
         archname_val = item.get("archname") or ""
-        if archname_val:
-            item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb")
-        else:
-            item["database"] = None
+        item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
         archives.append(item)
 
     def _contains(value, pattern):

@@ -91,12 +91,12 @@ export default function DM2000ExportTab({ stationId, selection }) {
     let active = true;
     fetchDM2000Options('type').then((opts) => {
       if (!active) return;
-      setTypeOptions(opts.map((o) => ({ label: o.value, value: o.value, id: o.id })));
-    }).catch(() => {});
+      setTypeOptions(opts.map((o) => ({ label: o.value, value: o.value })));
+    }).catch((err) => { console.error('Failed to load type options', err); });
     fetchDM2000Options('manufacturer').then((opts) => {
       if (!active) return;
-      setManufacturerOptions(opts.map((o) => ({ label: o.value, value: o.value, id: o.id })));
-    }).catch(() => {});
+      setManufacturerOptions(opts.map((o) => ({ label: o.value, value: o.value })));
+    }).catch((err) => { console.error('Failed to load manufacturer options', err); });
     return () => { active = false; };
   }, []);
 

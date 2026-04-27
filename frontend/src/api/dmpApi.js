@@ -79,6 +79,7 @@ export async function downloadSimpleReport({ stationId, batchId, cdmc, channel }
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    // stationId is consumed by the Node.js proxy; Python-bound fields use snake_case to match Pydantic models
     body: JSON.stringify({ stationId, batch_id: batchId, cdmc, channel }),
   });
 
@@ -109,6 +110,7 @@ export async function downloadReport({ stationId, batchId, cdmc, channel, templa
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    // stationId is consumed by the Node.js proxy; Python-bound fields use snake_case to match Pydantic models
     body: JSON.stringify({ stationId, batch_id: batchId, cdmc, channel, template_name: templateName }),
   });
 

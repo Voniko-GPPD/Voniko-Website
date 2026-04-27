@@ -17,7 +17,7 @@ import pyodbc
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -1820,8 +1820,6 @@ def generate_report(payload: ReportRequest):
 @app.post("/report-simple")
 def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
     """Generate a basic Excel report for a DMP channel without requiring a template file."""
-    from openpyxl import Workbook  # already imported at module level via load_workbook
-
     if not (1 <= payload.channel <= 99):
         raise HTTPException(status_code=400, detail="Invalid channel")
 
@@ -1888,7 +1886,8 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
 
     buf = BytesIO()
     wb.save(buf)
-    filename = f"dmp_report_{payload.batch_id}_{payload.channel}.xlsx"
+    safe_id = re.sub(r'[^\w\-]', '_', str(payload.batch_id))
+    filename = f"dmp_report_{safe_id}_{payload.channel}.xlsx"
     return StreamingResponse(
         BytesIO(buf.getvalue()),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

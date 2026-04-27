@@ -567,6 +567,7 @@ export default {
   dm2000ReportPreviewTitle: 'Report Preview',
   dm2000EditableFields: 'Archive Info (editable)',
   dm2000ArchiveInfo: 'Archive Info',
+  dm2000AddOption: 'Add option',
   dm2000DownloadPreview: 'Download from Preview',
   dm2000EndDate: 'Last Date',
   dm2000VoltageType: 'Voltage Type',

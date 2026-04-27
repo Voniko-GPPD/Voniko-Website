@@ -567,6 +567,7 @@ export default {
   dm2000ReportPreviewTitle: 'Bản xem trước báo cáo',
   dm2000EditableFields: 'Thông tin archive (có thể chỉnh sửa)',
   dm2000ArchiveInfo: 'Thông tin archive',
+  dm2000AddOption: 'Thêm tùy chọn',
   dm2000DownloadPreview: 'Tải từ bản xem trước',
   dm2000EndDate: 'Ngày kết thúc',
   dm2000VoltageType: 'Loại điện áp',

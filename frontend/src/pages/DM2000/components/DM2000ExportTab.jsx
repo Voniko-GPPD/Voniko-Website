@@ -3,12 +3,15 @@ import {
   Alert, Button, Card, Checkbox, Col, Empty,
   Form, Input, Row, Select, Space, Spin, Typography, notification,
 } from 'antd';
+import { PlusOutlined } from '@ant-design/icons';
 import {
   downloadDM2000SimpleReport,
   fetchDM2000Batteries, fetchDM2000Config,
   fetchDM2000Stats, fetchDM2000TimeAtVoltage,
+  fetchDM2000Options, addDM2000Option,
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
+import { useAuth } from '../../../contexts/AuthContext';
 
 function safeNum(value) {
   const n = Number(value);
@@ -31,6 +34,7 @@ function getBatteryField(row, ...keys) {
 
 export default function DM2000ExportTab({ stationId, selection }) {
   const { t } = useLang();
+  const { isAdmin } = useAuth();
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
@@ -43,6 +47,10 @@ export default function DM2000ExportTab({ stationId, selection }) {
   const [previewTimeAtVolt, setPreviewTimeAtVolt] = useState({});
   const [companyName, setCompanyName] = useState('');
   const [reportEndpoint, setReportEndpoint] = useState(null);
+  const [typeOptions, setTypeOptions] = useState([]);
+  const [manufacturerOptions, setManufacturerOptions] = useState([]);
+  const [newTypeInput, setNewTypeInput] = useState('');
+  const [newMfgInput, setNewMfgInput] = useState('');
   // Tracks batteries that already have an in-flight or completed fetch so we
   // don't re-fetch on every toggle and don't depend on previewStats/
   // previewTimeAtVolt inside the fetch effect.
@@ -78,6 +86,19 @@ export default function DM2000ExportTab({ stationId, selection }) {
       controller.abort();
     };
   }, [stationId]);
+
+  useEffect(() => {
+    let active = true;
+    fetchDM2000Options('type').then((opts) => {
+      if (!active) return;
+      setTypeOptions(opts.map((o) => ({ label: o.value, value: o.value })));
+    }).catch((err) => { console.error('Failed to load type options', err); });
+    fetchDM2000Options('manufacturer').then((opts) => {
+      if (!active) return;
+      setManufacturerOptions(opts.map((o) => ({ label: o.value, value: o.value })));
+    }).catch((err) => { console.error('Failed to load manufacturer options', err); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     setExportBatys([0]);
@@ -203,6 +224,39 @@ export default function DM2000ExportTab({ stationId, selection }) {
   }, [stationId, selection?.archname, previewBatys]);
 
   const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
+  const setSelectField = (key) => (value) => setArchiveFields((prev) => ({ ...prev, [key]: value ?? '' }));
+
+  const handleAddTypeOption = async () => {
+    const val = newTypeInput.trim();
+    if (!val) return;
+    try {
+      await addDM2000Option('type', val);
+      setTypeOptions((prev) => {
+        if (prev.some((o) => o.value === val)) return prev;
+        return [...prev, { label: val, value: val }];
+      });
+      setArchiveFields((prev) => ({ ...prev, dcxh: val }));
+      setNewTypeInput('');
+    } catch (err) {
+      notification.error({ message: err.message });
+    }
+  };
+
+  const handleAddMfgOption = async () => {
+    const val = newMfgInput.trim();
+    if (!val) return;
+    try {
+      await addDM2000Option('manufacturer', val);
+      setManufacturerOptions((prev) => {
+        if (prev.some((o) => o.value === val)) return prev;
+        return [...prev, { label: val, value: val }];
+      });
+      setArchiveFields((prev) => ({ ...prev, manufacturer: val }));
+      setNewMfgInput('');
+    } catch (err) {
+      notification.error({ message: err.message });
+    }
+  };
 
   const handleDownloadPreview = async () => {
     if (!stationId || !selection?.archname) return;
@@ -260,17 +314,70 @@ export default function DM2000ExportTab({ stationId, selection }) {
 
       <Card size="small" title={t('dm2000ArchiveInfo')}>
         <Row gutter={[16, 8]}>
-          <Col xs={24} sm={12}>
+          <Col xs={24} sm={8}>
             <Form layout="vertical" size="small">
               <Form.Item label={t('dm2000Type')}>
-                <Input value={archiveFields.dcxh} onChange={setField('dcxh')} />
+                <Select
+                  style={{ width: '100%' }}
+                  value={archiveFields.dcxh || undefined}
+                  onChange={setSelectField('dcxh')}
+                  allowClear
+                  showSearch
+                  options={typeOptions}
+                  dropdownRender={isAdmin ? (menu) => (
+                    <>
+                      {menu}
+                      <div style={{ display: 'flex', gap: 8, padding: '8px 8px 4px' }}>
+                        <Input
+                          size="small"
+                          value={newTypeInput}
+                          onChange={(e) => setNewTypeInput(e.target.value)}
+                          onPressEnter={handleAddTypeOption}
+                          placeholder={t('dm2000AddOption')}
+                          style={{ flex: 1 }}
+                        />
+                        <Button size="small" type="text" icon={<PlusOutlined />} onClick={handleAddTypeOption} />
+                      </div>
+                    </>
+                  ) : undefined}
+                />
               </Form.Item>
             </Form>
           </Col>
-          <Col xs={24} sm={12}>
+          <Col xs={24} sm={8}>
             <Form layout="vertical" size="small">
               <Form.Item label={t('dm2000Manufacturer')}>
-                <Input value={archiveFields.manufacturer} onChange={setField('manufacturer')} />
+                <Select
+                  style={{ width: '100%' }}
+                  value={archiveFields.manufacturer || undefined}
+                  onChange={setSelectField('manufacturer')}
+                  allowClear
+                  showSearch
+                  options={manufacturerOptions}
+                  dropdownRender={isAdmin ? (menu) => (
+                    <>
+                      {menu}
+                      <div style={{ display: 'flex', gap: 8, padding: '8px 8px 4px' }}>
+                        <Input
+                          size="small"
+                          value={newMfgInput}
+                          onChange={(e) => setNewMfgInput(e.target.value)}
+                          onPressEnter={handleAddMfgOption}
+                          placeholder={t('dm2000AddOption')}
+                          style={{ flex: 1 }}
+                        />
+                        <Button size="small" type="text" icon={<PlusOutlined />} onClick={handleAddMfgOption} />
+                      </div>
+                    </>
+                  ) : undefined}
+                />
+              </Form.Item>
+            </Form>
+          </Col>
+          <Col xs={24} sm={8}>
+            <Form layout="vertical" size="small">
+              <Form.Item label={t('dm2000MadeDate')}>
+                <Input value={archiveFields.madedate} onChange={setField('madedate')} />
               </Form.Item>
             </Form>
           </Col>

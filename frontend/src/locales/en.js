@@ -574,6 +574,21 @@ export default {
   dm2000MinDuration: 'Minimum Duration',
   dm2000MeasureInstrument: 'Measure Instrument',
 
+  // Performance Monitoring Report
+  dm2000PerfReportTab: 'Battery Performance',
+  dm2000PerfReportHint: 'Add archives to summarize. Each archive becomes a row in the sheet. Sheets are grouped by name (battery type + production line).',
+  dm2000PerfReportAddFromSelection: 'Add current archive',
+  dm2000PerfReportAddManual: 'Add manually',
+  dm2000PerfReportArchname: 'Archive name',
+  dm2000PerfReportBatteryGrade: 'Grade (HP/UD/UD+)',
+  dm2000PerfReportSheetName: 'Sheet name (blank = auto)',
+  dm2000PerfReportSheetNamePlaceholder: 'Auto from battery type + serial',
+  dm2000PerfReportGenerate: 'Export battery performance report',
+  dm2000PerfReportNoEntries: 'No entries. Select an archive from the "Load Data" tab then click "Add current archive", or click "Add manually".',
+  dm2000PerfReportNoSelection: 'Please select an archive first',
+  dm2000PerfReportNoValidEntries: 'Please fill in archive name and grade for at least one row',
+  dm2000PerfReportInfo: '{count} valid rows will be exported',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',
   cbDetectTab: 'Count Batteries',

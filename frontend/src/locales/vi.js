@@ -574,6 +574,21 @@ export default {
   dm2000MinDuration: 'Thời gian tối thiểu',
   dm2000MeasureInstrument: 'Thiết bị đo lường',
 
+  // Performance Monitoring Report
+  dm2000PerfReportTab: 'Hiệu suất pin',
+  dm2000PerfReportHint: 'Thêm các archive cần tổng hợp. Mỗi archive tương ứng một dòng trong sheet. Sheet sẽ được nhóm theo tên (kiểu pin + chuyền SX).',
+  dm2000PerfReportAddFromSelection: 'Thêm archive hiện tại',
+  dm2000PerfReportAddManual: 'Thêm thủ công',
+  dm2000PerfReportArchname: 'Mã archive',
+  dm2000PerfReportBatteryGrade: 'Loại (HP/UD/UD+)',
+  dm2000PerfReportSheetName: 'Tên sheet (để trống = tự động)',
+  dm2000PerfReportSheetNamePlaceholder: 'Tự động theo kiểu pin + số seri',
+  dm2000PerfReportGenerate: 'Xuất báo cáo hiệu suất pin',
+  dm2000PerfReportNoEntries: 'Chưa có dữ liệu. Chọn archive từ tab "Tải dữ liệu" rồi nhấn "Thêm archive hiện tại", hoặc nhấn "Thêm thủ công".',
+  dm2000PerfReportNoSelection: 'Vui lòng chọn archive trước',
+  dm2000PerfReportNoValidEntries: 'Vui lòng điền đầy đủ mã archive và loại cho ít nhất một dòng',
+  dm2000PerfReportInfo: '{count} dòng hợp lệ sẽ được xuất',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',
   cbDetectTab: 'Đếm pin',

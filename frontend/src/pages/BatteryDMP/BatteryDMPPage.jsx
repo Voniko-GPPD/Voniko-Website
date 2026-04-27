@@ -16,7 +16,6 @@ import { useLang } from '../../contexts/LangContext';
 import DMPSidebar from './components/DMPSidebar';
 import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
-import DMPExportTab from './components/DMPExportTab';
 import DM2000Page from '../DM2000/DM2000Page';
 
 const { Sider, Content } = Layout;
@@ -141,7 +140,6 @@ function DMPBridgeContent() {
               items={[
                 { key: 'chart', label: t('dmpChartTab'), children: <DMPChartTab stationId={selectedStationId} selection={selection} /> },
                 { key: 'history', label: t('dmpHistoryDataTab'), children: <DMPHistoryTab stationId={selectedStationId} selection={selection} /> },
-                { key: 'export', label: t('dmpExportTab'), children: <DMPExportTab stationId={selectedStationId} selection={selection} /> },
               ]}
             />
           </Content>

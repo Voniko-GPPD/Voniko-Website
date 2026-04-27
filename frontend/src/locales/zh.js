@@ -574,6 +574,21 @@ export default {
   dm2000MinDuration: '最短时长',
   dm2000MeasureInstrument: '测量仪器',
 
+  // Performance Monitoring Report
+  dm2000PerfReportTab: '电池性能报告',
+  dm2000PerfReportHint: '添加要汇总的存档。每个存档对应工作表中的一行，按工作表名称（电池类型+生产线）分组。',
+  dm2000PerfReportAddFromSelection: '添加当前存档',
+  dm2000PerfReportAddManual: '手动添加',
+  dm2000PerfReportArchname: '存档名称',
+  dm2000PerfReportBatteryGrade: '等级 (HP/UD/UD+)',
+  dm2000PerfReportSheetName: 'Sheet名称（留空=自动）',
+  dm2000PerfReportSheetNamePlaceholder: '自动根据型号+序列号生成',
+  dm2000PerfReportGenerate: '导出电池性能报告',
+  dm2000PerfReportNoEntries: '暂无数据。请在"加载数据"选项卡中选择存档，然后点击"添加当前存档"，或点击"手动添加"。',
+  dm2000PerfReportNoSelection: '请先选择存档',
+  dm2000PerfReportNoValidEntries: '请至少填写一行的存档名称和等级',
+  dm2000PerfReportInfo: '将导出 {count} 行有效数据',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',
   cbDetectTab: '计数',

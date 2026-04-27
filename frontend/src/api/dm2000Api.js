@@ -176,9 +176,10 @@ export async function downloadDM2000SimpleReport({
   URL.revokeObjectURL(url);
 }
 
-export async function downloadDM2000PerfReport({ stationId, entries }) {
+export async function downloadDM2000PerfReport({ stationId, entries, templateName }) {
   const token = localStorage.getItem('accessToken');
   const body = { stationId, entries: entries || [] };
+  if (templateName) body.template_name = templateName;
   const res = await fetch(`${BASE}/perf-report`, {
     method: 'POST',
     headers: {
@@ -203,4 +204,26 @@ export async function downloadDM2000PerfReport({ stationId, entries }) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function fetchDM2000PerfTemplates(stationId, { signal } = {}) {
+  const res = await apiFetch(`${BASE}/perf-templates?stationId=${encodeURIComponent(stationId)}`, { signal });
+  const data = await res.json();
+  return data.templates || [];
+}
+
+export async function uploadDM2000PerfTemplate(stationId, file) {
+  const token = localStorage.getItem('accessToken');
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/perf-template/upload?stationId=${encodeURIComponent(stationId)}`, {
+    method: 'POST',
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || err.detail || 'Upload failed');
+  }
+  return res.json();
 }

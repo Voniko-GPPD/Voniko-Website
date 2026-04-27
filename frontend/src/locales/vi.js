@@ -588,6 +588,17 @@ export default {
   dm2000PerfReportNoSelection: 'Vui lòng chọn archive trước',
   dm2000PerfReportNoValidEntries: 'Vui lòng điền đầy đủ mã archive và loại cho ít nhất một dòng',
   dm2000PerfReportInfo: '{count} dòng hợp lệ sẽ được xuất',
+  dm2000PerfExportSection: 'Xuất báo cáo hiệu suất',
+  dm2000PerfTemplateUpload: 'Tải lên mẫu hiệu suất (.xlsx)',
+  dm2000PerfTemplateUploadHint: 'Kéo thả hoặc click để chọn file .xlsx',
+  dm2000PerfTemplateUploading: 'Đang tải lên...',
+  dm2000PerfTemplateUploaded: 'Đã lưu mẫu hiệu suất',
+  dm2000PerfTemplateUploadFailed: 'Tải lên thất bại',
+  dm2000PerfTemplateNotFound: 'Chưa có mẫu hiệu suất — sẽ dùng định dạng tự động',
+  dm2000PerfTemplateCurrent: 'Mẫu hiệu suất: {name}',
+  dm2000PerfTemplateNone: '(Không có mẫu — dùng định dạng tự động)',
+  dm2000PerfTemplateTagsHint: 'Các thẻ dùng trong mẫu Excel',
+  dm2000PerfTemplateTagsBody: 'Đặt các thẻ sau vào ô tương ứng trong file mẫu:\n• {{#PERF_ROWS}} — đánh dấu dòng dữ liệu (sẽ được mở rộng)\n• {{DATE}} — ngày thử nghiệm (YYYY-MM-DD)\n• {{TYPE}} — loại pin (HP / UD / UD+)\n• {{RESULT_0}}, {{RATE_0}} — kết quả (h) & tỷ lệ (%) điều kiện phóng 1\n• {{RESULT_1}}, {{RATE_1}} — điều kiện phóng 2 (tiếp tục với _2, _3 ...)\n• {{PERF_SHEET_NAME}} — tên sheet (tên dòng pin, ví dụ: LR6 501)\nTên sheet trong mẫu phải khớp với tên sheet được tạo (kiểu pin + số seri).',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',

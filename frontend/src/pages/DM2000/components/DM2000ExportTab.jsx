@@ -1,15 +1,37 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert, Button, Card, Checkbox, Col, Empty,
-  Form, Input, Radio, Row, Space, Spin, Typography, notification,
+  Form, Input, Popover, Radio, Row, Select, Space, Spin, Table, Typography, Upload, notification,
 } from 'antd';
+import { DeleteOutlined, InboxOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import {
-  downloadDM2000Report, downloadDM2000SimpleReport, fetchDM2000Batteries, fetchDM2000Config,
+  downloadDM2000PerfReport, downloadDM2000Report, downloadDM2000SimpleReport,
+  fetchDM2000Batteries, fetchDM2000Config, fetchDM2000PerfTemplates,
   fetchDM2000Stats, fetchDM2000Templates, fetchDM2000TimeAtVoltage,
+  uploadDM2000PerfTemplate,
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const PREVIEW_THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
+
+const BATTERY_TYPE_OPTIONS = [
+  { value: 'HP', label: 'HP' },
+  { value: 'UD', label: 'UD' },
+  { value: 'UD+', label: 'UD+' },
+];
+
+function detectBatteryType(dcxh) {
+  if (!dcxh) return '';
+  const upper = String(dcxh).toUpperCase();
+  if (upper.includes('UD+') || upper.includes('UD PLUS')) return 'UD+';
+  if (upper.includes('UD')) return 'UD';
+  if (upper.includes('HP')) return 'HP';
+  return '';
+}
+
+function autoSheetName(dcxh, serialno) {
+  return [dcxh, serialno].filter(Boolean).join(' ').trim();
+}
 
 function safeNum(value) {
   const n = Number(value);
@@ -50,6 +72,13 @@ export default function DM2000ExportTab({ stationId, selection }) {
   // previewTimeAtVolt inside the fetch effect.
   const requestedBatysRef = useRef(new Set());
 
+  // --- Perf report state ---
+  const [perfTemplates, setPerfTemplates] = useState([]);
+  const [perfTemplateName, setPerfTemplateName] = useState('');
+  const [perfUploading, setPerfUploading] = useState(false);
+  const [perfEntries, setPerfEntries] = useState([]);
+  const [perfDownloading, setPerfDownloading] = useState(false);
+
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
@@ -88,6 +117,22 @@ export default function DM2000ExportTab({ stationId, selection }) {
       active = false;
       controller.abort();
     };
+  }, [stationId]);
+
+  // Load perf templates when station changes
+  useEffect(() => {
+    let active = true;
+    setPerfTemplates([]);
+    setPerfTemplateName('');
+    if (!stationId) return () => {};
+    fetchDM2000PerfTemplates(stationId)
+      .then((result) => {
+        if (!active) return;
+        setPerfTemplates(result || []);
+        if ((result || []).length > 0) setPerfTemplateName(result[0]);
+      })
+      .catch(() => {});
+    return () => { active = false; };
   }, [stationId]);
 
   useEffect(() => {
@@ -194,6 +239,87 @@ export default function DM2000ExportTab({ stationId, selection }) {
   }, [stationId, selection?.archname, previewBatys]);
 
   const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
+
+  // --- Perf entry handlers ---
+  const handlePerfAddFromSelection = () => {
+    if (!selection?.archname) return;
+    setPerfEntries((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        archname: selection.archname,
+        battery_type: detectBatteryType(selection.dcxh),
+        sheet_name: '',
+        _autoSheet: autoSheetName(selection.dcxh, selection.serialno),
+      },
+    ]);
+  };
+
+  const handlePerfAddManual = () => {
+    setPerfEntries((prev) => [
+      ...prev,
+      { id: Date.now(), archname: '', battery_type: '', sheet_name: '', _autoSheet: '' },
+    ]);
+  };
+
+  const handlePerfChange = (id, field, value) => {
+    setPerfEntries((prev) => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
+  };
+
+  const handlePerfRemove = (id) => {
+    setPerfEntries((prev) => prev.filter((e) => e.id !== id));
+  };
+
+  const handlePerfGenerate = async () => {
+    if (!stationId) {
+      notification.warning({ message: t('dmpSelectStation') });
+      return;
+    }
+    const valid = perfEntries.filter((e) => e.archname.trim() && e.battery_type);
+    if (valid.length === 0) {
+      notification.warning({ message: t('dm2000PerfReportNoValidEntries') });
+      return;
+    }
+    setPerfDownloading(true);
+    try {
+      await downloadDM2000PerfReport({
+        stationId,
+        entries: valid.map((e) => ({
+          archname: e.archname.trim(),
+          battery_type: e.battery_type,
+          sheet_name: e.sheet_name.trim(),
+          batys: [],
+        })),
+        templateName: perfTemplateName || undefined,
+      });
+      notification.success({ message: t('dmpReportDownloaded') });
+    } catch (err) {
+      notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
+    } finally {
+      setPerfDownloading(false);
+    }
+  };
+
+  const handlePerfTemplateUpload = async (file) => {
+    if (!stationId) {
+      notification.warning({ message: t('dmpSelectStation') });
+      return false;
+    }
+    setPerfUploading(true);
+    try {
+      await uploadDM2000PerfTemplate(stationId, file);
+      notification.success({ message: t('dm2000PerfTemplateUploaded') });
+      // Refresh list
+      const result = await fetchDM2000PerfTemplates(stationId);
+      setPerfTemplates(result || []);
+      if (result && result.length > 0) setPerfTemplateName(result[result.length - 1]);
+    } catch (err) {
+      notification.error({ message: t('dm2000PerfTemplateUploadFailed'), description: err.message });
+    } finally {
+      setPerfUploading(false);
+    }
+    return false; // prevent ant Upload from doing its own upload
+  };
 
   const handleDownload = async () => {
     if (!stationId || !selection?.archname || !templateName) return;
@@ -352,6 +478,177 @@ export default function DM2000ExportTab({ stationId, selection }) {
           {t('dm2000DownloadPreview')}
         </Button>
       </Space>
+
+      {/* ── Performance Report Section ── */}
+      <Card
+        size="small"
+        title={
+          <Space>
+            {t('dm2000PerfExportSection')}
+            <Popover
+              title={t('dm2000PerfTemplateTagsHint')}
+              content={
+                <pre style={{ maxWidth: 480, whiteSpace: 'pre-wrap', fontSize: 12 }}>
+                  {t('dm2000PerfTemplateTagsBody')}
+                </pre>
+              }
+              trigger="click"
+            >
+              <QuestionCircleOutlined style={{ cursor: 'pointer', color: '#1677ff' }} />
+            </Popover>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {/* Template upload */}
+          <div>
+            <Typography.Text strong style={{ display: 'block', marginBottom: 4 }}>
+              {t('dm2000PerfTemplateUpload')}
+            </Typography.Text>
+            <Upload.Dragger
+              accept=".xlsx"
+              showUploadList={false}
+              disabled={!stationId || perfUploading}
+              beforeUpload={handlePerfTemplateUpload}
+              style={{ padding: '8px 0' }}
+            >
+              <p className="ant-upload-drag-icon" style={{ marginBottom: 4 }}>
+                <InboxOutlined />
+              </p>
+              <p style={{ fontSize: 12, margin: 0 }}>{t('dm2000PerfTemplateUploadHint')}</p>
+            </Upload.Dragger>
+            {perfUploading && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {t('dm2000PerfTemplateUploading')}
+              </Typography.Text>
+            )}
+          </div>
+
+          {/* Template selection */}
+          {perfTemplates.length > 0 ? (
+            <div>
+              <Radio.Group
+                value={perfTemplateName}
+                onChange={(e) => setPerfTemplateName(e.target.value)}
+                style={{ width: '100%' }}
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {perfTemplates.map((name) => (
+                    <Card key={name} size="small">
+                      <Radio value={name}>{name}</Radio>
+                    </Card>
+                  ))}
+                </Space>
+              </Radio.Group>
+            </div>
+          ) : (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {t('dm2000PerfTemplateNotFound')}
+            </Typography.Text>
+          )}
+
+          {/* Hint + Add buttons */}
+          <Alert type="info" showIcon message={t('dm2000PerfReportHint')} style={{ fontSize: 12 }} />
+          <Space wrap>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={handlePerfAddFromSelection}
+              disabled={!selection?.archname}
+              title={!selection?.archname ? t('dm2000PerfReportNoSelection') : undefined}
+            >
+              {t('dm2000PerfReportAddFromSelection')}
+            </Button>
+            <Button icon={<PlusOutlined />} onClick={handlePerfAddManual}>
+              {t('dm2000PerfReportAddManual')}
+            </Button>
+          </Space>
+
+          {/* Entries table */}
+          {perfEntries.length === 0 ? (
+            <Empty description={t('dm2000PerfReportNoEntries')} />
+          ) : (
+            <Table
+              size="small"
+              dataSource={perfEntries}
+              rowKey="id"
+              pagination={false}
+              bordered
+              columns={[
+                {
+                  title: t('dm2000PerfReportArchname'),
+                  dataIndex: 'archname',
+                  width: 220,
+                  render: (val, record) => (
+                    <Input
+                      size="small"
+                      value={val}
+                      onChange={(e) => handlePerfChange(record.id, 'archname', e.target.value)}
+                      placeholder="e.g. QC2026/4/18"
+                    />
+                  ),
+                },
+                {
+                  title: t('dm2000PerfReportBatteryGrade'),
+                  dataIndex: 'battery_type',
+                  width: 120,
+                  render: (val, record) => (
+                    <Select
+                      size="small"
+                      style={{ width: '100%' }}
+                      value={val || undefined}
+                      placeholder="HP / UD / UD+"
+                      options={BATTERY_TYPE_OPTIONS}
+                      onChange={(v) => handlePerfChange(record.id, 'battery_type', v)}
+                    />
+                  ),
+                },
+                {
+                  title: t('dm2000PerfReportSheetName'),
+                  dataIndex: 'sheet_name',
+                  render: (val, record) => (
+                    <Input
+                      size="small"
+                      value={val}
+                      onChange={(e) => handlePerfChange(record.id, 'sheet_name', e.target.value)}
+                      placeholder={record._autoSheet || t('dm2000PerfReportSheetNamePlaceholder')}
+                    />
+                  ),
+                },
+                {
+                  title: '',
+                  width: 48,
+                  render: (_, record) => (
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => handlePerfRemove(record.id)}
+                    />
+                  ),
+                },
+              ]}
+            />
+          )}
+
+          {/* Generate button */}
+          {perfEntries.length > 0 && (
+            <Space direction="vertical" size={4}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {t('dm2000PerfReportInfo', { count: perfEntries.filter((e) => e.archname.trim() && e.battery_type).length })}
+                {perfTemplateName ? ` — ${t('dm2000PerfTemplateCurrent', { name: perfTemplateName })}` : ` — ${t('dm2000PerfTemplateNone')}`}
+              </Typography.Text>
+              <Button
+                type="primary"
+                onClick={handlePerfGenerate}
+                loading={perfDownloading}
+                disabled={!stationId || perfEntries.every((e) => !e.archname.trim() || !e.battery_type)}
+              >
+                {t('dm2000PerfReportGenerate')}
+              </Button>
+            </Space>
+          )}
+        </Space>
+      </Card>
     </Space>
   );
 }

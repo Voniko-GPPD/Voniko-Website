@@ -14,7 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pyodbc
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
@@ -32,6 +32,7 @@ DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
 DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
+DM2000_PERF_TEMPLATES_DIR: str = os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates")
 # Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
 # every request reads from the cached copy instead of making a new shadow copy.
 DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "../backend/data/dm2000_cache")
@@ -672,6 +673,7 @@ class PerfReportEntry(BaseModel):
 
 class PerfReportRequest(BaseModel):
     entries: list[PerfReportEntry]
+    template_name: Optional[str] = None
 
 
 def render_excel_template(template_path: str, context: dict) -> bytes:
@@ -840,7 +842,119 @@ def _resolve_dm2000_template_path(template_name: str) -> str:
     return str(result)
 
 
-def compute_dm2000_stats(rows: list[dict]) -> dict:
+def _resolve_perf_template_path(template_name: str) -> str:
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template")
+
+    base = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail="Perf template not found")
+    result = (base / template_name).resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+    if not result.exists():
+        raise HTTPException(status_code=404, detail="Perf template not found")
+    return str(result)
+
+
+def _render_perf_template(template_path: str, groups: dict) -> bytes:
+    """Fill a user-uploaded perf template Excel with performance data.
+
+    **Template tag reference** — place these tags in the worksheet cells:
+
+    * ``{{PERF_SHEET_NAME}}`` — replaced with the battery-series sheet name
+      (e.g. "LR6 501").  Can be placed in any cell (title row, etc.).
+    * Data-row marker: any cell in a row that contains ``{{#PERF_ROWS}}`` marks
+      that row as the template for data rows.  That row is expanded (one copy
+      per data point).  The following tags are available inside that row:
+
+      * ``{{DATE}}``       — test date (``YYYY-MM-DD``)
+      * ``{{TYPE}}``       — battery grade (``HP`` / ``UD`` / ``UD+``)
+      * ``{{RESULT_0}}``   — avg discharge hours for the 1st fdfs condition (sorted)
+      * ``{{RATE_0}}``     — uniform rate (%) for the 1st fdfs condition
+      * ``{{RESULT_1}}``, ``{{RATE_1}}`` — 2nd fdfs condition
+      * … and so on for each additional test condition.
+
+    Sheet matching: if the template workbook contains a sheet whose name matches
+    ``sheet_name`` in *groups*, that sheet is filled with data.  Unmatched sheets
+    are left unchanged.
+    """
+    wb = load_workbook(template_path)
+
+    for sheet_name, date_type_map in groups.items():
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+
+        # Collect sorted fdfs labels for this sheet
+        all_fdfs: list[str] = []
+        seen_fdfs: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen_fdfs:
+                    seen_fdfs.add(lbl)
+                    all_fdfs.append(lbl)
+        all_fdfs.sort()
+
+        # Sort data rows by (date, battery_type)
+        sorted_keys = sorted(date_type_map.keys(), key=lambda k: (k[0], k[1]))
+
+        # Find the PERF_ROWS template row
+        perf_row_idx: int | None = None
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and "{{#PERF_ROWS}}" in cell.value:
+                    perf_row_idx = cell.row
+                    break
+            if perf_row_idx is not None:
+                break
+
+        if perf_row_idx is not None and sorted_keys:
+            template_row = list(ws.iter_rows(min_row=perf_row_idx, max_row=perf_row_idx))[0]
+
+            # Insert extra rows so there is one row per data point
+            if len(sorted_keys) > 1:
+                ws.insert_rows(perf_row_idx + 1, len(sorted_keys) - 1)
+
+            for i, row_key in enumerate(sorted_keys):
+                date_str, btype = row_key
+                row_data = date_type_map[row_key]
+                target_row_idx = perf_row_idx + i
+
+                ctx: dict = {"DATE": date_str, "TYPE": btype}
+                for j, fdfs_lbl in enumerate(all_fdfs):
+                    entry = row_data.get(fdfs_lbl, {})
+                    avg_h = entry.get("avg_hours")
+                    ur = entry.get("uniform_rate")
+                    ctx[f"RESULT_{j}"] = avg_h if avg_h is not None else ""
+                    ctx[f"RATE_{j}"] = ur if ur is not None else ""
+
+                for tmpl_cell in template_row:
+                    target_cell = ws.cell(row=target_row_idx, column=tmpl_cell.column)
+                    if i > 0:
+                        target_cell._style = tmpl_cell._style  # type: ignore[attr-defined]
+                    raw = tmpl_cell.value
+                    if isinstance(raw, str):
+                        raw = raw.replace("{{#PERF_ROWS}}", "").strip()
+                    target_cell.value = _interpolate_cell(raw, ctx) if raw else raw
+
+        # Replace {{PERF_SHEET_NAME}} anywhere in the sheet
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and "{{PERF_SHEET_NAME}}" in cell.value:
+                    cell.value = cell.value.replace("{{PERF_SHEET_NAME}}", sheet_name)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
     """Compute DM2000 curve statistics. TIM is already in minutes."""
     def safe_float(v):
         if v is None or v == "--" or v == "":
@@ -1919,7 +2033,37 @@ def get_dm2000_templates():
     return {"templates": templates}
 
 
-@app.post("/dm2000/report")
+@app.get("/dm2000/perf-templates")
+def get_dm2000_perf_templates():
+    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.post("/dm2000/perf-template/upload")
+async def upload_dm2000_perf_template(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
+    safe_name = Path(file.filename).name
+    if not _is_valid_template_name(safe_name):
+        raise HTTPException(status_code=400, detail="Invalid file name")
+    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR)
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    dest = (templates_dir / safe_name).resolve()
+    try:
+        dest.relative_to(templates_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path traversal detected") from exc
+    contents = await file.read()
+    dest.write_bytes(contents)
+    return {"ok": True, "name": safe_name}
+
+
 def generate_dm2000_report(payload: DM2000ReportRequest):
     _validate_dm2000_archname(payload.archname)
 
@@ -2847,8 +2991,13 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
             status_code=422, detail="No data could be extracted for any entry"
         )
 
-    workbook_bytes = _build_perf_workbook(groups)
-    filename = "perf_report.xlsx"
+    if payload.template_name:
+        template_path = _resolve_perf_template_path(payload.template_name)
+        workbook_bytes = _render_perf_template(template_path, groups)
+        filename = payload.template_name
+    else:
+        workbook_bytes = _build_perf_workbook(groups)
+        filename = "perf_report.xlsx"
     return StreamingResponse(
         BytesIO(workbook_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

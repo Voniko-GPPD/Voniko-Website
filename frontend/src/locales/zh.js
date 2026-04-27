@@ -576,6 +576,8 @@ export default {
   dm2000Temperature: '放电条件',
   dm2000MinDuration: '最短时长',
   dm2000MeasureInstrument: '测量仪器',
+  dm2000DurationEndpoint: '持续时间截止电压',
+  dm2000DurationEndpointAll: '全部',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',

@@ -10,8 +10,6 @@ import {
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
-const PREVIEW_THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
-
 function safeNum(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -44,6 +42,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
   const [previewStats, setPreviewStats] = useState({});
   const [previewTimeAtVolt, setPreviewTimeAtVolt] = useState({});
   const [companyName, setCompanyName] = useState('');
+  const [reportEndpoint, setReportEndpoint] = useState(null);
   // Tracks batteries that already have an in-flight or completed fetch so we
   // don't re-fetch on every toggle and don't depend on previewStats/
   // previewTimeAtVolt inside the fetch effect.
@@ -85,6 +84,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     setPreviewStats({});
     setPreviewTimeAtVolt({});
     setBatteryParams({});
+    setReportEndpoint(null);
     requestedBatysRef.current = new Set();
     if (selection) {
       setArchiveFields({
@@ -148,7 +148,26 @@ export default function DM2000ExportTab({ stationId, selection }) {
     [exportBatys],
   );
 
-  // Fetch stats / time-at-voltage for any newly selected battery so the preview
+  // Collect all unique voltage threshold (sj) values available across preview batteries.
+  // Used to populate the endpoint dropdown options.
+  const endpointOptions = useMemo(() => {
+    const sjSet = new Set();
+    previewBatys.forEach((b) => {
+      const rows = previewTimeAtVolt[b];
+      if (!rows) return;
+      rows.forEach((r) => {
+        const sj = safeNum(r.sj ?? r.SJ);
+        if (sj != null) sjSet.add(sj);
+      });
+    });
+    const sorted = Array.from(sjSet).sort((a, b) => b - a); // descending
+    return [
+      { label: t('dm2000DurationEndpointAll'), value: null },
+      ...sorted.map((v) => ({ label: v.toFixed(3), value: v })),
+    ];
+  }, [previewBatys, previewTimeAtVolt, t]);
+
+
   // form fills in incrementally as the user toggles checkboxes.
   useEffect(() => {
     if (!stationId || !selection?.archname || previewBatys.length === 0) return undefined;
@@ -199,6 +218,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
         batys: previewBatys,
         overrideBatteryType: archiveFields.dcxh || undefined,
         overrideManufacturer: archiveFields.manufacturer || undefined,
+        endpointCutoff: reportEndpoint != null ? reportEndpoint : undefined,
       });
       notification.success({ message: t('dmpReportDownloaded') });
     } catch (err) {
@@ -263,15 +283,28 @@ export default function DM2000ExportTab({ stationId, selection }) {
             {t('dm2000SelectAtLeastOne')}
           </Typography.Text>
         ) : (
-          <ReportPreview
-            archiveFields={archiveFields}
-            companyName={companyName}
-            statsMap={previewStats}
-            timeAtVoltMap={previewTimeAtVolt}
-            batteryParams={batteryParams}
-            previewBatys={previewBatys}
-            t={t}
-          />
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Space align="center" wrap>
+              <Typography.Text strong>{t('dm2000DurationEndpoint')}:</Typography.Text>
+              <Select
+                size="small"
+                style={{ minWidth: 120 }}
+                value={reportEndpoint}
+                onChange={setReportEndpoint}
+                options={endpointOptions}
+              />
+            </Space>
+            <ReportPreview
+              archiveFields={archiveFields}
+              companyName={companyName}
+              statsMap={previewStats}
+              timeAtVoltMap={previewTimeAtVolt}
+              batteryParams={batteryParams}
+              previewBatys={previewBatys}
+              reportEndpoint={reportEndpoint}
+              t={t}
+            />
+          </Space>
         )}
       </Card>
 
@@ -289,7 +322,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
   );
 }
 
-function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, batteryParams, previewBatys, t }) {
+function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, batteryParams, previewBatys, reportEndpoint, t }) {
   const cellStyle = {
     border: '1px solid #d9d9d9',
     padding: '3px 6px',
@@ -308,6 +341,27 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
   };
 
   const numCols = previewBatys.length + 3; // label + No.1..N + Max + Min + Avge
+
+  // Derive voltage thresholds dynamically from the actual time-at-voltage data,
+  // sorted descending, so all available rows are shown regardless of range.
+  const dynamicThresholds = useMemo(() => {
+    const sjSet = new Set();
+    previewBatys.forEach((b) => {
+      const rows = timeAtVoltMap[b];
+      if (!rows) return;
+      rows.forEach((r) => {
+        const sj = safeNum(r.sj ?? r.SJ);
+        if (sj != null) sjSet.add(sj);
+      });
+    });
+    return Array.from(sjSet).sort((a, b) => b - a); // descending
+  }, [previewBatys, timeAtVoltMap]);
+
+  // Apply user-selected endpoint cutoff (only show rows where threshold >= cutoff).
+  const visibleThresholds = useMemo(
+    () => (reportEndpoint != null ? dynamicThresholds.filter((v) => v >= reportEndpoint - 0.0001) : dynamicThresholds),
+    [dynamicThresholds, reportEndpoint],
+  );
 
   const getTimeAtVolt = (baty, threshold) => {
     const rows = timeAtVoltMap[baty];
@@ -552,7 +606,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
               The Duration of Series Designated Voltage (Unit: hour)
             </td>
           </tr>
-          {PREVIEW_THRESHOLDS.map((threshold) => {
+          {visibleThresholds.map((threshold) => {
             const cellVals = previewBatys.map((b) => getTimeAtVolt(b, threshold));
             const numericVals = cellVals
               .map((v) => safeNum(v))

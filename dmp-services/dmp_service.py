@@ -663,6 +663,7 @@ class DM2000SimpleReportRequest(BaseModel):
     batys: list[int] = Field(default=[])
     override_battery_type: Optional[str] = None
     override_manufacturer: Optional[str] = None
+    endpoint_cutoff: Optional[float] = None
 
 
 class PerfReportEntry(BaseModel):
@@ -2453,13 +2454,28 @@ def _build_preview_workbook(  # noqa: C901
     stats_map: dict,
     time_at_volt_map: dict,
     battery_params: dict,
+    endpoint_cutoff: Optional[float] = None,
 ) -> bytes:
     """Build a simple Excel workbook matching the ReportPreview HTML format."""
     from openpyxl import Workbook as _Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter as _get_col_letter
 
-    THRESHOLDS = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90]
+    # Derive voltage thresholds dynamically from actual time-at-voltage data,
+    # sorted descending, so all available rows are shown regardless of range.
+    sj_set: set[float] = set()
+    for tav_rows in time_at_volt_map.values():
+        for row in (tav_rows or []):
+            sj_raw = row.get("sj") or row.get("SJ")
+            try:
+                if sj_raw is not None:
+                    sj_set.add(round(float(sj_raw), 4))
+            except (TypeError, ValueError):
+                pass
+    THRESHOLDS = sorted(sj_set, reverse=True)  # descending
+    # Apply optional cutoff: only show thresholds >= endpoint_cutoff
+    if endpoint_cutoff is not None:
+        THRESHOLDS = [t for t in THRESHOLDS if t >= endpoint_cutoff - 0.0001]
     thin = Side(style="thin")
     bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
     fill_header = PatternFill("solid", fgColor="FAFAFA")
@@ -2891,6 +2907,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
             stats_map=stats_map,
             time_at_volt_map=time_at_volt_map,
             battery_params=battery_params,
+            endpoint_cutoff=payload.endpoint_cutoff,
         )
     except Exception as exc:
         logger.exception("Error building preview workbook for archname=%s: %s", payload.archname, exc)

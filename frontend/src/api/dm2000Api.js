@@ -144,11 +144,13 @@ export async function downloadDM2000SimpleReport({
   batys,
   overrideBatteryType,
   overrideManufacturer,
+  endpointCutoff,
 }) {
   const token = localStorage.getItem('accessToken');
   const body = { stationId, archname, batys: batys || [] };
   if (overrideBatteryType != null && overrideBatteryType !== '') body.override_battery_type = overrideBatteryType;
   if (overrideManufacturer != null && overrideManufacturer !== '') body.override_manufacturer = overrideManufacturer;
+  if (endpointCutoff != null) body.endpoint_cutoff = endpointCutoff;
 
   const res = await fetch(`${BASE}/report-simple`, {
     method: 'POST',

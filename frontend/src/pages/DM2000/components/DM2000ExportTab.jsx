@@ -5,9 +5,9 @@ import {
 } from 'antd';
 import { DeleteOutlined, InboxOutlined, PlusOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import {
-  downloadDM2000PerfReport, downloadDM2000Report, downloadDM2000SimpleReport,
+  downloadDM2000PerfReport, downloadDM2000SimpleReport,
   fetchDM2000Batteries, fetchDM2000Config, fetchDM2000PerfTemplates,
-  fetchDM2000Stats, fetchDM2000Templates, fetchDM2000TimeAtVoltage,
+  fetchDM2000Stats, fetchDM2000TimeAtVoltage,
   uploadDM2000PerfTemplate,
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
@@ -57,8 +57,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
-  const [templates, setTemplates] = useState([]);
-  const [templateName, setTemplateName] = useState('');
   const [exportBatys, setExportBatys] = useState([0]);
   const [batteries, setBatteries] = useState([]);
   /** Raw ls_pam2 rows keyed by baty number */
@@ -82,8 +80,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
-    setTemplates([]);
-    setTemplateName('');
     if (!stationId) {
       setLoading(false);
       return () => {};
@@ -93,19 +89,12 @@ export default function DM2000ExportTab({ stationId, selection }) {
       setLoading(true);
       setError('');
       try {
-        const [templateResult, configResult] = await Promise.all([
-          fetchDM2000Templates(stationId, { signal: controller.signal }),
-          fetchDM2000Config(stationId, { signal: controller.signal }).catch(() => ({})),
-        ]);
+        const configResult = await fetchDM2000Config(stationId, { signal: controller.signal }).catch(() => ({}));
         if (!active) return;
-        setTemplates(templateResult || []);
-        if ((templateResult || []).length > 0) {
-          setTemplateName(templateResult[0]);
-        }
         setCompanyName(configResult?.company || '');
       } catch (err) {
         if (!active || err.name === 'AbortError') return;
-        setError(err.message || 'Failed to load templates');
+        setError(err.message || 'Failed to load config');
       } finally {
         if (!active) return;
         setLoading(false);
@@ -327,36 +316,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
     return false; // prevent ant Upload from doing its own upload
   };
 
-  const handleDownload = async () => {
-    if (!stationId || !selection?.archname || !templateName) return;
-    if (exportBatys.length === 0) {
-      notification.warning({ message: t('dm2000SelectAtLeastOne') });
-      return;
-    }
-    setDownloading(true);
-    try {
-      for (const baty of exportBatys) {
-        await downloadDM2000Report({
-          stationId,
-          archname: selection.archname,
-          baty,
-          templateName,
-          overrideArchname: archiveFields.archname !== selection.archname ? archiveFields.archname : undefined,
-          overrideStartDate: archiveFields.startdate !== selection.startdate ? archiveFields.startdate : undefined,
-          overrideBatteryType: archiveFields.dcxh !== selection.dcxh ? archiveFields.dcxh : undefined,
-          overrideManufacturer: archiveFields.manufacturer !== selection.manufacturer ? archiveFields.manufacturer : undefined,
-          overrideSerialNo: archiveFields.serialno !== selection.serialno ? archiveFields.serialno : undefined,
-          overrideRemarks: archiveFields.remarks !== selection.remarks ? archiveFields.remarks : undefined,
-        });
-      }
-      notification.success({ message: t('dmpReportDownloaded') });
-    } catch (err) {
-      notification.error({ message: t('dmpReportDownloadFailed'), description: err.message });
-    } finally {
-      setDownloading(false);
-    }
-  };
-
   const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
 
   const handleDownloadPreview = async () => {
@@ -412,26 +371,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
         </Space>
       </Card>
 
-      <Card size="small" title={t('dmpExportTab')}>
-        {templates.length === 0 ? (
-          <Empty description={t('dmpNoTemplates')} />
-        ) : (
-          <Radio.Group
-            value={templateName}
-            onChange={(event) => setTemplateName(event.target.value)}
-            style={{ width: '100%' }}
-          >
-            <Space direction="vertical" style={{ width: '100%' }}>
-              {templates.map((name) => (
-                <Card key={name} size="small">
-                  <Radio value={name}>{name}</Radio>
-                </Card>
-              ))}
-            </Space>
-          </Radio.Group>
-        )}
-      </Card>
-
       <Card size="small" title={t('dm2000ArchiveInfo')}>
         <Row gutter={[16, 8]}>
           <Col xs={24} sm={12}>
@@ -470,14 +409,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
       </Card>
 
       <Space wrap>
-        <Button
-          type="primary"
-          onClick={handleDownload}
-          loading={downloading}
-          disabled={!stationId || !selection?.archname || !templateName || exportBatys.length === 0}
-        >
-          {`${t('dm2000DownloadReport')} (${exportBatys.length} ${t('dm2000BatteryUnit')})`}
-        </Button>
         <Button
           onClick={handleDownloadPreview}
           loading={downloading}

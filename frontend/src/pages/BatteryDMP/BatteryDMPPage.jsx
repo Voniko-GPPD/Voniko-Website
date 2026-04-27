@@ -13,6 +13,7 @@ import {
 import { ExperimentOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { fetchStations } from '../../api/dmpApi';
 import { useLang } from '../../contexts/LangContext';
+import { useAuth } from '../../contexts/AuthContext';
 import DMPSidebar from './components/DMPSidebar';
 import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
@@ -22,6 +23,7 @@ const { Sider, Content } = Layout;
 
 function DMPBridgeContent() {
   const { t } = useLang();
+  const { isQC } = useAuth();
   const [stations, setStations] = useState([]);
   const [selectedStationId, setSelectedStationId] = useState(undefined);
   const [stationError, setStationError] = useState('');
@@ -65,8 +67,8 @@ function DMPBridgeContent() {
   }, [selectedStationId]);
 
   useEffect(() => {
-    setActiveTab('chart');
-  }, [selection]);
+    setActiveTab(isQC ? 'history' : 'chart');
+  }, [selection, isQC]);
 
   const breadcrumbItems = useMemo(() => ([
     { title: `${t('dmpModel')}: ${selection?.model || '-'}` },
@@ -138,7 +140,7 @@ function DMPBridgeContent() {
               activeKey={activeTab}
               onChange={setActiveTab}
               items={[
-                { key: 'chart', label: t('dmpChartTab'), children: <DMPChartTab stationId={selectedStationId} selection={selection} /> },
+                ...(!isQC ? [{ key: 'chart', label: t('dmpChartTab'), children: <DMPChartTab stationId={selectedStationId} selection={selection} /> }] : []),
                 { key: 'history', label: t('dmpHistoryDataTab'), children: <DMPHistoryTab stationId={selectedStationId} selection={selection} /> },
               ]}
             />

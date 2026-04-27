@@ -3,7 +3,7 @@ import {
   Card, Table, Button, Space, Typography, Tag, Modal, Form,
   Input, Select, message, Popconfirm, Avatar, Badge, Tooltip,
 } from 'antd';
-import { PlusOutlined, EditOutlined, StopOutlined, UserOutlined, CheckOutlined, KeyOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, StopOutlined, DeleteOutlined, UserOutlined, CheckOutlined, KeyOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import api from '../../api';
 import { useLang } from '../../contexts/LangContext';
@@ -88,6 +88,16 @@ export default function UsersPage() {
     try {
       await api.delete(`/users/${id}`);
       message.success(t('userDeleted'));
+      fetchUsers();
+    } catch (err) {
+      message.error(err.response?.data?.message || t('error'));
+    }
+  };
+
+  const handlePermanentDelete = async (id) => {
+    try {
+      await api.delete(`/users/${id}/permanent`);
+      message.success(t('userPermanentlyDeleted'));
       fetchUsers();
     } catch (err) {
       message.error(err.response?.data?.message || t('error'));
@@ -214,16 +224,29 @@ export default function UsersPage() {
                 </Button>
               </Popconfirm>
             ) : (
-              <Popconfirm
-                title={t('confirmReactivateUser')}
-                onConfirm={() => handleReactivate(record.id)}
-                okText={t('yes')}
-                cancelText={t('no')}
-              >
-                <Button size="small" type="primary" icon={<CheckOutlined />}>  
-                  {t('reactivateUser')}
-                </Button>
-              </Popconfirm>
+              <>
+                <Popconfirm
+                  title={t('confirmReactivateUser')}
+                  onConfirm={() => handleReactivate(record.id)}
+                  okText={t('yes')}
+                  cancelText={t('no')}
+                >
+                  <Button size="small" type="primary" icon={<CheckOutlined />}>  
+                    {t('reactivateUser')}
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title={t('confirmPermanentDeleteUser')}
+                  onConfirm={() => handlePermanentDelete(record.id)}
+                  okText={t('yes')}
+                  cancelText={t('no')}
+                  okButtonProps={{ danger: true }}
+                >
+                  <Button size="small" danger icon={<DeleteOutlined />}>
+                    {t('permanentDeleteUser')}
+                  </Button>
+                </Popconfirm>
+              </>
             )
           )}
         </Space>

@@ -5,7 +5,7 @@ const os = require('os');
 const bcrypt = require('bcryptjs');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const {
-  listUsers, createUser, getUser, updateUser, deleteUser,
+  listUsers, createUser, getUser, updateUser, deleteUser, permanentDeleteUser,
   updateProfile, changePassword, uploadAvatar,
 } = require('../controllers/userController');
 const { getDb } = require('../models/database');
@@ -30,6 +30,7 @@ router.post('/', authenticateToken, requireAdmin, createUser);
 router.get('/:id', authenticateToken, requireAdmin, getUser);
 router.put('/:id', authenticateToken, requireAdmin, updateUser);
 router.delete('/:id', authenticateToken, requireAdmin, deleteUser);
+router.delete('/:id/permanent', authenticateToken, requireAdmin, permanentDeleteUser);
 
 // Reset password (admin only)
 router.put('/:id/reset-password', authenticateToken, requireAdmin, async (req, res) => {

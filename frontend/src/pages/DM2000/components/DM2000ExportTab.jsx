@@ -357,6 +357,8 @@ export default function DM2000ExportTab({ stationId, selection }) {
     }
   };
 
+  const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
+
   const handleDownloadPreview = async () => {
     if (!stationId || !selection?.archname) return;
     if (previewBatys.length === 0) {

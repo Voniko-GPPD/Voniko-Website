@@ -472,7 +472,8 @@ export default {
   folderManagement: '文件夹管理',
 
   // DMP Bridge
-  dmpBridgeTitle: 'DMP 电池数据桥接',
+  dmManagement: 'DM 管理',
+  dmpBridgeTitle: 'DMP',
   dmpStation: '站点',
   dmpSelectStation: '选择在线DMP站点',
   dmpOnline: '在线',
@@ -529,7 +530,7 @@ export default {
   dmpKeywordFilterPlaceholder: '型号、日期、模式...',
   dmpSelectChannel: '选择通道',
 
-  dm2000Title: 'DM2000历史查询',
+  dm2000Title: 'DM Historic',
   dm2000CurveTab: '图表',
   dm2000DataTab: '数据表',
   dm2000DailyVoltTab: '每日电压',
@@ -545,6 +546,7 @@ export default {
   dm2000UnifRate: '一致性',
   dm2000Manufacturer: '制造商',
   dm2000ArchName: '归档名称',
+  dm2000Database: '数据库',
   dm2000DateFrom: '起始日期',
   dm2000DateTo: '截止日期',
   dm2000TypeFilter: '型号筛选',

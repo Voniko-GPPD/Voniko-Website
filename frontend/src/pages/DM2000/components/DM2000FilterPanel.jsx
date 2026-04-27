@@ -75,6 +75,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160 },
     { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 140 },
     { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160 },
+    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 280, render: (value) => value || '-' },
   ];
 
   return (

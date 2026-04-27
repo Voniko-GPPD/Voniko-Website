@@ -45,6 +45,7 @@ DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
 # Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
 MAX_BATTERY_NUMBER: int = 99
+_EXCEL_MAX_SHEET_NAME: int = 31  # Excel sheet names are capped at 31 characters
 
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
@@ -927,6 +928,9 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
 
     The header may contain a unit suffix such as ``(h)`` / ``(m)`` / ``(t)``
     which is ignored for matching purposes.
+
+    Uses whole-word boundary matching to avoid false positives such as
+    "10ohm" incorrectly matching a "100ohm" column header.
     """
     if not fdfs or not header:
         return False
@@ -939,10 +943,18 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # Exact match after normalisation
     if f == h:
         return True
-    # One contains the other (handles minor whitespace/punctuation differences)
-    if f in h or h in f:
+    # Whole-word boundary check — prevents "10ohm" from matching "100ohm".
+    # A word boundary here means the match is not immediately preceded or
+    # followed by an alphanumeric character or a forward-slash.
+    _wb = r'(?<![0-9A-Za-z/])'
+    _we = r'(?![0-9A-Za-z/])'
+
+    def _whole_word(needle: str, haystack: str) -> bool:
+        return bool(re.search(_wb + re.escape(needle) + _we, haystack))
+
+    if _whole_word(f, h) or _whole_word(h, f):
         return True
-    # Match on leading token (e.g. "10ohm" vs "10ohm 24h/d-0.9V(h)")
+    # Match on leading token (e.g. "10ohm" vs "10ohm 24h/d-0.9V")
     f_tok = f.split()[0] if f.split() else ""
     h_tok = h.split()[0] if h.split() else ""
     if f_tok and h_tok and f_tok == h_tok:
@@ -987,14 +999,18 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
       a header ending with ``(h)`` receives hours; one ending with ``(m)`` or
       ``(t)`` receives minutes.
 
-    Sheet matching: if the template workbook contains a sheet whose name matches
-    ``sheet_name`` in *groups*, that sheet is filled with data.  Unmatched sheets
-    are left unchanged.
+    Sheet matching: the key in *groups* may contain ``|``-separated candidate
+    names (e.g. ``"LR6 Voniko|LR6 501|LR6"``).  The engine tries each candidate
+    in order and uses the first one that exists in the workbook.  If none match,
+    the entry is skipped and the template sheet is left unchanged.
     """
     wb = load_workbook(template_path)
 
-    for sheet_name, date_type_map in groups.items():
-        if sheet_name not in wb.sheetnames:
+    for sheet_name_key, date_type_map in groups.items():
+        # Resolve the first candidate that exists in the workbook.
+        candidates = [s for c in sheet_name_key.split("|") if (s := c.strip())]
+        sheet_name = next((c for c in candidates if c in wb.sheetnames), None)
+        if sheet_name is None:
             continue
         ws = wb[sheet_name]
 
@@ -1381,7 +1397,10 @@ def _is_valid_template_name(name: str) -> bool:
 
 
 def _validate_dm2000_archname(archname: str) -> None:
-    if not re.match(r'^[A-Za-z0-9_.\-]+$', archname):
+    # Allow alphanumeric, underscore, dot, hyphen, and forward slash (archname-based
+    # schema archives can include dates like "QC2026/4/18").  Null bytes, backslashes,
+    # and other shell-special characters are still rejected.
+    if not re.match(r'^[A-Za-z0-9_./ \-]+$', archname):
         raise HTTPException(status_code=400, detail="Invalid archname")
 
 
@@ -3068,8 +3087,10 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
     wb = _Workbook()
     wb.remove(wb.active)
 
-    for sheet_name, date_type_map in groups.items():
-        ws = wb.create_sheet(title=sheet_name[:31])
+    for sheet_name_key, date_type_map in groups.items():
+        # Use the first candidate (before any "|") as the sheet title
+        sheet_name = sheet_name_key.split("|")[0].strip()[:_EXCEL_MAX_SHEET_NAME]
+        ws = wb.create_sheet(title=sheet_name)
 
         # Collect all unique fdfs labels in this sheet (sorted for consistency)
         all_fdfs: list[str] = []
@@ -3170,7 +3191,20 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
     (HP/UD/UD+) and optionally a subset of battery channel numbers.  The
     endpoint computes the average discharge hours at the endpoint voltage and
     the uniform rate for the chosen batteries, then generates a multi-sheet
-    Excel workbook grouped by sheet_name (defaulting to dcxh + serialno).
+    Excel workbook grouped by sheet_name.
+
+    Sheet name resolution (when not manually specified):
+      1. ``dcxh + trademark``   — "[Type] [Manufacturer]" as required by template
+      2. ``dcxh + serialno``    — legacy / production-line-number format
+      3. ``dcxh + manufacturer``
+      4. ``dcxh`` alone
+    Multiple candidates are stored "|"-joined so the template engine can try
+    each one against the actual workbook sheet names.
+
+    Test-method (fdfs) resolution:
+      Uses the ``fdfs`` column from the archive record.  When that is empty,
+      falls back to ``load_resistance`` so the column-header matching logic
+      (whole-word check on leading token) can still find the right column.
     """
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
@@ -3209,9 +3243,15 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         startdate = _to_date_text(
             _dm2000_get_value(archive, "startdate", "fdrq")
         )
-        fdfs = str(_dm2000_get_value(archive, "fdfs") or "").strip() or entry.archname
+        fdfs_raw = str(_dm2000_get_value(archive, "fdfs") or "").strip()
         dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
         serialno = str(_dm2000_get_value(archive, "serialno", "dcph") or "").strip()
+        trademark = str(_dm2000_get_value(archive, "trademark", "shangbiao", "sb") or "").strip()
+        manufacturer_db = str(_dm2000_get_value(archive, "manufacturer", "changshang", "cs") or "").strip()
+        load_resistance = str(_dm2000_get_value(
+            archive,
+            "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+        ) or "").strip()
         endpoint_voltage_raw = _dm2000_get_value(
             archive,
             "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
@@ -3220,12 +3260,40 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         )
         endpoint_voltage_str = str(endpoint_voltage_raw or "").strip()
 
-        # Determine sheet name
-        if entry.sheet_name:
-            sheet_name = entry.sheet_name.strip()[:31]
+        # fdfs label used to identify the test-method column in the template.
+        # Priority: stored fdfs → load_resistance (leading-token match) → archname
+        if fdfs_raw:
+            fdfs = fdfs_raw
+        elif load_resistance:
+            # Use load resistance as a partial fdfs key; _perf_fdfs_matches_header
+            # will match it against the column header via whole-word check.
+            fdfs = load_resistance
         else:
-            parts = [p for p in (dcxh, serialno) if p]
-            sheet_name = " ".join(parts)[:31] if parts else entry.archname[:31]
+            fdfs = entry.archname
+
+        # Sheet name candidates in priority order:
+        #   1. dcxh + trademark  ("Type Manufacturer" per user requirement)
+        #   2. dcxh + serialno   (production-line / legacy format)
+        #   3. dcxh + manufacturer_db
+        #   4. dcxh alone
+        # Multiple candidates are stored "|"-joined so _render_perf_template and
+        # _build_perf_workbook can try them in order.
+        if entry.sheet_name:
+            sheet_name = entry.sheet_name.strip()[:_EXCEL_MAX_SHEET_NAME]
+        else:
+            seen_cands: set[str] = set()
+            raw_cands: list[str] = []
+            for suffix in (trademark, serialno, manufacturer_db):
+                if suffix:
+                    cand = f"{dcxh} {suffix}".strip()[:_EXCEL_MAX_SHEET_NAME] if dcxh else suffix[:_EXCEL_MAX_SHEET_NAME]
+                    if cand and cand not in seen_cands:
+                        seen_cands.add(cand)
+                        raw_cands.append(cand)
+            if dcxh and dcxh[:_EXCEL_MAX_SHEET_NAME] not in seen_cands:
+                raw_cands.append(dcxh[:_EXCEL_MAX_SHEET_NAME])
+            if not raw_cands:
+                raw_cands = [entry.archname[:_EXCEL_MAX_SHEET_NAME]]
+            sheet_name = "|".join(raw_cands)
 
         # Resolve battery list
         batys = [b for b in entry.batys if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]

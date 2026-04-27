@@ -29,8 +29,10 @@ function detectBatteryType(dcxh) {
   return '';
 }
 
-function autoSheetName(dcxh, serialno) {
-  return [dcxh, serialno].filter(Boolean).join(' ').trim();
+function autoSheetName(dcxh, trademark, serialno) {
+  // Sheet name priority: [Type] [Manufacturer/Trademark] then [Type] [SerialNo]
+  const suffix = trademark || serialno;
+  return [dcxh, suffix].filter(Boolean).join(' ').trim();
 }
 
 function safeNum(value) {
@@ -245,7 +247,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
         archname: selection.archname,
         battery_type: detectBatteryType(selection.dcxh),
         sheet_name: '',
-        _autoSheet: autoSheetName(selection.dcxh, selection.serialno),
+        _autoSheet: autoSheetName(selection.dcxh, selection.trademark, selection.serialno),
       },
     ]);
   };

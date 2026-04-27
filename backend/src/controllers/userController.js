@@ -154,6 +154,29 @@ async function deleteUser(req, res) {
   res.json({ message: 'User deactivated' });
 }
 
+async function permanentDeleteUser(req, res) {
+  const db = getDb();
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ message: 'Cannot delete yourself' });
+  }
+  const user = db.prepare('SELECT id, username, is_active FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  if (user.is_active) {
+    return res.status(400).json({ message: 'Cannot permanently delete an active user. Deactivate first.' });
+  }
+
+  db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(req.params.id);
+  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+
+  db.prepare(`
+    INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name)
+    VALUES (?, ?, 'permanent_delete_user', 'user', ?, ?)
+  `).run(uuidv4(), req.user.id, req.params.id, user.username);
+
+  logger.info('User permanently deleted', { deletedBy: req.user.id, deletedUser: user.username });
+  res.json({ message: 'User permanently deleted' });
+}
+
 async function updateProfile(req, res) {
   const { displayName, avatarUrl } = req.body;
   const db = getDb();
@@ -239,4 +262,4 @@ async function uploadAvatar(req, res) {
   res.json({ avatarUrl });
 }
 
-module.exports = { listUsers, createUser, getUser, updateUser, deleteUser, updateProfile, changePassword, uploadAvatar };
+module.exports = { listUsers, createUser, getUser, updateUser, deleteUser, permanentDeleteUser, updateProfile, changePassword, uploadAvatar };

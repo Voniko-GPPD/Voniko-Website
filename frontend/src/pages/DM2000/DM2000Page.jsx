@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Card, Select, Tabs, Tag, Typography } from 'antd';
 import { fetchStations } from '../../api/dmpApi';
 import { useLang } from '../../contexts/LangContext';
+import { useAuth } from '../../contexts/AuthContext';
 import DM2000FilterPanel from './components/DM2000FilterPanel';
 import DM2000CurveTab from './components/DM2000CurveTab';
 import DM2000DataTab from './components/DM2000DataTab';
@@ -13,6 +14,7 @@ const CURVE_TAB_KEY = 'curve';
 
 export default function DM2000Page() {
   const { t } = useLang();
+  const { isQC } = useAuth();
   const [stations, setStations] = useState([]);
   const [selectedStationId, setSelectedStationId] = useState(undefined);
   const [stationError, setStationError] = useState('');
@@ -50,7 +52,7 @@ export default function DM2000Page() {
   const handleSelectArchive = (record) => {
     setSelection(record);
     if (record?.archname) {
-      setActiveTab(CURVE_TAB_KEY);
+      setActiveTab(isQC ? 'export' : CURVE_TAB_KEY);
     }
   };
 
@@ -116,36 +118,38 @@ export default function DM2000Page() {
               />
             ),
           },
-          {
+          ...(!isQC ? [
+            {
               key: CURVE_TAB_KEY,
-            label: t('dm2000CurveTab'),
-            children: (
-              <DM2000CurveTab
-                stationId={selectedStationId}
-                selection={selection}
-              />
-            ),
-          },
-          {
-            key: 'data',
-            label: t('dm2000DataTab'),
-            children: (
-              <DM2000DataTab
-                stationId={selectedStationId}
-                selection={selection}
-              />
-            ),
-          },
-          {
-            key: 'daily',
-            label: t('dm2000DailyVoltTab'),
-            children: (
-              <DM2000DailyVoltTab
-                stationId={selectedStationId}
-                selection={selection}
-              />
-            ),
-          },
+              label: t('dm2000CurveTab'),
+              children: (
+                <DM2000CurveTab
+                  stationId={selectedStationId}
+                  selection={selection}
+                />
+              ),
+            },
+            {
+              key: 'data',
+              label: t('dm2000DataTab'),
+              children: (
+                <DM2000DataTab
+                  stationId={selectedStationId}
+                  selection={selection}
+                />
+              ),
+            },
+            {
+              key: 'daily',
+              label: t('dm2000DailyVoltTab'),
+              children: (
+                <DM2000DailyVoltTab
+                  stationId={selectedStationId}
+                  selection={selection}
+                />
+              ),
+            },
+          ] : []),
           {
             key: 'export',
             label: t('dm2000ExportTab'),

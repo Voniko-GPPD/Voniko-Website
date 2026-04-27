@@ -137,6 +137,9 @@ export default {
   reactivateUser: '激活',
   confirmReactivateUser: '重新激活此账号？',
   userReactivated: '账号已激活',
+  permanentDeleteUser: '永久删除',
+  confirmPermanentDeleteUser: '永久删除此用户？此操作无法撤销。',
+  userPermanentlyDeleted: '用户已永久删除',
   onlineNow: '在线',
   cannotChangeOwnRole: '无法修改自己的角色',
 
@@ -463,7 +466,7 @@ export default {
   folderImportSuccess: '导入完成',
   folderExportSuccess: '导出成功',
   engineerRole: '工程师',
-  qcRole: 'QC',
+  qcRole: '实验技术员',
   resetPassword: '重置密码',
   resetPasswordSuccess: '密码重置成功',
   folderManagement: '文件夹管理',

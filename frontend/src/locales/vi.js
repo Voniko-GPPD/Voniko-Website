@@ -137,6 +137,9 @@ export default {
   reactivateUser: 'Kích hoạt',
   confirmReactivateUser: 'Kích hoạt lại tài khoản này?',
   userReactivated: 'Đã kích hoạt tài khoản',
+  permanentDeleteUser: 'Xóa vĩnh viễn',
+  confirmPermanentDeleteUser: 'Xóa vĩnh viễn người dùng này? Hành động này không thể hoàn tác.',
+  userPermanentlyDeleted: 'Đã xóa vĩnh viễn người dùng',
   onlineNow: 'Đang hoạt động',
   cannotChangeOwnRole: 'Không thể đổi vai trò của chính mình',
 
@@ -463,7 +466,7 @@ export default {
   folderImportSuccess: 'Nhập hoàn tất',
   folderExportSuccess: 'Xuất thành công',
   engineerRole: 'Kỹ sư',
-  qcRole: 'QC',
+  qcRole: 'Nhân viên thí nghiệm',
   resetPassword: 'Đặt lại mật khẩu',
   resetPasswordSuccess: 'Đã đặt lại mật khẩu thành công',
   folderManagement: 'Quản lý Folder',

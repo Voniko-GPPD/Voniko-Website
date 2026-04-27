@@ -137,6 +137,9 @@ export default {
   reactivateUser: 'Activate',
   confirmReactivateUser: 'Reactivate this user?',
   userReactivated: 'User activated',
+  permanentDeleteUser: 'Delete Permanently',
+  confirmPermanentDeleteUser: 'Permanently delete this user? This cannot be undone.',
+  userPermanentlyDeleted: 'User permanently deleted',
   onlineNow: 'Online',
   cannotChangeOwnRole: 'Cannot change your own role',
 
@@ -463,7 +466,7 @@ export default {
   folderImportSuccess: 'Import completed',
   folderExportSuccess: 'Exported successfully',
   engineerRole: 'Engineer',
-  qcRole: 'QC',
+  qcRole: 'Lab Technician',
   resetPassword: 'Reset Password',
   resetPasswordSuccess: 'Password reset successfully',
   folderManagement: 'Folder Management',

@@ -1,10 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
-  Badge,
-  Breadcrumb,
   Card,
-  Layout,
   Select,
   Tabs,
   Tag,
@@ -14,12 +11,14 @@ import { ExperimentOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { fetchStations } from '../../api/dmpApi';
 import { useLang } from '../../contexts/LangContext';
 import { useAuth } from '../../contexts/AuthContext';
-import DMPSidebar from './components/DMPSidebar';
+import DMPFilterPanel from './components/DMPFilterPanel';
 import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
+import DMPExportTab from './components/DMPExportTab';
 import DM2000Page from '../DM2000/DM2000Page';
 
-const { Sider, Content } = Layout;
+const SEARCH_TAB_KEY = 'search';
+const CURVE_TAB_KEY = 'chart';
 
 function DMPBridgeContent() {
   const { t } = useLang();
@@ -28,126 +27,146 @@ function DMPBridgeContent() {
   const [selectedStationId, setSelectedStationId] = useState(undefined);
   const [stationError, setStationError] = useState('');
   const [selection, setSelection] = useState(null);
-  const [activeTab, setActiveTab] = useState('chart');
+  const [activeTab, setActiveTab] = useState(SEARCH_TAB_KEY);
 
   useEffect(() => {
     let mounted = true;
 
-    const loadStations = () => {
-      fetchStations()
-        .then((result) => {
-          if (!mounted) return;
-          setStations(result || []);
-          const online = (result || []).filter((station) => station.online);
-          setSelectedStationId((prev) => prev ?? online[0]?.id);
-        })
-        .catch((err) => {
-          if (!mounted) return;
-          setStationError(err.message || 'Failed to load stations');
-        });
+    const loadStations = async () => {
+      try {
+        const result = await fetchStations();
+        if (!mounted) return;
+        setStations(result || []);
+        const online = (result || []).filter((station) => station.online);
+        setSelectedStationId((prev) => prev ?? online[0]?.id);
+      } catch (err) {
+        if (!mounted) return;
+        setStationError(err.message || 'Failed to load stations');
+      }
     };
 
     loadStations();
     const pollId = setInterval(loadStations, 30000);
-
     return () => {
       mounted = false;
       clearInterval(pollId);
     };
   }, []);
 
-  const onlineStations = useMemo(() => stations.filter((station) => station.online), [stations]);
-  const selectedStation = useMemo(
-    () => stations.find((station) => station.id === selectedStationId) || null,
-    [stations, selectedStationId]
-  );
-
   useEffect(() => {
     setSelection(null);
   }, [selectedStationId]);
 
-  useEffect(() => {
-    setActiveTab(isQC ? 'history' : 'chart');
-  }, [selection, isQC]);
+  const handleSelectBatch = (record) => {
+    setSelection(record);
+    if (record?.id) {
+      setActiveTab(isQC ? 'export' : CURVE_TAB_KEY);
+    }
+  };
 
-  const breadcrumbItems = useMemo(() => ([
-    { title: `${t('dmpModel')}: ${selection?.model || '-'}` },
-    { title: `${t('dmpDate')}: ${selection?.date || '-'}` },
-    { title: `${t('dmpBatch')}: ${selection?.batchId || '-'}` },
-    { title: selection?.isBatch ? `${t('dmpChannel')}: ${t('dmpAllChannels')}` : `${t('dmpChannel')}: ${selection?.channel ?? '-'}` },
-  ]), [selection, t]);
+  const onlineStations = useMemo(() => stations.filter((station) => station.online), [stations]);
+  const selectedStation = useMemo(
+    () => stations.find((station) => station.id === selectedStationId) || null,
+    [stations, selectedStationId],
+  );
 
   return (
-    <Layout style={{ background: '#fff' }}>
-      <Content style={{ padding: '0 16px' }}>
-        {stationError && <Alert type="error" message={stationError} showIcon style={{ marginBottom: 12 }} />}
+    <div style={{ background: '#fff', minHeight: 'calc(100vh - 112px)', padding: '0 16px' }}>
+      <Typography.Title level={4}>{t('dmpBridgeTitle')}</Typography.Title>
 
+      {stationError && <Alert type="error" message={stationError} showIcon style={{ marginBottom: 12 }} />}
+
+      <Card size="small" style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Typography.Text strong>{t('dmpStation')}:</Typography.Text>
+          <Select
+            style={{ minWidth: 280 }}
+            placeholder={t('dmpSelectStation')}
+            value={selectedStationId}
+            onChange={setSelectedStationId}
+            options={onlineStations.map((station) => ({
+              value: station.id,
+              label: station.name,
+            }))}
+          />
+          {selectedStation && (
+            <Tag color={selectedStation.online ? 'green' : 'red'}>
+              {selectedStation.name} • {selectedStation.online ? t('dmpOnline') : t('dmpOffline')}
+            </Tag>
+          )}
+        </div>
+        {onlineStations.length === 0 && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="warning"
+            showIcon
+            message={t('dmpNoStations')}
+          />
+        )}
+      </Card>
+
+      {selection && (
         <Card size="small" style={{ marginBottom: 12 }}>
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Typography.Text strong>{t('dmpStation')}:</Typography.Text>
-            <Select
-              style={{ minWidth: 280 }}
-              placeholder={t('dmpSelectStation')}
-              value={selectedStationId}
-              onChange={setSelectedStationId}
-              options={onlineStations.map((station) => ({
-                value: station.id,
-                label: station.name,
-              }))}
-            />
-            {selectedStation && (
-              <Tag color={selectedStation.online ? 'green' : 'red'}>
-                {selectedStation.name} • {selectedStation.online ? t('dmpOnline') : t('dmpOffline')}
-              </Tag>
-            )}
-          </div>
-          {onlineStations.length === 0 && (
-            <Alert
-              style={{ marginTop: 12 }}
-              type="warning"
-              showIcon
-              message={t('dmpNoStations')}
-            />
+          <Typography.Text strong>{selection.id || '-'}</Typography.Text>
+          <Typography.Text type="secondary"> • {selection.dcxh || '-'}</Typography.Text>
+          <Typography.Text type="secondary"> • {selection.fdrq || '-'}</Typography.Text>
+          {selection.fdfs && (
+            <Typography.Text type="secondary"> • {selection.fdfs}</Typography.Text>
           )}
         </Card>
+      )}
 
-        <Layout style={{ background: '#fff' }}>
-          <Sider width={280} style={{ background: '#fff', borderRight: '1px solid #f0f0f0', padding: 12 }}>
-            <Typography.Title level={5} style={{ marginTop: 0 }}>{t('dmpDatabase')}</Typography.Title>
-            <DMPSidebar
-              stationId={selectedStationId}
-              onSelect={setSelection}
-            />
-          </Sider>
-
-          <Content style={{ padding: '0 16px' }}>
-            <Card size="small" style={{ marginBottom: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                <Breadcrumb items={breadcrumbItems} />
-                {selection && (
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <Tag color="blue">{selection.model}</Tag>
-                    <Tag color="purple">{selection.date}</Tag>
-                    <Tag color="cyan">{t('dmpBatch')} {selection.batchId}</Tag>
-                    <Tag color="green">{selection.isBatch ? t('dmpAllChannels') : `CH ${selection.channel}`}</Tag>
-                    <Badge status={selectedStation?.online ? 'success' : 'error'} text={selectedStation?.name || t('dmpNoStation')} />
-                  </div>
-                )}
-              </div>
-            </Card>
-
-            <Tabs
-              activeKey={activeTab}
-              onChange={setActiveTab}
-              items={[
-                ...(!isQC ? [{ key: 'chart', label: t('dmpChartTab'), children: <DMPChartTab stationId={selectedStationId} selection={selection} /> }] : []),
-                { key: 'history', label: t('dmpHistoryDataTab'), children: <DMPHistoryTab stationId={selectedStationId} selection={selection} /> },
-              ]}
-            />
-          </Content>
-        </Layout>
-      </Content>
-    </Layout>
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        destroyInactiveTabPane
+        items={[
+          {
+            key: SEARCH_TAB_KEY,
+            label: t('dmpSearchTab'),
+            children: (
+              <DMPFilterPanel
+                stationId={selectedStationId}
+                selectedBatchId={selection?.id}
+                onSelect={handleSelectBatch}
+              />
+            ),
+          },
+          ...(!isQC ? [
+            {
+              key: CURVE_TAB_KEY,
+              label: t('dmpChartTab'),
+              children: (
+                <DMPChartTab
+                  stationId={selectedStationId}
+                  selection={selection}
+                />
+              ),
+            },
+            {
+              key: 'data',
+              label: t('dmpDataTab'),
+              children: (
+                <DMPHistoryTab
+                  stationId={selectedStationId}
+                  selection={selection}
+                />
+              ),
+            },
+          ] : []),
+          {
+            key: 'export',
+            label: t('dmpExportTab'),
+            children: (
+              <DMPExportTab
+                stationId={selectedStationId}
+                selection={selection}
+              />
+            ),
+          },
+        ]}
+      />
+    </div>
   );
 }
 

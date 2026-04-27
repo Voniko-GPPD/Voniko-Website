@@ -1,39 +1,54 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Row, Select, Spin, Statistic } from 'antd';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Card, Col, Empty, Row, Select, Spin, Statistic, Switch, Typography, notification } from 'antd';
+import { DownloadOutlined } from '@ant-design/icons';
 import {
   Brush,
   CartesianGrid,
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import { fetchChannels, fetchTelemetry } from '../../../api/dmpApi';
+import { fetchChannels, fetchStats, fetchTelemetry } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
-const singleStatsKeys = ['VOLT_MAX', 'VOLT_MIN', 'VOLT_AVG', 'IM_MAX', 'IM_MIN', 'IM_AVG'];
-const batchStatsKeys = ['VOLT_MAX', 'VOLT_MIN', 'IM_MAX', 'IM_MIN'];
+const SHOW_ALL_VALUE = -1;
+const voltThresholds = [1.40, 1.35, 1.30, 1.25, 1.20, 1.15, 1.10, 1.05, 1.00, 0.95, 0.90];
 const STATS_PRECISION = 10000;
-
-const CHANNEL_PALETTE = [
-  '#1677ff', '#ff4d4f', '#52c41a', '#fa8c16', '#722ed1',
-  '#13c2c2', '#eb2f96', '#faad14', '#2f54eb', '#a0d911',
+const CHANNEL_COLORS = [
+  '#1677ff', '#f5222d', '#52c41a', '#faad14', '#722ed1',
+  '#13c2c2', '#eb2f96', '#fa8c16', '#a0d911', '#2f54eb',
 ];
 
-function safeNum(val) {
-  if (val === null || val === undefined || val === '--' || val === '') return null;
-  const n = Number(val);
-  return Number.isFinite(n) ? n : null;
+const singleStatItems = [
+  { key: 'VOLT_MAX', title: 'VOLT MAX', suffix: 'V' },
+  { key: 'VOLT_MIN', title: 'VOLT MIN', suffix: 'V' },
+  { key: 'VOLT_AVG', title: 'VOLT AVG', suffix: 'V' },
+  { key: 'IM_MAX', title: 'Im MAX', suffix: 'mA' },
+  { key: 'IM_MIN', title: 'Im MIN', suffix: 'mA' },
+  { key: 'IM_AVG', title: 'Im AVG', suffix: 'mA' },
+];
+
+const batchStatItems = [
+  { key: 'VOLT_MAX', title: 'VOLT MAX', suffix: 'V' },
+  { key: 'VOLT_MIN', title: 'VOLT MIN', suffix: 'V' },
+  { key: 'IM_MAX', title: 'Im MAX', suffix: 'mA' },
+  { key: 'IM_MIN', title: 'Im MIN', suffix: 'mA' },
+];
+
+function safeNum(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
 }
 
-function computeStats(telemetry) {
-  const voltVals = telemetry.map((r) => safeNum(r.VOLT ?? r.volt ?? r.Volt)).filter((v) => v !== null);
-  const imVals = telemetry.map((r) => safeNum(r.Im ?? r.IM ?? r.im)).filter((v) => v !== null);
+function computeStatsFromRows(rows) {
+  const voltVals = rows.map((r) => safeNum(r.VOLT ?? r.volt ?? r.Volt)).filter((v) => v !== null);
+  const imVals = rows.map((r) => safeNum(r.Im ?? r.IM ?? r.im)).filter((v) => v !== null);
   const imActive = imVals.filter((v) => v > 0);
-
   const agg = (arr) => {
     if (!arr.length) return { max: null, min: null, avg: null };
     const sum = arr.reduce((a, b) => a + b, 0);
@@ -43,146 +58,202 @@ function computeStats(telemetry) {
       avg: Math.round((sum / arr.length) * STATS_PRECISION) / STATS_PRECISION,
     };
   };
-
   const v = agg(voltVals);
   const i = agg(imVals);
   const ia = agg(imActive);
   return {
-    VOLT_MAX: v.max,
-    VOLT_MIN: v.min,
-    VOLT_AVG: v.avg,
-    IM_MAX: i.max,
-    IM_MIN: i.min,
-    IM_AVG: ia.avg,
+    VOLT_MAX: v.max, VOLT_MIN: v.min, VOLT_AVG: v.avg,
+    IM_MAX: i.max, IM_MIN: i.min, IM_AVG: ia.avg,
   };
 }
 
-function computeBatchStats(allChannelTelemetry) {
-  const perChannel = allChannelTelemetry.map((ch) => computeStats(ch.rows));
-  const avg = (vals) => {
-    const valid = vals.filter((v) => v !== null);
-    if (!valid.length) return null;
-    return Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * STATS_PRECISION) / STATS_PRECISION;
+function downloadChartAsPng(containerRef, filename) {
+  const container = containerRef.current;
+  if (!container) { notification.warning({ message: 'Chart container not found' }); return; }
+  const svg = container.querySelector('svg');
+  if (!svg) { notification.warning({ message: 'Chart SVG not available' }); return; }
+  const { width, height } = svg.getBoundingClientRect();
+  const svgData = new XMLSerializer().serializeToString(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = width * 2;
+  canvas.height = height * 2;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(2, 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  const img = new Image();
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0, width, height);
+    const a = document.createElement('a');
+    a.download = filename;
+    a.href = canvas.toDataURL('image/png');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
-  return {
-    VOLT_MAX: avg(perChannel.map((s) => s.VOLT_MAX)),
-    VOLT_MIN: avg(perChannel.map((s) => s.VOLT_MIN)),
-    IM_MAX: avg(perChannel.map((s) => s.IM_MAX)),
-    IM_MIN: avg(perChannel.map((s) => s.IM_MIN)),
-  };
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgData)}`;
 }
 
 export default function DMPChartTab({ stationId, selection }) {
   const { t } = useLang();
-  const isBatch = selection?.isBatch === true;
-
-  // Single-channel state
+  const chartRef = useRef(null);
+  const [channelLoading, setChannelLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [channels, setChannels] = useState([]);
+  const [selectedBaty, setSelectedBaty] = useState(SHOW_ALL_VALUE);
   const [telemetry, setTelemetry] = useState([]);
   const [stats, setStats] = useState({});
-  const [visibleLines, setVisibleLines] = useState(['VOLT', 'Im']);
+  const [allChannelData, setAllChannelData] = useState({});
+  const [showThresholds, setShowThresholds] = useState(true);
 
-  // Batch state
-  const [batchChannelTelemetry, setBatchChannelTelemetry] = useState([]);
-
-  // Single-channel effect
+  // Reset channel selection when selection (batch) changes
   useEffect(() => {
-    if (isBatch) return;
-    if (!stationId || !selection) {
-      setTelemetry([]);
-      setStats({});
+    setSelectedBaty(SHOW_ALL_VALUE);
+  }, [selection?.id]);
+
+  // Load channels for selected batch
+  useEffect(() => {
+    let active = true;
+    setChannels([]);
+    if (!stationId || !selection?.id) {
+      setChannelLoading(false);
+      return () => {};
+    }
+    const load = async () => {
+      setChannelLoading(true);
       setError('');
-      return;
-    }
-    if (!selection.cdmc) {
-      setError(t('dmpMissingCdmcDetailed'));
-      setTelemetry([]);
-      setStats({});
-      return;
-    }
-    if (selection.channel == null) {
-      setTelemetry([]);
-      setStats({});
-      setError('');
-      return;
-    }
-
-    const abortController = new AbortController();
-    setLoading(true);
-    setError('');
-
-    fetchTelemetry(stationId, selection.cdmc, selection.channel, abortController.signal)
-      .then((rows) => {
-        setTelemetry(rows);
-        setStats(computeStats(rows));
-      })
-      .catch((err) => {
-        if (err.name === 'AbortError') return;
-        setError(err.message || 'Failed to load telemetry data');
-      })
-      .finally(() => {
-        if (abortController.signal.aborted) return;
-        setLoading(false);
-      });
-
-    return () => {
-      abortController.abort();
+      try {
+        const result = await fetchChannels(stationId, selection.id);
+        if (!active) return;
+        setChannels(
+          (result || [])
+            .filter((ch) => ch.baty != null && Number.isFinite(Number(ch.baty)) && Number(ch.baty) > 0),
+        );
+      } catch (err) {
+        if (!active) return;
+        setError(err.message || 'Failed to load channels');
+      } finally {
+        if (!active) return;
+        setChannelLoading(false);
+      }
     };
-  }, [stationId, selection, isBatch, t]);
+    load();
+    return () => { active = false; };
+  }, [stationId, selection?.id]);
 
-  // Batch effect: fetch all channels then all telemetry in parallel
+  // Load telemetry / stats based on selected channel
   useEffect(() => {
-    if (!isBatch) return;
-    if (!stationId || !selection?.batchId) {
-      setBatchChannelTelemetry([]);
-      setError('');
-      return;
+    let active = true;
+    setTelemetry([]);
+    setStats({});
+    setAllChannelData({});
+    if (!stationId || !selection?.id) {
+      setLoading(false);
+      setStatsLoading(false);
+      return () => {};
     }
 
-    let mounted = true;
-    setLoading(true);
-    setError('');
-    setBatchChannelTelemetry([]);
-
-    fetchChannels(stationId, selection.batchId)
-      .then((channels) => {
-        if (!mounted) return;
-        if (!channels.length) {
+    if (selectedBaty === SHOW_ALL_VALUE) {
+      if (!channels.length) {
+        setLoading(false);
+        return () => { active = false; };
+      }
+      const loadAll = async () => {
+        setLoading(true);
+        setStatsLoading(true);
+        setError('');
+        try {
+          const [telResults, statsResults] = await Promise.all([
+            Promise.all(
+              channels.map((ch) =>
+                fetchTelemetry(stationId, ch.cdmc, ch.baty)
+                  .then((rows) => ({ baty: ch.baty, rows: rows || [] }))
+                  .catch(() => ({ baty: ch.baty, rows: [] })),
+              ),
+            ),
+            Promise.all(
+              channels.map((ch) =>
+                fetchStats(stationId, ch.cdmc, ch.baty)
+                  .then((s) => ({ baty: ch.baty, stats: s || {} }))
+                  .catch(() => ({ baty: ch.baty, stats: {} })),
+              ),
+            ),
+          ]);
+          if (!active) return;
+          const dataMap = {};
+          telResults.forEach(({ baty, rows }) => {
+            dataMap[baty] = rows
+              .map((r) => ({ TIM: safeNum(r.TIM ?? r.tim), VOLT: safeNum(r.VOLT ?? r.volt) }))
+              .filter((r) => r.TIM !== null && r.VOLT !== null);
+          });
+          setAllChannelData(dataMap);
+          const allVoltMax = statsResults.map(({ stats: s }) => safeNum(s.VOLT_MAX)).filter((v) => v !== null);
+          const allVoltMin = statsResults.map(({ stats: s }) => safeNum(s.VOLT_MIN)).filter((v) => v !== null);
+          const allImMax = statsResults.map(({ stats: s }) => safeNum(s.IM_MAX)).filter((v) => v !== null);
+          const allImMin = statsResults.map(({ stats: s }) => safeNum(s.IM_MIN)).filter((v) => v !== null);
+          setStats(allVoltMax.length > 0 ? {
+            VOLT_MAX: Math.max(...allVoltMax),
+            VOLT_MIN: Math.min(...allVoltMin),
+            IM_MAX: allImMax.length > 0 ? Math.max(...allImMax) : null,
+            IM_MIN: allImMin.length > 0 ? Math.min(...allImMin) : null,
+          } : {});
+        } catch (err) {
+          if (!active) return;
+          setError(err.message || 'Failed to load chart data');
+        } finally {
+          if (!active) return;
           setLoading(false);
-          return;
+          setStatsLoading(false);
         }
-        const failedChannels = [];
-        return Promise.all(
-          channels.map((ch) =>
-            fetchTelemetry(stationId, ch.cdmc, ch.baty)
-              .then((rows) => ({ channel: ch.baty, rows }))
-              .catch((err) => {
-                failedChannels.push({ channel: ch.baty, reason: err.message || 'Unknown error' });
-                return { channel: ch.baty, rows: [] };
-              })
-          )
-        ).then((results) => {
-          if (!mounted) return;
-          setBatchChannelTelemetry(results);
-          if (failedChannels.length) {
-            setError(`Failed to load channels: ${failedChannels.map((f) => `CH${f.channel}`).join(', ')}`);
-          }
-          setLoading(false);
-        });
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setError(err.message || 'Failed to load batch data');
+      };
+      loadAll();
+      return () => { active = false; };
+    }
+
+    // Single channel
+    const ch = channels.find((c) => Number(c.baty) === selectedBaty);
+    if (!ch) {
+      setLoading(false);
+      setStatsLoading(false);
+      return () => { active = false; };
+    }
+
+    const loadSingle = async () => {
+      setLoading(true);
+      setStatsLoading(true);
+      setError('');
+      try {
+        const [rows, statsData] = await Promise.all([
+          fetchTelemetry(stationId, ch.cdmc, ch.baty),
+          fetchStats(stationId, ch.cdmc, ch.baty),
+        ]);
+        if (!active) return;
+        setTelemetry(rows || []);
+        setStats(statsData || computeStatsFromRows(rows || []));
+      } catch (err) {
+        if (!active) return;
+        setError(err.message || 'Failed to load chart data');
+      } finally {
+        if (!active) return;
         setLoading(false);
-      });
-
-    return () => {
-      mounted = false;
+        setStatsLoading(false);
+      }
     };
-  }, [stationId, selection, isBatch]);
+    loadSingle();
+    return () => { active = false; };
+  }, [stationId, selection?.id, selectedBaty, channels]);
 
-  // Single-channel chart data
+  const channelOptions = useMemo(() => {
+    const sorted = [...channels].sort((a, b) => Number(a.baty) - Number(b.baty));
+    return [
+      { value: SHOW_ALL_VALUE, label: t('dmpAllChannels') },
+      ...sorted.map((ch) => ({ value: Number(ch.baty), label: `CH ${ch.baty}` })),
+    ];
+  }, [channels, t]);
+
+  // Single channel chart data
   const chartData = useMemo(
     () => telemetry
       .map((row, index) => ({
@@ -192,191 +263,156 @@ export default function DMPChartTab({ stationId, selection }) {
         Im: safeNum(row.Im ?? row.IM ?? row.im),
       }))
       .filter((d) => d.TIM !== null),
-    [telemetry]
+    [telemetry],
   );
 
-  // Batch chart data: merged by row index, each channel gets its own VOLT_N / Im_N key
-  const batchChartData = useMemo(() => {
-    if (!batchChannelTelemetry.length) return [];
-    const lengths = batchChannelTelemetry.map((ch) => ch.rows.length);
-    const maxLen = lengths.length ? Math.max(...lengths) : 0;
-    if (maxLen === 0) return [];
-    return Array.from({ length: maxLen }, (_, i) => {
-      // Get TIM from the first channel that has a row at this index
-      let tim = null;
-      for (const ch of batchChannelTelemetry) {
-        if (ch.rows[i]) {
-          const t = safeNum(ch.rows[i].TIM ?? ch.rows[i].tim);
-          if (t !== null) { tim = t; break; }
-        }
-      }
-      const point = { index: i, TIM: tim };
-      batchChannelTelemetry.forEach((ch) => {
-        point[`VOLT_${ch.channel}`] = safeNum(ch.rows[i]?.VOLT ?? ch.rows[i]?.volt ?? ch.rows[i]?.Volt);
-        point[`Im_${ch.channel}`] = safeNum(ch.rows[i]?.Im ?? ch.rows[i]?.IM ?? ch.rows[i]?.im);
+  // All-channel (show all) chart data merged by row index
+  const multilineChartData = useMemo(() => {
+    if (selectedBaty !== SHOW_ALL_VALUE || Object.keys(allChannelData).length === 0) return null;
+    const timMap = new Map();
+    Object.entries(allChannelData).forEach(([baty, rows]) => {
+      rows.forEach((row) => {
+        if (!timMap.has(row.TIM)) timMap.set(row.TIM, { TIM: row.TIM });
+        timMap.get(row.TIM)[`VOLT_${baty}`] = row.VOLT;
       });
-      return point;
-    }).filter((d) => d.TIM !== null);
-  }, [batchChannelTelemetry]);
+    });
+    return [...timMap.values()].sort((a, b) => a.TIM - b.TIM);
+  }, [selectedBaty, allChannelData]);
 
-  const batchStats = useMemo(
-    () => (batchChannelTelemetry.length ? computeBatchStats(batchChannelTelemetry) : {}),
-    [batchChannelTelemetry]
+  const sortedBatyKeys = useMemo(
+    () => Object.keys(allChannelData).map(Number).sort((a, b) => a - b),
+    [allChannelData],
   );
 
-  const tooltipFormatter = (value, name) => {
-    const num = Number(value);
-    if (name === 'VOLT') {
-      return [`VOLT: ${Number.isFinite(num) ? num.toFixed(4) : '-'}V`, t('dmpVoltage')];
-    }
-    if (name === 'Im') {
-      return [`Im: ${Number.isFinite(num) ? num.toFixed(4) : '-'}mA`, t('dmpCurrent')];
-    }
-    if (name.startsWith('VOLT_')) {
-      return [`${Number.isFinite(num) ? num.toFixed(4) : '-'}V`, name];
-    }
-    if (name.startsWith('Im_')) {
-      return [`${Number.isFinite(num) ? num.toFixed(4) : '-'}mA`, name];
-    }
-    return [value, name];
-  };
-
-  const tooltipLabelFormatter = (label) => {
-    const tim = Number(label);
-    return `TIM: ${Number.isFinite(tim) ? tim.toFixed(4) : '-'}h`;
-  };
-
-  if (!stationId) {
-    return <Empty description={t('dmpSelectStationToChart')} />;
-  }
+  const activeStatItems = selectedBaty === SHOW_ALL_VALUE ? batchStatItems : singleStatItems;
+  const chartFilename = `dmp_chart_${selection?.id || 'chart'}.png`;
 
   if (!selection) {
-    return <Empty description={t('dmpSelectChannelToChart')} />;
-  }
-
-  if (loading) {
-    return <Spin />;
-  }
-
-  if (isBatch) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {error && <Alert type="error" message={error} showIcon />}
-
-        <Row gutter={[12, 12]}>
-          {batchStatsKeys.map((key) => (
-            <Col xs={24} sm={12} md={6} lg={6} xl={6} key={key}>
-              <Card size="small">
-                <Statistic title={key} value={batchStats[key]} precision={4} />
-              </Card>
-            </Col>
-          ))}
-        </Row>
-
-        <Select
-          mode="multiple"
-          value={visibleLines}
-          onChange={setVisibleLines}
-          options={[
-            { value: 'VOLT', label: t('dmpVoltage') },
-            { value: 'Im', label: t('dmpCurrent') },
-          ]}
-          style={{ width: 260 }}
-        />
-
-        {batchChartData.length === 0 ? (
-          <Empty description={t('dmpNoTelemetry')} />
-        ) : (
-          <div style={{ width: '100%', height: 480 }}>
-            <ResponsiveContainer>
-              <LineChart data={batchChartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} label={{ value: t('dmpTimeH'), position: 'insideBottom', offset: -5 }} />
-                <YAxis yAxisId="left" orientation="left" domain={[0.9, 1.85]} unit="V" label={{ value: 'V', angle: -90, position: 'insideLeft' }} />
-                <YAxis yAxisId="right" orientation="right" unit="mA" label={{ value: 'mA', angle: 90, position: 'insideRight' }} />
-                <Tooltip formatter={tooltipFormatter} labelFormatter={tooltipLabelFormatter} />
-                <Legend />
-                {batchChannelTelemetry.map((ch, idx) => {
-                  const color = CHANNEL_PALETTE[idx % CHANNEL_PALETTE.length];
-                  return (
-                    <React.Fragment key={ch.channel}>
-                      {visibleLines.includes('VOLT') && (
-                        <Line
-                          yAxisId="left"
-                          type="monotone"
-                          dataKey={`VOLT_${ch.channel}`}
-                          stroke={color}
-                          strokeWidth={1.5}
-                          dot={false}
-                          connectNulls
-                          name={`VOLT CH${ch.channel}`}
-                        />
-                      )}
-                      {visibleLines.includes('Im') && (
-                        <Line
-                          yAxisId="right"
-                          type="monotone"
-                          dataKey={`Im_${ch.channel}`}
-                          stroke={color}
-                          strokeWidth={1.5}
-                          strokeDasharray="4 2"
-                          dot={false}
-                          connectNulls
-                          name={`Im CH${ch.channel}`}
-                        />
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-                <Brush dataKey="index" height={28} stroke="#999" travellerWidth={8} />
-              </LineChart>
-            </ResponsiveContainer>
-            <div style={{ marginTop: 8, color: 'rgba(0,0,0,0.45)', fontSize: 12 }}>{t('dmpZoomControl')}</div>
-          </div>
-        )}
-      </div>
-    );
+    return <Empty description={t('dmpSelectBatchToChart')} />;
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {error && <Alert type="error" message={error} showIcon />}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {error && <Alert type="error" showIcon message={error} />}
+
+      <Row gutter={[12, 12]} align="middle">
+        <Col>
+          <Typography.Text strong>{t('dmpChannel')}:</Typography.Text>
+        </Col>
+        <Col>
+          <Select
+            style={{ width: 220 }}
+            value={selectedBaty}
+            options={channelOptions}
+            onChange={setSelectedBaty}
+            loading={channelLoading}
+            placeholder={t('dmpSelectChannel')}
+          />
+        </Col>
+        <Col>
+          <Switch checked={showThresholds} onChange={setShowThresholds} />
+        </Col>
+        <Col>
+          <Typography.Text>{t('dm2000ShowThresholds')}</Typography.Text>
+        </Col>
+        <Col>
+          <Button
+            icon={<DownloadOutlined />}
+            size="small"
+            onClick={() => downloadChartAsPng(chartRef, chartFilename)}
+            disabled={loading || (selectedBaty === SHOW_ALL_VALUE ? !multilineChartData : chartData.length === 0)}
+          >
+            {t('dm2000DownloadChart')}
+          </Button>
+        </Col>
+      </Row>
 
       <Row gutter={[12, 12]}>
-        {singleStatsKeys.map((key) => (
-          <Col xs={24} sm={12} md={8} lg={8} xl={4} key={key}>
-            <Card size="small">
-              <Statistic title={key} value={stats[key]} precision={4} />
+        {activeStatItems.map((item) => (
+          <Col xs={24} sm={12} md={6} key={item.key}>
+            <Card size="small" loading={statsLoading}>
+              <Statistic
+                title={item.title}
+                value={stats[item.key] != null ? Number(stats[item.key]).toFixed(4) : '-'}
+                suffix={item.suffix}
+              />
             </Card>
           </Col>
         ))}
       </Row>
 
-      <Select
-        mode="multiple"
-        value={visibleLines}
-        onChange={setVisibleLines}
-        options={[
-          { value: 'VOLT', label: t('dmpVoltage') },
-          { value: 'Im', label: t('dmpCurrent') },
-        ]}
-        style={{ width: 260 }}
-      />
-
-      {chartData.length === 0 ? (
+      {loading ? (
+        <Spin />
+      ) : selectedBaty === SHOW_ALL_VALUE ? (
+        multilineChartData && multilineChartData.length > 0 ? (
+          <div ref={chartRef} style={{ width: '100%', height: 480 }}>
+            <ResponsiveContainer>
+              <LineChart data={multilineChartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="TIM"
+                  type="number"
+                  domain={['dataMin', 'dataMax']}
+                  label={{ value: t('dmpTimeH'), position: 'insideBottom', offset: -5 }}
+                />
+                <YAxis domain={['auto', 'auto']} unit="V" />
+                <Tooltip
+                  formatter={(value, name) => [`${Number(value).toFixed(4)} V`, name]}
+                  labelFormatter={(label) => `${Number(label).toFixed(4)} h`}
+                />
+                <Legend />
+                {showThresholds && voltThresholds.map((value) => (
+                  <ReferenceLine key={value} y={value} stroke="#ccc" strokeDasharray="4 4" />
+                ))}
+                {sortedBatyKeys.map((baty, index) => (
+                  <Line
+                    key={baty}
+                    type="monotone"
+                    dataKey={`VOLT_${baty}`}
+                    name={`CH ${baty}`}
+                    stroke={CHANNEL_COLORS[index % CHANNEL_COLORS.length]}
+                    strokeWidth={1.5}
+                    dot={false}
+                    connectNulls
+                  />
+                ))}
+                <Brush dataKey="TIM" height={24} stroke="#999" travellerWidth={8} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <Empty description={t('dmpNoTelemetry')} />
+        )
+      ) : chartData.length === 0 ? (
         <Empty description={t('dmpNoTelemetry')} />
       ) : (
-        <div style={{ width: '100%', height: 480 }}>
+        <div ref={chartRef} style={{ width: '100%', height: 480 }}>
           <ResponsiveContainer>
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="TIM" type="number" domain={['dataMin', 'dataMax']} label={{ value: t('dmpTimeH'), position: 'insideBottom', offset: -5 }} />
+              <XAxis
+                dataKey="TIM"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                label={{ value: t('dmpTimeH'), position: 'insideBottom', offset: -5 }}
+              />
               <YAxis yAxisId="left" orientation="left" domain={[0.9, 1.85]} unit="V" label={{ value: 'V', angle: -90, position: 'insideLeft' }} />
               <YAxis yAxisId="right" orientation="right" unit="mA" label={{ value: 'mA', angle: 90, position: 'insideRight' }} />
-              <Tooltip formatter={tooltipFormatter} labelFormatter={tooltipLabelFormatter} />
+              <Tooltip
+                formatter={(value, name) => {
+                  const num = Number(value);
+                  if (name === 'VOLT') return [`${Number.isFinite(num) ? num.toFixed(4) : '-'} V`, t('dmpVoltage')];
+                  if (name === 'Im') return [`${Number.isFinite(num) ? num.toFixed(4) : '-'} mA`, t('dmpCurrent')];
+                  return [value, name];
+                }}
+                labelFormatter={(label) => `${Number(label).toFixed(4)} h`}
+              />
               <Legend />
-              {visibleLines.includes('VOLT') && <Line yAxisId="left" type="monotone" dataKey="VOLT" stroke="#1677ff" strokeWidth={1.5} dot={false} connectNulls />}
-              {visibleLines.includes('Im') && <Line yAxisId="right" type="monotone" dataKey="Im" stroke="#ff4d4f" strokeWidth={1.5} dot={false} connectNulls />}
+              {showThresholds && voltThresholds.map((value) => (
+                <ReferenceLine key={value} yAxisId="left" y={value} stroke="#ccc" strokeDasharray="4 4" />
+              ))}
+              <Line yAxisId="left" type="monotone" dataKey="VOLT" name="VOLT" stroke="#1677ff" strokeWidth={1.5} dot={false} connectNulls />
+              <Line yAxisId="right" type="monotone" dataKey="Im" name="Im" stroke="#ff4d4f" strokeWidth={1.5} dot={false} connectNulls />
               <Brush dataKey="index" height={28} stroke="#999" travellerWidth={8} />
             </LineChart>
           </ResponsiveContainer>

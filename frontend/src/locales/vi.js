@@ -472,7 +472,8 @@ export default {
   folderManagement: 'Quản lý Folder',
 
   // DMP Bridge
-  dmpBridgeTitle: 'DMP Cầu nối dữ liệu pin',
+  dmManagement: 'Quản lý DM',
+  dmpBridgeTitle: 'DMP',
   dmpStation: 'Trạm',
   dmpSelectStation: 'Chọn trạm DMP trực tuyến',
   dmpOnline: 'trực tuyến',
@@ -529,7 +530,7 @@ export default {
   dmpKeywordFilterPlaceholder: 'Kiểu pin, Ngày, Kịch bản...',
   dmpSelectChannel: 'Chọn kênh',
 
-  dm2000Title: 'Tra cứu lịch sử DM2000',
+  dm2000Title: 'DM Historic',
   dm2000CurveTab: 'Biểu đồ',
   dm2000DataTab: 'Dữ liệu',
   dm2000DailyVoltTab: 'Điện áp hàng ngày',
@@ -545,6 +546,7 @@ export default {
   dm2000UnifRate: 'Đồng đều',
   dm2000Manufacturer: 'Nhà sản xuất',
   dm2000ArchName: 'Mã archive',
+  dm2000Database: 'Cơ sở dữ liệu',
   dm2000DateFrom: 'Từ ngày',
   dm2000DateTo: 'Đến ngày',
   dm2000TypeFilter: 'Lọc kiểu pin',

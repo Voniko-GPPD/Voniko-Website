@@ -55,7 +55,7 @@ export default function AppLayout() {
     ] : []),
     { key: '/barcode', icon: <QrcodeOutlined />, label: t('barcode') },
     { key: '/battery', icon: <ThunderboltOutlined />, label: t('batteryTest') },
-    { key: '/battery-dmp', icon: <ExperimentOutlined />, label: 'DMP Bridge & DM2000' },
+    { key: '/battery-dmp', icon: <ExperimentOutlined />, label: t('dmManagement') },
     { key: '/count-batteries', icon: <CameraOutlined />, label: t('countBatteries') },
     ...(isAdmin ? [
       { key: '/users', icon: <TeamOutlined />, label: t('users') },

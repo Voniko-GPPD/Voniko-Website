@@ -1898,6 +1898,9 @@ def get_dm2000_archives(
             "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts"),
             "company": DM2000_COMPANY_NAME or None,
         }
+        # Build database file path from archname and data directory
+        archname_val = item.get("archname") or ""
+        item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
         archives.append(item)
 
     def _contains(value, pattern):

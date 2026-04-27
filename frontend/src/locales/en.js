@@ -472,7 +472,8 @@ export default {
   folderManagement: 'Folder Management',
 
   // DMP Bridge
-  dmpBridgeTitle: 'DMP Battery Data Bridge',
+  dmManagement: 'DM Management',
+  dmpBridgeTitle: 'DMP',
   dmpStation: 'Station',
   dmpSelectStation: 'Select online DMP station',
   dmpOnline: 'online',
@@ -529,7 +530,7 @@ export default {
   dmpKeywordFilterPlaceholder: 'Type, Date, Pattern...',
   dmpSelectChannel: 'Select channel',
 
-  dm2000Title: 'DM2000 Historic Query',
+  dm2000Title: 'DM Historic',
   dm2000CurveTab: 'Chart',
   dm2000DataTab: 'Data Table',
   dm2000DailyVoltTab: 'Daily Voltage',
@@ -545,6 +546,7 @@ export default {
   dm2000UnifRate: 'Uniform Rate',
   dm2000Manufacturer: 'Manufacturer',
   dm2000ArchName: 'Record Name',
+  dm2000Database: 'Database',
   dm2000DateFrom: 'From Date',
   dm2000DateTo: 'To Date',
   dm2000TypeFilter: 'Type Filter',

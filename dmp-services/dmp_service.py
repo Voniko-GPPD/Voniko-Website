@@ -848,17 +848,18 @@ def _resolve_perf_template_path(template_name: str) -> str:
 
     base = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
     allowed = {
-        f.name for f in base.iterdir()
+        f.name: f for f in base.iterdir()
         if f.is_file() and _is_valid_template_name(f.name)
-    } if base.exists() else set()
+    } if base.exists() else {}
     if template_name not in allowed:
         raise HTTPException(status_code=404, detail="Perf template not found")
-    result = (base / template_name).resolve()
+    # Use the filesystem-derived Path object (not raw user input) to avoid taint
+    result = allowed[template_name].resolve()
     try:
         result.relative_to(base)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
-    if not result.exists():
+    if not result.is_file():
         raise HTTPException(status_code=404, detail="Perf template not found")
     return str(result)
 
@@ -955,6 +956,7 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
     return buf.getvalue()
 
 
+def compute_dm2000_stats(rows: list[dict]) -> dict:
     """Compute DM2000 curve statistics. TIM is already in minutes."""
     def safe_float(v):
         if v is None or v == "--" or v == "":
@@ -2049,21 +2051,22 @@ def get_dm2000_perf_templates():
 async def upload_dm2000_perf_template(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
+    # Extract only the basename (no directory components)
     safe_name = Path(file.filename).name
     if not _is_valid_template_name(safe_name):
         raise HTTPException(status_code=400, detail="Invalid file name")
-    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR)
+    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
     templates_dir.mkdir(parents=True, exist_ok=True)
-    dest = (templates_dir / safe_name).resolve()
-    try:
-        dest.relative_to(templates_dir.resolve())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Path traversal detected") from exc
+    # Re-join using only the validated basename to prevent any path traversal
+    dest = templates_dir / safe_name
+    if not str(dest).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
     contents = await file.read()
     dest.write_bytes(contents)
     return {"ok": True, "name": safe_name}
 
 
+@app.post("/dm2000/report")
 def generate_dm2000_report(payload: DM2000ReportRequest):
     _validate_dm2000_archname(payload.archname)
 

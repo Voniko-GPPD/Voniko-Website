@@ -864,6 +864,92 @@ def _resolve_perf_template_path(template_name: str) -> str:
     return str(result)
 
 
+def _perf_cell_value_with_merge(ws, row: int, col: int):
+    """Return the effective display value of a cell, accounting for merged ranges."""
+    for merge_range in ws.merged_cells.ranges:
+        if (
+            merge_range.min_row <= row <= merge_range.max_row
+            and merge_range.min_col <= col <= merge_range.max_col
+        ):
+            return ws.cell(row=merge_range.min_row, column=merge_range.min_col).value
+    return ws.cell(row=row, column=col).value
+
+
+def _perf_col_header(ws, col: int, below_row: int) -> str:
+    """Scan upward from *below_row* and return the first non-empty cell value
+    in *col*, respecting merged cells.  Returns an empty string if not found."""
+    for row_idx in range(below_row - 1, 0, -1):
+        val = _perf_cell_value_with_merge(ws, row_idx, col)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _perf_find_fdfs_for_col(
+    ws, col: int, below_row: int, all_fdfs: list[str]
+) -> tuple[str, str]:
+    """Scan *all* rows above *below_row* in *col* and return the first
+    ``(fdfs_label, header_text)`` pair where the header matches a known fdfs.
+    Returns ``("", "")`` when no match is found.
+
+    This correctly handles templates where multiple header rows exist above the
+    data-tag row (e.g. a merged fdfs label in row 2 and a sub-header in row 3).
+    """
+    for row_idx in range(below_row - 1, 0, -1):
+        val = _perf_cell_value_with_merge(ws, row_idx, col)
+        if val is None:
+            continue
+        s = str(val).strip()
+        if not s:
+            continue
+        for fdfs_lbl in all_fdfs:
+            if _perf_fdfs_matches_header(fdfs_lbl, s):
+                return (fdfs_lbl, s)
+    return ("", "")
+
+
+def _perf_normalize_date(v) -> str:
+    """Normalise a cell value to a ``YYYY-MM-DD`` string, or return ``""``."""
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    s = str(v).strip()
+    # Accept YYYY/MM/DD or YYYY-MM-DD (first 10 chars)
+    s = s[:10].replace("/", "-")
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    return ""
+
+
+def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
+    """Return True if *fdfs* label is a reasonable match for *header* text.
+
+    The header may contain a unit suffix such as ``(h)`` / ``(m)`` / ``(t)``
+    which is ignored for matching purposes.
+    """
+    if not fdfs or not header:
+        return False
+    # Strip trailing unit annotation like "(h)", "(m)", "(t)"
+    clean_header = re.sub(r"\s*\([hHmMtT]\)\s*$", "", header).strip()
+    f = fdfs.lower().strip()
+    h = clean_header.lower().strip()
+    if not f or not h:
+        return False
+    # Exact match after normalisation
+    if f == h:
+        return True
+    # One contains the other (handles minor whitespace/punctuation differences)
+    if f in h or h in f:
+        return True
+    # Match on leading token (e.g. "10ohm" vs "10ohm 24h/d-0.9V(h)")
+    f_tok = f.split()[0] if f.split() else ""
+    h_tok = h.split()[0] if h.split() else ""
+    if f_tok and h_tok and f_tok == h_tok:
+        return True
+    return False
+
+
 def _render_perf_template(template_path: str, groups: dict) -> bytes:
     """Fill a user-uploaded perf template Excel with performance data.
 
@@ -871,16 +957,35 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
 
     * ``{{PERF_SHEET_NAME}}`` — replaced with the battery-series sheet name
       (e.g. "LR6 501").  Can be placed in any cell (title row, etc.).
-    * Data-row marker: any cell in a row that contains ``{{#PERF_ROWS}}`` marks
-      that row as the template for data rows.  That row is expanded (one copy
-      per data point).  The following tags are available inside that row:
+
+    **Mode A — row-expansion (``{{#PERF_ROWS}}``):**
+      Any cell in a row that contains ``{{#PERF_ROWS}}`` marks that row as the
+      template for data rows.  That row is expanded (one copy per data point).
+      Tags available inside the row:
 
       * ``{{DATE}}``       — test date (``YYYY-MM-DD``)
       * ``{{TYPE}}``       — battery grade (``HP`` / ``UD`` / ``UD+``)
-      * ``{{RESULT_0}}``   — avg discharge hours for the 1st fdfs condition (sorted)
+      * ``{{RESULT_0}}``   — avg discharge result for the 1st fdfs condition
       * ``{{RATE_0}}``     — uniform rate (%) for the 1st fdfs condition
-      * ``{{RESULT_1}}``, ``{{RATE_1}}`` — 2nd fdfs condition
-      * … and so on for each additional test condition.
+      * ``{{RESULT_1}}``, ``{{RATE_1}}`` — 2nd fdfs condition, … and so on.
+
+    **Mode B — date-based cell lookup (no ``{{#PERF_ROWS}}``):**
+      When no ``{{#PERF_ROWS}}`` marker is found the engine falls back to
+      date-based row matching.  The template must have dates pre-filled in
+      column A (format ``YYYY/MM/DD`` or ``YYYY-MM-DD``).  Place the following
+      tags in any row that contains a matching date in column A:
+
+      * ``{{TYPE}}``         — battery grade
+      * ``{{RESULT_0}}`` … — result for the 1st (alphabetically) fdfs condition.
+        The engine also inspects column headers *above* each ``{{RESULT_N}}``
+        tag and tries to match them against the archive's discharge-pattern
+        (fdfs) label, allowing the correct column to be filled regardless of
+        the number of conditions exported in one call.
+      * ``{{RATE_0}}`` …    — uniform rate for the matching fdfs condition.
+
+      The unit written for ``{{RESULT_N}}`` is chosen from the column header:
+      a header ending with ``(h)`` receives hours; one ending with ``(m)`` or
+      ``(t)`` receives minutes.
 
     Sheet matching: if the template workbook contains a sheet whose name matches
     ``sheet_name`` in *groups*, that sheet is filled with data.  Unmatched sheets
@@ -906,7 +1011,7 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
         # Sort data rows by (date, battery_type)
         sorted_keys = sorted(date_type_map.keys(), key=lambda k: (k[0], k[1]))
 
-        # Find the PERF_ROWS template row
+        # ── Mode A: find the PERF_ROWS template row ───────────────────────────
         perf_row_idx: int | None = None
         for row in ws.iter_rows():
             for cell in row:
@@ -944,6 +1049,111 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                     if isinstance(raw, str):
                         raw = raw.replace("{{#PERF_ROWS}}", "").strip()
                     target_cell.value = _interpolate_cell(raw, ctx) if raw else raw
+
+        else:
+            # ── Mode B: date-based cell lookup ────────────────────────────────
+            # Step 1: locate the template tag row — the first row that contains
+            #   {{TYPE}}, {{RESULT_N}}, or {{RATE_N}} in any cell.
+            type_col: int | None = None
+            result_cols: dict[int, int] = {}   # N → column index
+            rate_cols: dict[int, int] = {}     # N → column index
+            tag_row_idx: int | None = None
+
+            for row in ws.iter_rows():
+                for cell in row:
+                    if not isinstance(cell.value, str):
+                        continue
+                    v = cell.value.strip()
+                    if v == "{{TYPE}}":
+                        type_col = cell.column
+                        tag_row_idx = cell.row
+                    m = re.fullmatch(r"\{\{RESULT_(\d+)\}\}", v)
+                    if m:
+                        result_cols[int(m.group(1))] = cell.column
+                        tag_row_idx = cell.row
+                    m = re.fullmatch(r"\{\{RATE_(\d+)\}\}", v)
+                    if m:
+                        rate_cols[int(m.group(1))] = cell.column
+                        tag_row_idx = cell.row
+                if tag_row_idx is not None:
+                    break  # only scan up to the first tagged row
+
+            if tag_row_idx is not None and (type_col is not None or result_cols):
+                # Step 2: build fdfs → (result_col, rate_col, header_text) map.
+                # Scan all rows above the tag row for each RESULT column and
+                # try to match the cell text against a known fdfs label.  This
+                # handles templates where a merged fdfs label sits in one row
+                # (e.g. row 2) while a sub-header ("Kết quả") occupies row 3.
+                fdfs_col_map: dict[str, tuple[int | None, int | None, str]] = {}
+                for n, r_col in result_cols.items():
+                    ur_col = rate_cols.get(n)
+                    matched_fdfs, header = _perf_find_fdfs_for_col(ws, r_col, tag_row_idx, all_fdfs)
+                    if matched_fdfs and matched_fdfs not in fdfs_col_map:
+                        fdfs_col_map[matched_fdfs] = (r_col, ur_col, header)
+                # Fall back to index-based mapping for any fdfs still unmatched
+                for j, fdfs_lbl in enumerate(all_fdfs):
+                    if fdfs_lbl not in fdfs_col_map:
+                        r_col = result_cols.get(j)
+                        ur_col = rate_cols.get(j)
+                        header = _perf_col_header(ws, r_col, tag_row_idx) if r_col else ""
+                        fdfs_col_map[fdfs_lbl] = (r_col, ur_col, header)
+
+                # Step 3: build date → row index map from column A
+                date_row_map: dict[str, int] = {}
+                for drow in ws.iter_rows(min_col=1, max_col=1):
+                    for dcell in drow:
+                        ds = _perf_normalize_date(dcell.value)
+                        if ds:
+                            date_row_map[ds] = dcell.row
+
+                # Step 4: write data to the matching date rows
+                for row_key in sorted_keys:
+                    date_str, btype = row_key
+                    row_data = date_type_map[row_key]
+                    norm_date = _perf_normalize_date(date_str) or date_str.replace("/", "-")
+                    target_row = date_row_map.get(norm_date)
+                    if target_row is None:
+                        continue
+
+                    if type_col is not None:
+                        ws.cell(row=target_row, column=type_col).value = btype
+
+                    for fdfs_lbl, (r_col, ur_col, header) in fdfs_col_map.items():
+                        entry = row_data.get(fdfs_lbl, {})
+                        avg_h = entry.get("avg_hours")
+                        avg_m = entry.get("avg_minutes")
+                        ur = entry.get("uniform_rate")
+
+                        if r_col is not None:
+                            # Choose unit from the column header:
+                            #   (h)  → hours   (e.g. "10ohm 24h/d-0.9V(h)")
+                            #   (m)  → minutes (e.g. "1000mA 24h/d-0.9V(m)")
+                            #   (t)  → minutes ("thời gian" / time in minutes)
+                            h_lower = header.lower()
+                            if h_lower.endswith("(m)") or h_lower.endswith("(t)"):
+                                val = avg_m if avg_m is not None else ""
+                            else:
+                                val = avg_h if avg_h is not None else ""
+                            ws.cell(row=target_row, column=r_col).value = val
+                        if ur_col is not None:
+                            ws.cell(row=target_row, column=ur_col).value = ur if ur is not None else ""
+
+                # Step 5: clear template tags from the tag row if that row's
+                # date was not among the exported data dates (so stale tags
+                # don't appear in the output).
+                exported_dates = {
+                    _perf_normalize_date(ds) or ds.replace("/", "-")
+                    for ds, _ in sorted_keys
+                }
+                tag_row_date = _perf_normalize_date(ws.cell(row=tag_row_idx, column=1).value)
+                if tag_row_date not in exported_dates:
+                    for trow in ws.iter_rows(min_row=tag_row_idx, max_row=tag_row_idx):
+                        for tcell in trow:
+                            if isinstance(tcell.value, str) and (
+                                "{{TYPE}}" in tcell.value
+                                or re.search(r"\{\{(RESULT|RATE)_\d+\}\}", tcell.value)
+                            ):
+                                tcell.value = ""
 
         # Replace {{PERF_SHEET_NAME}} anywhere in the sheet
         for row in ws.iter_rows():
@@ -2738,36 +2948,77 @@ def _compute_perf_values(
     tav_map: dict[int, list[dict]],
     batys: list[int],
 ) -> dict:
-    """Compute average hours at endpoint voltage and uniform rate for a battery group.
+    """Compute average discharge time at endpoint voltage and uniform rate.
 
-    Returns {"avg_hours": float|None, "uniform_rate": float|None}.
+    Returns a dict with keys:
+      ``avg_hours``    — average time in hours (None when unavailable)
+      ``avg_minutes``  — average time in minutes (None when unavailable)
+      ``uniform_rate`` — uniform rate % (None when < 2 batteries)
+
+    When *endpoint_voltage_str* is empty or cannot be parsed the function
+    falls back to the **minimum (last) voltage threshold** present in the
+    time-at-voltage data, which corresponds to the final milestone of
+    "The Duration of Series Designated Voltage".
     """
-    try:
-        ep = float(str(endpoint_voltage_str or "").strip().split()[0])
-    except (IndexError, TypeError, ValueError):
-        return {"avg_hours": None, "uniform_rate": None}
+    # Parse endpoint voltage, stripping any unit character (e.g. "0.9V" → 0.9)
+    ep: Optional[float] = None
+    raw_ep = str(endpoint_voltage_str or "").strip()
+    if raw_ep:
+        token = raw_ep.split()[0] if raw_ep.split() else raw_ep
+        # Remove all trailing non-numeric chars (e.g. "mV", "Volts" → numeric part)
+        token = re.sub(r"[^0-9.\-]+$", "", token)
+        try:
+            ep = float(token)
+        except (TypeError, ValueError):
+            ep = None
 
+    # Fallback: use the minimum voltage seen across all TAV rows (last milestone)
+    if ep is None:
+        all_sj: set[float] = set()
+        for b in batys:
+            for row in (tav_map.get(b) or []):
+                sj = row.get("sj") or row.get("SJ")
+                try:
+                    all_sj.add(float(sj))
+                except (TypeError, ValueError):
+                    pass
+        if all_sj:
+            ep = min(all_sj)
+        else:
+            return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+
+    # For each battery find the TAV row whose voltage is closest to ep.
+    # A tolerance of 0.05 V is used to handle minor rounding differences
+    # between the stored endpoint voltage (e.g. "0.9") and the TAV row
+    # voltage thresholds (which may be stored as 0.90, 0.900, etc.).
+    TOLERANCE = 0.05
     minutes_list: list[float] = []
     for b in batys:
         rows = tav_map.get(b) or []
+        best_mins: Optional[float] = None
+        best_diff: float = float("inf")
         for row in rows:
             sj = row.get("sj") or row.get("SJ")
             try:
-                if sj is not None and abs(float(sj) - ep) < 0.001:
+                diff = abs(float(sj) - ep)
+                if diff < best_diff:
                     mins = row.get("minutes") or row.get("MINUTES")
                     if mins is not None:
                         f = float(mins)
                         if not math.isnan(f) and f >= 0:
-                            minutes_list.append(f)
-                    break
+                            best_diff = diff
+                            best_mins = f
             except (TypeError, ValueError):
                 pass
+        if best_mins is not None and best_diff <= TOLERANCE:
+            minutes_list.append(best_mins)
 
     if not minutes_list:
-        return {"avg_hours": None, "uniform_rate": None}
+        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
 
     avg_min = sum(minutes_list) / len(minutes_list)
     avg_hours = round(avg_min / 60.0, 3)
+    avg_minutes = round(avg_min, 3)
 
     uniform_rate: Optional[float] = None
     if len(minutes_list) >= 2:
@@ -2776,7 +3027,7 @@ def _compute_perf_values(
         if avg_min > 0:
             uniform_rate = round((1.0 - (max_t - min_t) / avg_min) * 100.0, 2)
 
-    return {"avg_hours": avg_hours, "uniform_rate": uniform_rate}
+    return {"avg_hours": avg_hours, "avg_minutes": avg_minutes, "uniform_rate": uniform_rate}
 
 
 def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901

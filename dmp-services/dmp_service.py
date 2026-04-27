@@ -2052,9 +2052,15 @@ async def upload_dm2000_perf_template(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
     # Extract only the basename (no directory components)
-    safe_name = Path(file.filename).name
-    if not _is_valid_template_name(safe_name):
-        raise HTTPException(status_code=400, detail="Invalid file name")
+    raw_name = Path(file.filename).name
+    # Sanitize: replace any characters not in [A-Za-z0-9_-] in the stem with underscores
+    stem = raw_name[:-5]
+    sanitized_stem = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)
+    # Remove consecutive underscores and strip leading/trailing underscores
+    sanitized_stem = re.sub(r'_+', '_', sanitized_stem).strip('_')
+    if not sanitized_stem:
+        sanitized_stem = "template"
+    safe_name = sanitized_stem + ".xlsx"
     templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
     templates_dir.mkdir(parents=True, exist_ok=True)
     # Re-join using only the validated basename to prevent any path traversal

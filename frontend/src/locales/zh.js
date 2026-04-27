@@ -541,6 +541,7 @@ export default {
   dm2000StartDate: '开始日期',
   dm2000Type: '电池型号',
   dm2000Name: '批次名称',
+  dm2000File: '文件',
   dm2000DisCondition: '放电条件',
   dm2000Duration: '时长',
   dm2000UnifRate: '一致性',

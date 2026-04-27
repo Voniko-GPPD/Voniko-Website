@@ -55,10 +55,12 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
 
   const columns = [
     {
-      title: '#',
-      key: 'idx',
-      width: 60,
-      render: (_v, _r, i) => (pagination.current - 1) * pagination.pageSize + i + 1,
+      title: t('dm2000File'),
+      dataIndex: 'archname',
+      key: 'archname_file',
+      width: 120,
+      ellipsis: true,
+      render: (value) => value || '-',
     },
     { title: t('dm2000StartDate'), dataIndex: 'startdate', key: 'startdate', width: 140 },
     { title: t('dm2000Type'), dataIndex: 'dcxh', key: 'dcxh', width: 120 },
@@ -66,14 +68,13 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     {
       title: t('dm2000DisCondition'),
       key: 'dis_condition',
-      width: 180,
+      width: 240,
       render: (_, record) => {
-        const resistance = record.load_resistance != null && record.load_resistance !== '' ? `${record.load_resistance} ohm` : '';
-        const pattern = record.fdfs != null && record.fdfs !== '' ? String(record.fdfs) : '';
-        const endpoint = record.endpoint_voltage != null && record.endpoint_voltage !== '' ? `to ${record.endpoint_voltage}V` : '';
-        const rightPart = [pattern, endpoint].filter(Boolean).join(' ');
-        const parts = [resistance, rightPart].filter(Boolean);
-        return parts.length > 0 ? parts.join(',') : '-';
+        if (record.fdfs?.trim()) return String(record.fdfs);
+        const resistance = record.load_resistance?.trim() ? `${record.load_resistance} ohm` : '';
+        const endpoint = record.endpoint_voltage?.trim() ? `to ${record.endpoint_voltage}V` : '';
+        const parts = [resistance, endpoint].filter(Boolean);
+        return parts.length > 0 ? parts.join(', ') : '-';
       },
     },
     { title: t('dm2000Duration'), dataIndex: 'duration', key: 'duration', width: 120 },
@@ -83,7 +84,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160 },
     { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 140 },
     { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160 },
-    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 280, render: (value) => value || '-' },
+    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 300, render: (value) => value || '-' },
   ];
 
   return (

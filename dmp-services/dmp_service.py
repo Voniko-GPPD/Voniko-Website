@@ -45,6 +45,7 @@ DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
 WATCH_INTERVAL_SECONDS: int = 5
 # Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
 MAX_BATTERY_NUMBER: int = 99
+_EXCEL_MAX_SHEET_NAME: int = 31  # Excel sheet names are capped at 31 characters
 
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
@@ -945,11 +946,11 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # Whole-word boundary check — prevents "10ohm" from matching "100ohm".
     # A word boundary here means the match is not immediately preceded or
     # followed by an alphanumeric character or a forward-slash.
-    _WB = r'(?<![0-9A-Za-z/])'
-    _WE = r'(?![0-9A-Za-z/])'
+    _wb = r'(?<![0-9A-Za-z/])'
+    _we = r'(?![0-9A-Za-z/])'
 
     def _whole_word(needle: str, haystack: str) -> bool:
-        return bool(re.search(_WB + re.escape(needle) + _WE, haystack))
+        return bool(re.search(_wb + re.escape(needle) + _we, haystack))
 
     if _whole_word(f, h) or _whole_word(h, f):
         return True
@@ -1007,7 +1008,7 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
 
     for sheet_name_key, date_type_map in groups.items():
         # Resolve the first candidate that exists in the workbook.
-        candidates = [c.strip() for c in sheet_name_key.split("|") if c.strip()]
+        candidates = [s for c in sheet_name_key.split("|") if (s := c.strip())]
         sheet_name = next((c for c in candidates if c in wb.sheetnames), None)
         if sheet_name is None:
             continue
@@ -3088,7 +3089,7 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
 
     for sheet_name_key, date_type_map in groups.items():
         # Use the first candidate (before any "|") as the sheet title
-        sheet_name = sheet_name_key.split("|")[0].strip()[:31]
+        sheet_name = sheet_name_key.split("|")[0].strip()[:_EXCEL_MAX_SHEET_NAME]
         ws = wb.create_sheet(title=sheet_name)
 
         # Collect all unique fdfs labels in this sheet (sorted for consistency)
@@ -3278,20 +3279,20 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         # Multiple candidates are stored "|"-joined so _render_perf_template and
         # _build_perf_workbook can try them in order.
         if entry.sheet_name:
-            sheet_name = entry.sheet_name.strip()[:31]
+            sheet_name = entry.sheet_name.strip()[:_EXCEL_MAX_SHEET_NAME]
         else:
             seen_cands: set[str] = set()
             raw_cands: list[str] = []
             for suffix in (trademark, serialno, manufacturer_db):
                 if suffix:
-                    cand = f"{dcxh} {suffix}".strip()[:31] if dcxh else suffix[:31]
+                    cand = f"{dcxh} {suffix}".strip()[:_EXCEL_MAX_SHEET_NAME] if dcxh else suffix[:_EXCEL_MAX_SHEET_NAME]
                     if cand and cand not in seen_cands:
                         seen_cands.add(cand)
                         raw_cands.append(cand)
-            if dcxh and dcxh[:31] not in seen_cands:
-                raw_cands.append(dcxh[:31])
+            if dcxh and dcxh[:_EXCEL_MAX_SHEET_NAME] not in seen_cands:
+                raw_cands.append(dcxh[:_EXCEL_MAX_SHEET_NAME])
             if not raw_cands:
-                raw_cands = [entry.archname[:31]]
+                raw_cands = [entry.archname[:_EXCEL_MAX_SHEET_NAME]]
             sheet_name = "|".join(raw_cands)
 
         # Resolve battery list

@@ -456,7 +456,9 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
   const [sotMax, sotMin, sotAvg] = rowAgg((b) => safeNum(getSot(b)), 3);
 
   /** Compute Uniform Rate = (1 - (Max - Min) / Avg) × 100% at endpoint voltage.
-   *  Falls back to the stored archiveFields.unifrate when time data is unavailable
+   *  When the user has selected a specific Duration End-point, that voltage is used.
+   *  Falls back to the stored archiveFields.endpoint_voltage when no end-point is
+   *  selected ("All"), and to archiveFields.unifrate when time data is unavailable
    *  or when the stored value is already a percentage (> 1 after stripping %). */
   const computedUnifRate = useMemo(() => {
     const stored = archiveFields.unifrate || '';
@@ -465,8 +467,12 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
     const storedIsPct = storedNum != null && !(Number.isInteger(storedNum) && storedNum >= 0 && storedNum <= 9);
 
     if (!storedIsPct) {
-      const epRaw = archiveFields.endpoint_voltage || '';
-      const ep = safeNum(typeof epRaw === 'string' ? epRaw.split(' ')[0] : epRaw);
+      // Prefer the user-selected end-point; fall back to the archive's endpoint_voltage.
+      const ep = reportEndpoint != null
+        ? reportEndpoint
+        : safeNum(typeof (archiveFields.endpoint_voltage || '') === 'string'
+            ? (archiveFields.endpoint_voltage || '').split(' ')[0]
+            : archiveFields.endpoint_voltage);
       if (ep != null) {
         const times = previewBatys.map((b) => {
           const rows = timeAtVoltMap[b];
@@ -492,8 +498,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
       return stored || '-';
     }
     return storedNum != null ? `${storedNum.toFixed(2)} %` : stored;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [archiveFields.unifrate, archiveFields.endpoint_voltage, previewBatys, timeAtVoltMap]);
+  }, [archiveFields.unifrate, archiveFields.endpoint_voltage, previewBatys, timeAtVoltMap, reportEndpoint]);
 
   return (
     <div style={{ overflowX: 'auto', fontFamily: 'Arial, sans-serif' }}>

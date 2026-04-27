@@ -238,7 +238,13 @@ export default function DM2000ExportTab({ stationId, selection }) {
     return () => { active = false; controller.abort(); };
   }, [stationId, selection?.archname, previewBatys]);
 
-  const setField = (key) => (e) => setArchiveFields((prev) => ({ ...prev, [key]: e.target.value }));
+  // Memoized count of valid perf entries (archname + battery_type filled)
+  const validPerfEntryCount = useMemo(
+    () => perfEntries.filter((e) => e.archname.trim() && e.battery_type).length,
+    [perfEntries],
+  );
+
+
 
   // --- Perf entry handlers ---
   const handlePerfAddFromSelection = () => {
@@ -246,7 +252,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     setPerfEntries((prev) => [
       ...prev,
       {
-        id: Date.now(),
+        id: Date.now() + Math.random(),
         archname: selection.archname,
         battery_type: detectBatteryType(selection.dcxh),
         sheet_name: '',
@@ -258,7 +264,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
   const handlePerfAddManual = () => {
     setPerfEntries((prev) => [
       ...prev,
-      { id: Date.now(), archname: '', battery_type: '', sheet_name: '', _autoSheet: '' },
+      { id: Date.now() + Math.random(), archname: '', battery_type: '', sheet_name: '', _autoSheet: '' },
     ]);
   };
 
@@ -634,14 +640,14 @@ export default function DM2000ExportTab({ stationId, selection }) {
           {perfEntries.length > 0 && (
             <Space direction="vertical" size={4}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {t('dm2000PerfReportInfo', { count: perfEntries.filter((e) => e.archname.trim() && e.battery_type).length })}
+                {t('dm2000PerfReportInfo', { count: validPerfEntryCount })}
                 {perfTemplateName ? ` — ${t('dm2000PerfTemplateCurrent', { name: perfTemplateName })}` : ` — ${t('dm2000PerfTemplateNone')}`}
               </Typography.Text>
               <Button
                 type="primary"
                 onClick={handlePerfGenerate}
                 loading={perfDownloading}
-                disabled={!stationId || perfEntries.every((e) => !e.archname.trim() || !e.battery_type)}
+                disabled={!stationId || validPerfEntryCount === 0}
               >
                 {t('dm2000PerfReportGenerate')}
               </Button>

@@ -89,7 +89,11 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
       render: (v) => v || '-',
     },
     { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
-    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 280, ellipsis: true, render: (v) => v || '-' },
+    { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 120, render: (v) => v || '-' },
+    { title: t('dm2000MadeDate'), dataIndex: 'madedate', key: 'madedate', width: 110, render: (v) => v || '-' },
+    { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 110, render: (v) => v || '-' },
+    { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 140, ellipsis: true, render: (v) => v || '-' },
+    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 320, ellipsis: true, render: (v) => v || '-' },
   ];
 
   return (

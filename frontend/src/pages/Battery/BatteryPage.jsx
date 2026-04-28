@@ -1045,30 +1045,30 @@ export default function BatteryPage() {
 
   const chartOption = {
     animation: false,
-    backgroundColor: 'transparent',
+    backgroundColor: '#141414',
     grid: { top: 36, right: 24, bottom: 40, left: 56 },
     legend: {
       top: 4,
       data: ['OCV', 'CCV'],
       selected: legendSelected,
-      textStyle: { color: '#595959', fontSize: 12 },
+      textStyle: { color: '#d0d0d0', fontSize: 12 },
     },
     tooltip: { trigger: 'axis', formatter: (params) => params.map(p => `${p.marker}${p.seriesName}: ${p.value[1]?.toFixed(3)} V @ ${p.value[0]}s`).join('<br/>') },
     xAxis: {
       type: 'value',
       name: 's',
       nameLocation: 'end',
-      axisLabel: { color: '#595959' },
-      axisLine: { lineStyle: { color: '#d9d9d9' } },
-      splitLine: { lineStyle: { color: '#f0f0f0' } },
+      axisLabel: { color: '#aaa' },
+      axisLine: { lineStyle: { color: '#444' } },
+      splitLine: { lineStyle: { color: '#2a2a2a' } },
     },
     yAxis: {
       type: 'value',
       name: 'V',
       nameLocation: 'end',
-      axisLabel: { color: '#595959' },
-      axisLine: { lineStyle: { color: '#d9d9d9' } },
-      splitLine: { lineStyle: { color: '#f0f0f0' } },
+      axisLabel: { color: '#aaa' },
+      axisLine: { lineStyle: { color: '#444' } },
+      splitLine: { lineStyle: { color: '#2a2a2a' } },
       ...yAxisScale,
     },
     dataZoom: autoScroll
@@ -1929,45 +1929,38 @@ export default function BatteryPage() {
             >
               {/* Row 1: mode selector + live buffer + read-only value cells */}
               <Row gutter={[16, 12]} align="middle" wrap>
-                {/* Mode toggle */}
+                {/* Mode toggle + live buffer from caliper */}
                 <Col xs={24} sm="auto">
                   <Space direction="vertical" size={4}>
                     <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
                       {t('batteryCaliperMode')}
                     </span>
-                    <Radio.Group
-                      value={caliperMode}
-                      onChange={(e) => setCaliperMode(e.target.value)}
-                      buttonStyle="solid"
-                      size="small"
-                    >
-                      <Radio.Button value="dia">{t('batteryCaliperModeDia')}</Radio.Button>
-                      <Radio.Button value="hei">{t('batteryCaliperModeHei')}</Radio.Button>
-                    </Radio.Group>
-                  </Space>
-                </Col>
-
-                {/* Live buffer from caliper */}
-                <Col xs={24} sm="auto">
-                  <Space direction="vertical" size={4}>
-                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      {t('batteryCaliperBuffer')}
-                    </span>
-                    <Input
-                      ref={caliperInputRef}
-                      size="small"
-                      value={caliperBuffer}
-                      placeholder="Đang chờ thước kẹp..."
-                      style={{
-                        width: 170,
-                        fontFamily: 'monospace',
-                        background: caliperBuffer ? '#f6ffed' : '#fafafa',
-                        borderColor: caliperBuffer ? '#52c41a' : '#d9d9d9',
-                        color: caliperBuffer ? '#389e0d' : '#8c8c8c',
-                      }}
-                      readOnly
-                      tabIndex={-1}
-                    />
+                    <Space size={8}>
+                      <Radio.Group
+                        value={caliperMode}
+                        onChange={(e) => setCaliperMode(e.target.value)}
+                        buttonStyle="solid"
+                        size="small"
+                      >
+                        <Radio.Button value="dia">{t('batteryCaliperModeDia')}</Radio.Button>
+                        <Radio.Button value="hei">{t('batteryCaliperModeHei')}</Radio.Button>
+                      </Radio.Group>
+                      <Input
+                        ref={caliperInputRef}
+                        size="small"
+                        value={caliperBuffer}
+                        placeholder="Đang chờ thước kẹp..."
+                        style={{
+                          width: 170,
+                          fontFamily: 'monospace',
+                          background: caliperBuffer ? '#f6ffed' : '#fafafa',
+                          borderColor: caliperBuffer ? '#52c41a' : '#d9d9d9',
+                          color: caliperBuffer ? '#389e0d' : '#8c8c8c',
+                        }}
+                        readOnly
+                        tabIndex={-1}
+                      />
+                    </Space>
                   </Space>
                 </Col>
 
@@ -2038,11 +2031,6 @@ export default function BatteryPage() {
                   </Tooltip>
                 </Col>
               </Row>
-
-              {/* Hint text */}
-              <div style={{ marginTop: 8, fontSize: 11, color: '#555' }}>
-                💡 {t('batteryCaliperHint')}
-              </div>
 
               {/* Action buttons */}
               <div style={{ marginTop: 10 }}>

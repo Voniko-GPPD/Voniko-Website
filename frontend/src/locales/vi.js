@@ -396,6 +396,7 @@ export default {
   batteryRetestRequired: 'Yêu cầu đo lại',
   batteryRetestNow: 'Đo lại ngay',
   batterySaveTemp: 'Lưu tạm thời',
+  batteryFailedNTimes: 'Đã đo {count} lần, không đạt',
   batteryFillRequiredFields: 'Vui lòng nhập đầy đủ: Mã đơn hàng, Tiêu chuẩn OCV và Tiêu chuẩn CCV',
   batteryClearSessionConfirmTitle: 'Xóa phiên làm việc?',
   batteryClearSessionConfirmContent: 'Toàn bộ kết quả đo trong phiên này sẽ bị xóa. Bạn có chắc không?',

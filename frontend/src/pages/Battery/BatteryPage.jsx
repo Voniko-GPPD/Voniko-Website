@@ -294,6 +294,10 @@ export default function BatteryPage() {
   const pendingNewSessionRef = useRef(false);
   // Holds a record to retest after the current test stops (used by "Đo lại ngay")
   const pendingRetestRecordRef = useRef(null);
+  // Flag: after a retest completes, auto-restart the full test from the next battery
+  const autoRestartAfterRetestRef = useRef(false);
+  // Maps batteryId -> number of retests done (for "đo X lần không đạt" display)
+  const retestCountMapRef = useRef({});
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -495,6 +499,21 @@ export default function BatteryPage() {
           // Reset caliper values after saving to record
           setCaliperDia('');
           setCaliperHei('');
+          // When a retest result comes in, check if it's still out of spec
+          if (msg.record.is_retest) {
+            const rec = enrichedRecord;
+            const spec_ocv = ocvSpecRef.current;
+            const spec_ccv = ccvSpecRef.current;
+            const ocvBad = spec_ocv && rec.ocv != null && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
+            const ccvBad = spec_ccv && rec.ccv != null && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
+            if (ocvBad || ccvBad) {
+              const retryCount = retestCountMapRef.current[rec.id] || 0;
+              const parts = [];
+              if (ocvBad) parts.push(`OCV ${rec.ocv.toFixed(3)}V (spec: ${spec_ocv.min} - ${spec_ocv.max})`);
+              if (ccvBad) parts.push(`CCV ${rec.ccv.toFixed(3)}V (spec: ${spec_ccv.min} - ${spec_ccv.max})`);
+              setOutOfSpecModal({ record: rec, parts, retryCount });
+            }
+          }
         }
         break;
 
@@ -524,6 +543,8 @@ export default function BatteryPage() {
         setReadingsByBattery({});
         setRetestingBatteryId(null);
         pendingRetestRecordRef.current = null;
+        autoRestartAfterRetestRef.current = false;
+        retestCountMapRef.current = {};
         notification.success({ message: t('batterySessionCleared') });
         break;
 
@@ -638,6 +659,17 @@ export default function BatteryPage() {
       handleRetest(record);
     }
   }, [running, handleRetest]);
+
+  // After a retest completes, auto-restart the full test from the next battery.
+  // Only fires when: test is stopped, auto-restart flag is set, no other retest is pending,
+  // and no out-of-spec modal is blocking (if the modal is shown the restart waits for user choice).
+  useEffect(() => {
+    if (!running && autoRestartAfterRetestRef.current && !pendingRetestRecordRef.current && outOfSpecModal === null) {
+      autoRestartAfterRetestRef.current = false;
+      setRetestingBatteryId(null);
+      sendMsg({ action: 'start', payload: buildParams() });
+    }
+  }, [running, outOfSpecModal, sendMsg, buildParams]);
 
   // Store latest chart data in refs so saveCurrentOrderSnapshot can access without stale closure
   const chartSeriesByBatteryRef = useRef(chartSeriesByBattery);
@@ -1184,6 +1216,14 @@ export default function BatteryPage() {
     return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
   }, [ccvMin, ccvMax]);
 
+  // Refs for ocvSpec/ccvSpec and running — used inside WS callbacks to avoid stale closures
+  const runningRef = useRef(running);
+  useEffect(() => { runningRef.current = running; }, [running]);
+  const ocvSpecRef = useRef(ocvSpec);
+  useEffect(() => { ocvSpecRef.current = ocvSpec; }, [ocvSpec]);
+  const ccvSpecRef = useRef(ccvSpec);
+  useEffect(() => { ccvSpecRef.current = ccvSpec; }, [ccvSpec]);
+
   const recordsMap = React.useMemo(() => {
     const map = {};
     records.forEach((r) => { map[String(r.id)] = r; });
@@ -1394,14 +1434,18 @@ export default function BatteryPage() {
       if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.min} - ${ocvSpec.max})`);
       if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.min} - ${ccvSpec.max})`);
       // Show blocking modal instead of dismissible notification
-      setOutOfSpecModal({ record: latest, parts });
+      setOutOfSpecModal({ record: latest, parts, retryCount: 0 });
+      // Bug fix: stop the test immediately so it doesn't advance to the next battery
+      if (runningRef.current) {
+        sendMsg({ action: 'stop' });
+      }
     }
     // Auto-scroll the results table to the latest record
     if (resultsTableRef.current) {
       const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
       if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
     }
-  }, [records, ocvSpec, ccvSpec, t]);
+  }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
   useEffect(() => {
     try {
@@ -2670,6 +2714,10 @@ export default function BatteryPage() {
             danger
             onClick={() => {
               const record = outOfSpecModal.record;
+              // Increment retry count for this battery
+              retestCountMapRef.current[record.id] = (retestCountMapRef.current[record.id] || 0) + 1;
+              // After retest completes, auto-restart the full test from the next battery
+              autoRestartAfterRetestRef.current = true;
               setOutOfSpecModal(null);
               if (running) {
                 // Stop current test then retest once stopped
@@ -2684,13 +2732,23 @@ export default function BatteryPage() {
           </Button>,
           <Button
             key="save-temp"
-            onClick={() => setOutOfSpecModal(null)}
+            onClick={() => {
+              setOutOfSpecModal(null);
+              // Restart the full test from the next battery (test was stopped when modal appeared)
+              setRetestingBatteryId(null);
+              sendMsg({ action: 'start', payload: buildParams() });
+            }}
           >
             {t('batterySaveTemp')}
           </Button>,
         ]}
       >
         <p>{outOfSpecModal?.parts?.join(', ')}</p>
+        {outOfSpecModal?.retryCount > 0 && (
+          <p style={{ color: '#ff4d4f', marginTop: 4 }}>
+            {t('batteryFailedNTimes', { count: outOfSpecModal.retryCount })}
+          </p>
+        )}
       </Modal>
     </div>
   );

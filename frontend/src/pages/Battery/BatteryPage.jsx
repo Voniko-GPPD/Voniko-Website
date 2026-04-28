@@ -504,8 +504,8 @@ export default function BatteryPage() {
             const rec = enrichedRecord;
             const spec_ocv = ocvSpecRef.current;
             const spec_ccv = ccvSpecRef.current;
-            const ocvBad = spec_ocv && rec.ocv != null && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
-            const ccvBad = spec_ccv && rec.ccv != null && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
+            const ocvBad = spec_ocv && rec.ocv !== null && rec.ocv !== undefined && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
+            const ccvBad = spec_ccv && rec.ccv !== null && rec.ccv !== undefined && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
             if (ocvBad || ccvBad) {
               const retryCount = retestCountMapRef.current[rec.id] || 0;
               const parts = [];

@@ -37,8 +37,6 @@ function getStatusColor(text) {
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
-const OCV_TOLERANCE = 0.003;
-const CCV_TOLERANCE = 0.010;
 const Y_AXIS_PADDING_RATIO = 0.1;
 const MIN_Y_AXIS_PADDING = 0.01;
 const ZOOM_MODAL_TABLE_SCROLL_Y = 'calc(80vh - 120px)';
@@ -153,8 +151,18 @@ export default function BatteryPage() {
   const [kCoeff, setKCoeff] = useState(1.0);
   const [batteryType, setBatteryType] = useState(() => getInitialSession().batteryType || 'LR6');
   const [productLine, setProductLine] = useState(() => getInitialSession().productLine || 'UD+');
-  const [ocvCenter, setOcvCenter] = useState(() => getInitialSession().ocvCenter ?? null);
-  const [ccvCenter, setCcvCenter] = useState(() => getInitialSession().ccvCenter ?? null);
+  const [ocvMin, setOcvMin] = useState(() => getInitialSession().ocvMin ?? null);
+  const [ocvMax, setOcvMax] = useState(() => getInitialSession().ocvMax ?? null);
+  const [ccvMin, setCcvMin] = useState(() => getInitialSession().ccvMin ?? null);
+  const [ccvMax, setCcvMax] = useState(() => getInitialSession().ccvMax ?? null);
+  const [presets, setPresets] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('battery_presets') || '{}'); } catch { return {}; }
+  });
+  const [setupForm, setSetupForm] = useState({
+    batteryType: 'LR6', productLine: 'UD+',
+    resistance: 3.9, ocvTime: 1.0, loadTime: 0.3, kCoeff: 1.0,
+    ocvMin: null, ocvMax: null, ccvMin: null, ccvMax: null,
+  });
 
   // Display
   const [statusText, setStatusText] = useState('Waiting...');
@@ -349,9 +357,11 @@ export default function BatteryPage() {
     coeff: parseFloat(kCoeff),
     battery_type: batteryType,
     product_line: productLine,
-    ocv_standard: ocvCenter,
-    ccv_standard: ccvCenter,
-  }), [orderId, testDate, resistance, ocvTime, loadTime, kCoeff, batteryType, productLine, ocvCenter, ccvCenter]);
+    ocv_standard_min: ocvMin,
+    ocv_standard_max: ocvMax,
+    ccv_standard_min: ccvMin,
+    ccv_standard_max: ccvMax,
+  }), [orderId, testDate, resistance, ocvTime, loadTime, kCoeff, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax]);
 
   const sendMsg = useCallback((msg) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -978,14 +988,14 @@ export default function BatteryPage() {
     {
       title: t('batteryOcv'), dataIndex: 'ocv', key: 'ocv', width: 90,
       render: (v) => {
-        const bad = ocvSpec && v != null && Math.abs(v - ocvSpec.center) > ocvSpec.tolerance;
+        const bad = ocvSpec && v != null && (v < ocvSpec.min || v > ocvSpec.max);
         return <span style={{ color: bad ? '#ff4d4f' : undefined, fontWeight: bad ? 700 : undefined }}>{v != null ? v.toFixed(3) : '-'}</span>;
       },
     },
     {
       title: t('batteryCcv'), dataIndex: 'ccv', key: 'ccv', width: 90,
       render: (v) => {
-        const bad = ccvSpec && v != null && Math.abs(v - ccvSpec.center) > ccvSpec.tolerance;
+        const bad = ccvSpec && v != null && (v < ccvSpec.min || v > ccvSpec.max);
         return <span style={{ color: bad ? '#ff4d4f' : undefined, fontWeight: bad ? 700 : undefined }}>{v != null ? v.toFixed(3) : '-'}</span>;
       },
     },
@@ -1024,14 +1034,54 @@ export default function BatteryPage() {
     },
   ];
 
+  // Preset handlers
+  const handleSavePreset = useCallback(() => {
+    if (!setupForm.batteryType || !setupForm.productLine) {
+      notification.warning({ message: 'Vui lòng chọn loại pin và dòng sản phẩm' });
+      return;
+    }
+    if (setupForm.ocvMin == null || setupForm.ocvMax == null || setupForm.ccvMin == null || setupForm.ccvMax == null) {
+      notification.warning({ message: t('batteryFillRequiredFields') });
+      return;
+    }
+    const key = `${setupForm.batteryType}_${setupForm.productLine}`;
+    const newPresets = {
+      ...presets,
+      [key]: {
+        batteryType: setupForm.batteryType,
+        productLine: setupForm.productLine,
+        resistance: setupForm.resistance,
+        ocvTime: setupForm.ocvTime,
+        loadTime: setupForm.loadTime,
+        kCoeff: setupForm.kCoeff,
+        ocvMin: setupForm.ocvMin,
+        ocvMax: setupForm.ocvMax,
+        ccvMin: setupForm.ccvMin,
+        ccvMax: setupForm.ccvMax,
+      },
+    };
+    setPresets(newPresets);
+    try { localStorage.setItem('battery_presets', JSON.stringify(newPresets)); } catch { }
+    notification.success({ message: t('batterySetupSaved') });
+  }, [setupForm, presets, t]);
+
+  const handleDeletePreset = useCallback((key) => {
+    const newPresets = { ...presets };
+    delete newPresets[key];
+    setPresets(newPresets);
+    try { localStorage.setItem('battery_presets', JSON.stringify(newPresets)); } catch { }
+  }, [presets]);
+
   const ocvSpec = React.useMemo(() => {
-    const v = parseFloat(ocvCenter);
-    return isNaN(v) ? null : { center: v, tolerance: OCV_TOLERANCE };
-  }, [ocvCenter]);
+    const min = parseFloat(ocvMin);
+    const max = parseFloat(ocvMax);
+    return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
+  }, [ocvMin, ocvMax]);
   const ccvSpec = React.useMemo(() => {
-    const v = parseFloat(ccvCenter);
-    return isNaN(v) ? null : { center: v, tolerance: CCV_TOLERANCE };
-  }, [ccvCenter]);
+    const min = parseFloat(ccvMin);
+    const max = parseFloat(ccvMax);
+    return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
+  }, [ccvMin, ccvMax]);
 
   const recordsMap = React.useMemo(() => {
     const map = {};
@@ -1235,12 +1285,12 @@ export default function BatteryPage() {
     prevRecordsLenRef.current = records.length;
     const latest = records[records.length - 1];
     if (!latest) return;
-    const ocvBad = ocvSpec && latest.ocv != null && Math.abs(latest.ocv - ocvSpec.center) > ocvSpec.tolerance;
-    const ccvBad = ccvSpec && latest.ccv != null && Math.abs(latest.ccv - ccvSpec.center) > ccvSpec.tolerance;
+    const ocvBad = ocvSpec && latest.ocv != null && (latest.ocv < ocvSpec.min || latest.ocv > ocvSpec.max);
+    const ccvBad = ccvSpec && latest.ccv != null && (latest.ccv < ccvSpec.min || latest.ccv > ccvSpec.max);
     if (ocvBad || ccvBad) {
       const parts = [];
-      if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.center}±${OCV_TOLERANCE})`);
-      if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.center}±${CCV_TOLERANCE})`);
+      if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.min} - ${ocvSpec.max})`);
+      if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.min} - ${ccvSpec.max})`);
       notification.error({
         message: `⚠️ Pin #${latest.id} ${t('batteryOutOfSpec')}`,
         description: `${parts.join(', ')} — ${t('batteryRetestRequired')}`,
@@ -1260,14 +1310,16 @@ export default function BatteryPage() {
         testDate: testDate ? testDate.format('YYYY-MM') : null,
         batteryType,
         productLine,
-        ocvCenter,
-        ccvCenter,
+        ocvMin,
+        ocvMax,
+        ccvMin,
+        ccvMax,
         chartSeriesByBattery,
         readingsByBattery,
       };
       localStorage.setItem('battery_session', JSON.stringify(sessionData));
     } catch { }
-  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvCenter, ccvCenter, chartSeriesByBattery, readingsByBattery]);
+  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax, chartSeriesByBattery, readingsByBattery]);
 
   useEffect(() => {
     try {
@@ -1305,8 +1357,25 @@ export default function BatteryPage() {
     }).catch(() => { });
   }, []);
 
+  // Auto-fill params from preset when batteryType/productLine changes
+  useEffect(() => {
+    const preset = presets[`${batteryType}_${productLine}`];
+    if (preset) {
+      setResistance(preset.resistance);
+      setOcvTime(preset.ocvTime);
+      setLoadTime(preset.loadTime);
+      setKCoeff(preset.kCoeff);
+      setOcvMin(preset.ocvMin);
+      setOcvMax(preset.ocvMax);
+      setCcvMin(preset.ccvMin);
+      setCcvMax(preset.ccvMax);
+    }
+  }, [batteryType, productLine, presets]);
+
   const inputsDisabled = !connected;
-  const canStart = connected && !running && orderId.trim() !== '' && testDate !== null && ocvCenter != null && ccvCenter != null;
+  const hasPreset = presets[`${batteryType}_${productLine}`] != null;
+  const paramsDisabled = inputsDisabled || hasPreset;
+  const canStart = connected && !running && orderId.trim() !== '' && testDate !== null && ocvMin != null && ocvMax != null && ccvMin != null && ccvMax != null;
 
   return (
     <div>
@@ -1392,6 +1461,7 @@ export default function BatteryPage() {
           items={[
             { key: 'test', label: t('batteryTestTab') },
             { key: 'history', label: t('batteryHistoryTab') },
+            { key: 'setup', label: t('batterySetupTab') },
           ]}
           style={{ marginBottom: 0 }}
         />
@@ -1489,6 +1559,11 @@ export default function BatteryPage() {
             {/* Parameters Card */}
             <Col xs={24} md={12} lg={14}>
               <Card title={t('batteryParameters')} size="small">
+                {hasPreset && (
+                  <div style={{ color: '#faad14', fontSize: 12, marginBottom: 8 }}>
+                    ℹ️ {t('batteryParamsLockedHint')}
+                  </div>
+                )}
                 <Row gutter={[8, 8]}>
                   <Col xs={24} sm={12}>
                     <Form.Item label={t('batteryOrderId')} style={{ marginBottom: 0 }}>
@@ -1524,7 +1599,7 @@ export default function BatteryPage() {
                       <InputNumber
                         value={resistance}
                         onChange={setResistance}
-                        disabled={inputsDisabled}
+                        disabled={paramsDisabled}
                         min={0.01}
                         step={0.01}
                         style={{ width: '100%' }}
@@ -1536,7 +1611,7 @@ export default function BatteryPage() {
                       <InputNumber
                         value={ocvTime}
                         onChange={setOcvTime}
-                        disabled={inputsDisabled}
+                        disabled={paramsDisabled}
                         min={0.1}
                         step={0.1}
                         style={{ width: '100%' }}
@@ -1548,7 +1623,7 @@ export default function BatteryPage() {
                       <InputNumber
                         value={loadTime}
                         onChange={setLoadTime}
-                        disabled={inputsDisabled}
+                        disabled={paramsDisabled}
                         min={0.1}
                         step={0.1}
                         style={{ width: '100%' }}
@@ -1560,7 +1635,7 @@ export default function BatteryPage() {
                       <InputNumber
                         value={kCoeff}
                         onChange={setKCoeff}
-                        disabled={inputsDisabled}
+                        disabled={paramsDisabled}
                         min={0}
                         step={0.01}
                         style={{ width: '100%' }}
@@ -1594,28 +1669,52 @@ export default function BatteryPage() {
                       </Select>
                     </Form.Item>
                   </Col>
-                  <Col xs={12} sm={12}>
+                  <Col xs={24} sm={12}>
                     <Form.Item label={t('batteryOcvStandard')} style={{ marginBottom: 0 }} required>
-                      <InputNumber
-                        value={ocvCenter}
-                        onChange={setOcvCenter}
-                        disabled={inputsDisabled}
-                        min={0}
-                        step={0.001}
-                        style={{ width: '100%' }}
-                      />
+                      <Space.Compact style={{ width: '100%' }}>
+                        <InputNumber
+                          value={ocvMin}
+                          onChange={setOcvMin}
+                          disabled={paramsDisabled}
+                          placeholder={t('from')}
+                          min={0}
+                          step={0.001}
+                          style={{ width: '50%' }}
+                        />
+                        <InputNumber
+                          value={ocvMax}
+                          onChange={setOcvMax}
+                          disabled={paramsDisabled}
+                          placeholder={t('to')}
+                          min={0}
+                          step={0.001}
+                          style={{ width: '50%' }}
+                        />
+                      </Space.Compact>
                     </Form.Item>
                   </Col>
-                  <Col xs={12} sm={12}>
+                  <Col xs={24} sm={12}>
                     <Form.Item label={t('batteryCcvStandard')} style={{ marginBottom: 0 }} required>
-                      <InputNumber
-                        value={ccvCenter}
-                        onChange={setCcvCenter}
-                        disabled={inputsDisabled}
-                        min={0}
-                        step={0.001}
-                        style={{ width: '100%' }}
-                      />
+                      <Space.Compact style={{ width: '100%' }}>
+                        <InputNumber
+                          value={ccvMin}
+                          onChange={setCcvMin}
+                          disabled={paramsDisabled}
+                          placeholder={t('from')}
+                          min={0}
+                          step={0.001}
+                          style={{ width: '50%' }}
+                        />
+                        <InputNumber
+                          value={ccvMax}
+                          onChange={setCcvMax}
+                          disabled={paramsDisabled}
+                          placeholder={t('to')}
+                          min={0}
+                          step={0.001}
+                          style={{ width: '50%' }}
+                        />
+                      </Space.Compact>
                     </Form.Item>
                   </Col>
                 </Row>
@@ -1860,8 +1959,8 @@ export default function BatteryPage() {
                   locale={{ emptyText: t('batteryNoResults') }}
                   scroll={{ x: true, y: 260 }}
                   rowClassName={(record) => {
-                    const ocvBad = ocvSpec && record.ocv != null && Math.abs(record.ocv - ocvSpec.center) > ocvSpec.tolerance;
-                    const ccvBad = ccvSpec && record.ccv != null && Math.abs(record.ccv - ccvSpec.center) > ccvSpec.tolerance;
+                    const ocvBad = ocvSpec && record.ocv != null && (record.ocv < ocvSpec.min || record.ocv > ocvSpec.max);
+                    const ccvBad = ccvSpec && record.ccv != null && (record.ccv < ccvSpec.min || record.ccv > ccvSpec.max);
                     return (ocvBad || ccvBad) ? 'battery-row-bad' : '';
                   }}
                   components={{
@@ -1932,7 +2031,7 @@ export default function BatteryPage() {
             )}
           </Space>
         </>
-      ) : (
+      ) : pageTab === 'history' ? (
         <Card
           size="small"
           title={
@@ -2042,7 +2141,174 @@ export default function BatteryPage() {
             />
           )}
         </Card>
-      )}
+      ) : pageTab === 'setup' ? (
+        <Card
+          size="small"
+          title={t('batterySetupTab')}
+        >
+          {/* Preset Form */}
+          <Card size="small" title={t('batterySetupAddEdit')} style={{ marginBottom: 16 }}>
+            <Row gutter={[8, 8]}>
+              <Col xs={12} sm={6}>
+                <Form.Item label={t('batteryType')} style={{ marginBottom: 0 }}>
+                  <Select
+                    value={setupForm.batteryType}
+                    onChange={(v) => setSetupForm(f => ({ ...f, batteryType: v }))}
+                    style={{ width: '100%' }}
+                  >
+                    <Option value="LR6">LR6</Option>
+                    <Option value="LR03">LR03</Option>
+                  </Select>
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={6}>
+                <Form.Item label={t('batteryProductLine')} style={{ marginBottom: 0 }}>
+                  <Select
+                    value={setupForm.productLine}
+                    onChange={(v) => setSetupForm(f => ({ ...f, productLine: v }))}
+                    style={{ width: '100%' }}
+                  >
+                    <Option value="UD+">UD+</Option>
+                    <Option value="UD">UD</Option>
+                    <Option value="HP">HP</Option>
+                  </Select>
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={4}>
+                <Form.Item label={t('batteryResistance')} style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    value={setupForm.resistance}
+                    onChange={(v) => setSetupForm(f => ({ ...f, resistance: v }))}
+                    min={0.01} step={0.01} style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={4}>
+                <Form.Item label={t('batteryOcvTime')} style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    value={setupForm.ocvTime}
+                    onChange={(v) => setSetupForm(f => ({ ...f, ocvTime: v }))}
+                    min={0.1} step={0.1} style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={4}>
+                <Form.Item label={t('batteryLoadTime')} style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    value={setupForm.loadTime}
+                    onChange={(v) => setSetupForm(f => ({ ...f, loadTime: v }))}
+                    min={0.1} step={0.1} style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={4}>
+                <Form.Item label={t('batteryKCoeff')} style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    value={setupForm.kCoeff}
+                    onChange={(v) => setSetupForm(f => ({ ...f, kCoeff: v }))}
+                    min={0} step={0.01} style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label={t('batteryOcvStandard')} style={{ marginBottom: 0 }} required>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <InputNumber
+                      value={setupForm.ocvMin}
+                      onChange={(v) => setSetupForm(f => ({ ...f, ocvMin: v }))}
+                      placeholder={t('from')} min={0} step={0.001} style={{ width: '50%' }}
+                    />
+                    <InputNumber
+                      value={setupForm.ocvMax}
+                      onChange={(v) => setSetupForm(f => ({ ...f, ocvMax: v }))}
+                      placeholder={t('to')} min={0} step={0.001} style={{ width: '50%' }}
+                    />
+                  </Space.Compact>
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label={t('batteryCcvStandard')} style={{ marginBottom: 0 }} required>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <InputNumber
+                      value={setupForm.ccvMin}
+                      onChange={(v) => setSetupForm(f => ({ ...f, ccvMin: v }))}
+                      placeholder={t('from')} min={0} step={0.001} style={{ width: '50%' }}
+                    />
+                    <InputNumber
+                      value={setupForm.ccvMax}
+                      onChange={(v) => setSetupForm(f => ({ ...f, ccvMax: v }))}
+                      placeholder={t('to')} min={0} step={0.001} style={{ width: '50%' }}
+                    />
+                  </Space.Compact>
+                </Form.Item>
+              </Col>
+              <Col xs={24}>
+                <Button type="primary" onClick={handleSavePreset}>
+                  {t('batterySetupSave')}
+                </Button>
+              </Col>
+            </Row>
+          </Card>
+
+          {/* Presets List */}
+          {Object.keys(presets).length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#595959', padding: '24px 0' }}>
+              {t('batterySetupNoPresets')}
+            </div>
+          ) : (
+            <Table
+              dataSource={Object.values(presets)}
+              rowKey={(r) => `${r.batteryType}_${r.productLine}`}
+              size="small"
+              pagination={false}
+              scroll={{ x: true }}
+              columns={[
+                { title: t('batteryType'), dataIndex: 'batteryType', key: 'batteryType', width: 80 },
+                { title: t('batteryProductLine'), dataIndex: 'productLine', key: 'productLine', width: 100 },
+                { title: t('batteryResistance'), dataIndex: 'resistance', key: 'resistance', width: 90 },
+                { title: t('batteryOcvTime'), dataIndex: 'ocvTime', key: 'ocvTime', width: 100 },
+                { title: t('batteryLoadTime'), dataIndex: 'loadTime', key: 'loadTime', width: 110 },
+                { title: t('batteryKCoeff'), dataIndex: 'kCoeff', key: 'kCoeff', width: 80 },
+                {
+                  title: `OCV (${t('from')}-${t('to')})`, key: 'ocv', width: 140,
+                  render: (_, r) => r.ocvMin != null && r.ocvMax != null ? `${r.ocvMin} – ${r.ocvMax}` : '-',
+                },
+                {
+                  title: `CCV (${t('from')}-${t('to')})`, key: 'ccv', width: 140,
+                  render: (_, r) => r.ccvMin != null && r.ccvMax != null ? `${r.ccvMin} – ${r.ccvMax}` : '-',
+                },
+                {
+                  title: t('actions'), key: 'actions', width: 140,
+                  render: (_, preset) => (
+                    <Space size={4}>
+                      <Button
+                        size="small"
+                        onClick={() => setSetupForm({ ...preset })}
+                      >
+                        {t('batterySetupEdit')}
+                      </Button>
+                      <Button
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() => {
+                          Modal.confirm({
+                            title: `${t('delete')} ${preset.batteryType} - ${preset.productLine}?`,
+                            okText: t('delete'),
+                            cancelText: t('cancel'),
+                            okButtonProps: { danger: true },
+                            onOk: () => handleDeletePreset(`${preset.batteryType}_${preset.productLine}`),
+                          });
+                        }}
+                      />
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </Card>
+      ) : null}
       <Modal
         open={resumeModalVisible}
         title={t('batteryResumeTitle')}
@@ -2063,8 +2329,10 @@ export default function BatteryPage() {
             setTestDate(dayjs());
             setBatteryType('LR6');
             setProductLine('UD+');
-            setOcvCenter(null);
-            setCcvCenter(null);
+            setOcvMin(null);
+            setOcvMax(null);
+            setCcvMin(null);
+            setCcvMax(null);
             resetLoadedSnapshotTracking();
             setResumeModalVisible(false);
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -2163,8 +2431,8 @@ export default function BatteryPage() {
           locale={{ emptyText: t('batteryNoResults') }}
           scroll={{ x: true, y: ZOOM_MODAL_TABLE_SCROLL_Y }}
           rowClassName={(record) => {
-            const ocvBad = ocvSpec && record.ocv != null && Math.abs(record.ocv - ocvSpec.center) > ocvSpec.tolerance;
-            const ccvBad = ccvSpec && record.ccv != null && Math.abs(record.ccv - ccvSpec.center) > ccvSpec.tolerance;
+            const ocvBad = ocvSpec && record.ocv != null && (record.ocv < ocvSpec.min || record.ocv > ocvSpec.max);
+            const ccvBad = ccvSpec && record.ccv != null && (record.ccv < ccvSpec.min || record.ccv > ccvSpec.max);
             return (ocvBad || ccvBad) ? 'battery-row-bad' : '';
           }}
         />

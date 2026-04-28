@@ -867,10 +867,11 @@ export default function BatteryPage() {
     }
   };
 
-  // ECharts option — one series per battery (OCV + CCV connected)
+  // ECharts option — show only the latest battery being measured (OCV + CCV connected)
   const allBatteryIds = Object.keys(chartSeriesByBattery).map(Number).sort((a, b) => a - b);
+  const latestBatteryIds = allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : [];
   const chartSeries = [];
-  allBatteryIds.forEach((bid, idx) => {
+  latestBatteryIds.forEach((bid, idx) => {
     const { ocv = [], ccv = [] } = chartSeriesByBattery[bid];
     const isFirst = idx === 0;
     chartSeries.push({
@@ -1337,6 +1338,7 @@ export default function BatteryPage() {
   }, [readingsByBattery]);
 
   const prevRecordsLenRef = useRef(records.length);
+  const resultsTableRef = useRef(null);
   useEffect(() => {
     if (records.length <= prevRecordsLenRef.current) return;
     prevRecordsLenRef.current = records.length;
@@ -1353,6 +1355,11 @@ export default function BatteryPage() {
         description: `${parts.join(', ')} — ${t('batteryRetestRequired')}`,
         duration: 0,
       });
+    }
+    // Auto-scroll the results table to the latest record
+    if (resultsTableRef.current) {
+      const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
+      if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
     }
   }, [records, ocvSpec, ccvSpec, t]);
 
@@ -2014,6 +2021,7 @@ export default function BatteryPage() {
 
             {/* Results Table */}
             <Col xs={24} lg={10}>
+              <div ref={resultsTableRef} style={{ height: '100%' }}>
               <Card
                 size="small"
                 style={{ height: '100%' }}
@@ -2043,6 +2051,7 @@ export default function BatteryPage() {
                   }}
                 />
               </Card>
+              </div>
             </Col>
           </Row>
 

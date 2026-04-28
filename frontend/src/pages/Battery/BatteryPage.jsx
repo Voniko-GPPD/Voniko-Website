@@ -205,6 +205,12 @@ export default function BatteryPage() {
   // Results
   const [records, setRecords] = useState(() => getInitialSession().records || []);
 
+  // Out-of-spec blocking modal
+  const [outOfSpecModal, setOutOfSpecModal] = useState(null);
+
+  // Tracks the battery ID currently being retested (for chart display)
+  const [retestingBatteryId, setRetestingBatteryId] = useState(null);
+
   // Physical dimensions (caliper)
   const [caliperPhase, setCaliperPhase] = useState(false); // true after OCV/CCV is done
   const [caliperSingleMode, setCaliperSingleMode] = useState(false); // true when measuring only one battery
@@ -286,6 +292,8 @@ export default function BatteryPage() {
   const retryTimerRef = useRef(null);
   const mountedRef = useRef(true);
   const pendingNewSessionRef = useRef(false);
+  // Holds a record to retest after the current test stops (used by "Đo lại ngay")
+  const pendingRetestRecordRef = useRef(null);
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -432,9 +440,13 @@ export default function BatteryPage() {
 
       case 'test_stopped':
         setRunning(false);
+        setRetestingBatteryId(null);
         setStatusText('Stopped');
         setStatusColor(getStatusColor('Stopped'));
-        notification.info({ message: t('batteryTestStopped') });
+        // Suppress the "stopped" notification when an immediate retest is pending
+        if (!pendingRetestRecordRef.current) {
+          notification.info({ message: t('batteryTestStopped') });
+        }
         break;
 
       case 'reading':
@@ -490,6 +502,11 @@ export default function BatteryPage() {
         if (msg.text) {
           setStatusText(msg.text);
           setStatusColor(getStatusColor(msg.text));
+          // When the hardware naturally stops (e.g. after retest completes), also update running state
+          if (msg.text === 'Stopped') {
+            setRunning(false);
+            setRetestingBatteryId(null);
+          }
         } else if (msg.data) {
           const text = msg.data.status_text || 'Waiting...';
           setStatusText(text);
@@ -505,6 +522,8 @@ export default function BatteryPage() {
         setChartSeriesByBattery({});
         setRecords([]);
         setReadingsByBattery({});
+        setRetestingBatteryId(null);
+        pendingRetestRecordRef.current = null;
         notification.success({ message: t('batterySessionCleared') });
         break;
 
@@ -602,10 +621,23 @@ export default function BatteryPage() {
     }
   };
 
-  // Retest a specific record
-  const handleRetest = (record) => {
+  // Retest a specific record — clear old chart data first so only fresh data is shown
+  const handleRetest = useCallback((record) => {
+    setChartSeriesByBattery(prev => ({ ...prev, [record.id]: { ocv: [], ccv: [] } }));
+    setReadingsByBattery(prev => ({ ...prev, [record.id]: [] }));
+    setRetestingBatteryId(record.id);
     sendMsg({ action: 'start', payload: { ...buildParams(), retest_id: record.id } });
-  };
+  }, [sendMsg, buildParams]);
+
+  // When a pending retest was queued (via "Đo lại ngay" while test was running),
+  // trigger it as soon as the test stops.
+  useEffect(() => {
+    if (!running && pendingRetestRecordRef.current) {
+      const record = pendingRetestRecordRef.current;
+      pendingRetestRecordRef.current = null;
+      handleRetest(record);
+    }
+  }, [running, handleRetest]);
 
   // Store latest chart data in refs so saveCurrentOrderSnapshot can access without stale closure
   const chartSeriesByBatteryRef = useRef(chartSeriesByBattery);
@@ -877,7 +909,10 @@ export default function BatteryPage() {
 
   // ECharts option — show only the latest battery being measured (OCV + CCV connected)
   const allBatteryIds = Object.keys(chartSeriesByBattery).map(Number).sort((a, b) => a - b);
-  const latestBatteryIds = allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : [];
+  // During a retest, show only that battery's (fresh) chart data
+  const latestBatteryIds = retestingBatteryId !== null
+    ? [retestingBatteryId]
+    : (allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : []);
   const chartSeries = [];
   latestBatteryIds.forEach((bid, idx) => {
     const { ocv = [], ccv = [] } = chartSeriesByBattery[bid];
@@ -1358,11 +1393,8 @@ export default function BatteryPage() {
       const parts = [];
       if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.min} - ${ocvSpec.max})`);
       if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.min} - ${ccvSpec.max})`);
-      notification.error({
-        message: `⚠️ Pin #${latest.id} ${t('batteryOutOfSpec')}`,
-        description: `${parts.join(', ')} — ${t('batteryRetestRequired')}`,
-        duration: 0,
-      });
+      // Show blocking modal instead of dismissible notification
+      setOutOfSpecModal({ record: latest, parts });
     }
     // Auto-scroll the results table to the latest record
     if (resultsTableRef.current) {
@@ -2623,6 +2655,42 @@ export default function BatteryPage() {
             return (ocvBad || ccvBad) ? 'battery-row-bad' : '';
           }}
         />
+      </Modal>
+      {/* Out-of-spec battery alert — blocking modal, cannot be dismissed */}
+      <Modal
+        open={outOfSpecModal !== null}
+        title={<Space><span>⚠️</span><span>{`Pin #${outOfSpecModal?.record?.id ?? ''} ${t('batteryOutOfSpec')}`}</span></Space>}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={[
+          <Button
+            key="retest-now"
+            type="primary"
+            danger
+            onClick={() => {
+              const record = outOfSpecModal.record;
+              setOutOfSpecModal(null);
+              if (running) {
+                // Stop current test then retest once stopped
+                pendingRetestRecordRef.current = record;
+                sendMsg({ action: 'stop' });
+              } else {
+                handleRetest(record);
+              }
+            }}
+          >
+            {t('batteryRetestNow')}
+          </Button>,
+          <Button
+            key="save-temp"
+            onClick={() => setOutOfSpecModal(null)}
+          >
+            {t('batterySaveTemp')}
+          </Button>,
+        ]}
+      >
+        <p>{outOfSpecModal?.parts?.join(', ')}</p>
       </Modal>
     </div>
   );

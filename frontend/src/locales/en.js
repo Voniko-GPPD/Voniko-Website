@@ -394,6 +394,8 @@ export default {
   batteryCcvStandard: 'CCV Standard (from - to)',
   batteryOutOfSpec: 'out of spec',
   batteryRetestRequired: 'Retest required',
+  batteryRetestNow: 'Re-measure Now',
+  batterySaveTemp: 'Save Temporarily',
   batteryFillRequiredFields: 'Please fill in: Order ID, OCV Standard and CCV Standard',
   batteryClearSessionConfirmTitle: 'Clear Session?',
   batteryClearSessionConfirmContent: 'All test results in this session will be deleted. Are you sure?',

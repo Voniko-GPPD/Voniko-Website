@@ -152,6 +152,18 @@ if not exist "frontend\dist" (
     echo  [BUILD] Building frontend for production...
     cd frontend
     call npm run build
+    if errorlevel 1 (
+        cd ..
+        echo.
+        echo  +==========================================================+
+        echo  ^|  [ERROR] Frontend build FAILED!                        ^|
+        echo  ^|  See the npm output above for details.                 ^|
+        echo  ^|  Fix the build error then re-run start.bat.            ^|
+        echo  +==========================================================+
+        echo.
+        pause
+        exit /b 1
+    )
     cd ..
     echo  [OK] Frontend built to frontend\dist
 ) else (
@@ -180,6 +192,13 @@ if exist "frontend\dist" (
     call pm2 start ecosystem.config.js
 )
 
+if errorlevel 1 (
+    echo.
+    echo  [ERROR] pm2 start returned an error. Check ecosystem.config.js or run:
+    echo          pm2 logs --lines 50
+    echo.
+)
+
 call pm2 save --force >nul 2>&1
 echo  [OK] PM2 processes saved.
 echo.
@@ -187,8 +206,8 @@ echo.
 :: -------------------------------------------------------
 ::  POST-START: Health check for voniko-backend
 :: -------------------------------------------------------
-echo  [..] Waiting 8 seconds for backend to stabilise...
-timeout /t 8 /nobreak >nul
+echo  [..] Waiting 15 seconds for backend to stabilise...
+timeout /t 15 /nobreak >nul
 
 set BSTATUS=offline
 where curl >nul 2>&1
@@ -205,9 +224,14 @@ echo  [..] Backend status: !BSTATUS!
 
 echo !BSTATUS! | findstr /i "online" >nul
 if errorlevel 1 (
+    title Voniko-Web Deployment -- *** STARTUP FAILED ***
+    color 4F
     echo.
-    echo  [ERROR] voniko-backend is NOT running correctly.
-    echo  [ERROR] Status: !BSTATUS!
+    echo  +==========================================================+
+    echo  ^|  [ERROR] voniko-backend is NOT running correctly.      ^|
+    echo  ^|  Status  : !BSTATUS!                                   ^|
+    echo  +==========================================================+
+    echo.
     echo  [ERROR] Last 30 lines of backend error log:
     echo  -----------------------------------------------
     if exist "logs\backend-error.log" (
@@ -224,6 +248,8 @@ if errorlevel 1 (
     echo         4. Run: pm2 logs voniko-backend --lines 100  for full error details
     echo.
 ) else (
+    title Voniko-Web Deployment -- RUNNING
+    color 2F
     echo  [OK] Backend is online.
 )
 echo.
@@ -248,4 +274,5 @@ echo  ^|  Logs     : pm2 logs                                ^|
 echo  ^|  Monitor  : pm2 monit                               ^|
 echo  +======================================================+
 echo.
+color 07
 pause

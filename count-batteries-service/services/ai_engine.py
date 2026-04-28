@@ -96,6 +96,14 @@ class AIEngine:
     MAX_ASPECT_RATIO = 3.0    # Relaxed: more shape tolerance
     CENTER_DISTANCE_RATIO = 1.02  # Stronger duplicate suppression; threshold is ~1.02r vs adjacent spacing ~2.0r (~51%)
     MIN_RADIUS_RATIO = 0.50   # Relaxed: allow more size variation
+
+    # ==================== HOUGH CIRCLES ENHANCEMENT ====================
+    # Complement AI detections with OpenCV HoughCircles to catch missed batteries
+    # and eliminate double-counts.  Can be disabled by setting to False.
+    HOUGH_ENABLED = True
+    HOUGH_PARAM2 = 22        # Accumulator threshold – lower → more circles found, then filtered
+    HOUGH_CANNY = 100        # Canny high-threshold passed to HoughCircles (param1)
+    HOUGH_CONFIDENCE = 0.75  # Nominal confidence assigned to Hough-only detections
     
     def __new__(cls):
         if cls._instance is None:
@@ -691,8 +699,143 @@ class AIEngine:
             print(f"Edge duplicate filter: removed {removed} edge detections")
         return filtered
     
+    # ==================== HOUGH CIRCLE ENHANCEMENT ====================
+
+    def _estimate_battery_radius_from_detections(self, detections: List[dict]) -> Optional[float]:
+        """Return the median bounding-box radius of existing AI detections.
+        Used to seed the HoughCircles radius range so it matches actual batteries."""
+        if len(detections) < 5:
+            return None
+        radii = [
+            max(d["bbox"][2] - d["bbox"][0], d["bbox"][3] - d["bbox"][1]) / 2
+            for d in detections
+        ]
+        return float(np.median(radii))
+
+    def _estimate_battery_radius_from_image(self, image: np.ndarray) -> Tuple[int, int]:
+        """Estimate plausible battery radius range from image dimensions alone.
+        Assumes the tray fills roughly 75% of the image and holds 100-1500 batteries."""
+        h, w = image.shape[:2]
+        tray_area = h * w * 0.75
+        r_dense = int(np.sqrt(tray_area / (1500 * np.pi)))   # densest plausible tray
+        r_sparse = int(np.sqrt(tray_area / (100 * np.pi)))   # sparsest plausible tray
+        r_min = max(5, r_dense - 2)
+        r_max = min(r_sparse + 5, max(w, h) // 4)
+        print(f"[HOUGH] Estimated radius range: [{r_min}, {r_max}] for {w}x{h} image")
+        return r_min, r_max
+
+    def detect_with_hough(self, image: np.ndarray,
+                          radius_hint: Optional[float] = None) -> Tuple[int, List[dict]]:
+        """Detect batteries using OpenCV HoughCircles (HOUGH_GRADIENT).
+
+        Produces shape-based detections that complement the AI model:
+        - Catches batteries the model missed (edges, reflective caps, dark zones)
+        - Each real battery maps to exactly one circle → removes AI double-counts when merged
+
+        Args:
+            image:       BGR image (any size).
+            radius_hint: Typical battery radius in pixels, estimated from prior AI detections.
+                         When None, radius range is derived from image dimensions.
+        Returns:
+            (count, detections) where detections use the same dict schema as AI detections.
+        """
+        h, w = image.shape[:2]
+
+        # --- Pre-processing ---
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=self.CLAHE_CLIP_LIMIT,
+                                 tileGridSize=self.CLAHE_TILE_SIZE)
+        gray = clahe.apply(gray)
+        gray_blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)
+
+        # --- Radius range ---
+        if radius_hint is not None:
+            r_min = max(5, int(radius_hint * 0.65))
+            r_max = int(radius_hint * 1.50)
+        else:
+            r_min, r_max = self._estimate_battery_radius_from_image(image)
+
+        # minDist: adjacent batteries touch at ~2*r; use 1.8*r (90% of diameter) to
+        # tolerate slight variation in packing density without merging distinct batteries.
+        min_dist = max(int(r_min * 1.8), r_min + 2)
+
+        print(f"[HOUGH] r=[{r_min}, {r_max}], minDist={min_dist}, "
+              f"param2={self.HOUGH_PARAM2}")
+
+        try:
+            circles = cv2.HoughCircles(
+                gray_blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=min_dist,
+                param1=self.HOUGH_CANNY,
+                param2=self.HOUGH_PARAM2,
+                minRadius=r_min,
+                maxRadius=r_max,
+            )
+        except Exception as exc:
+            print(f"[HOUGH] HoughCircles error: {exc}")
+            return 0, []
+
+        if circles is None:
+            print("[HOUGH] No circles detected")
+            return 0, []
+
+        circles = np.round(circles[0]).astype(int)
+        print(f"[HOUGH] Raw circles: {len(circles)}")
+
+        # --- Convert to detection dict ---
+        detections: List[dict] = []
+        for cx, cy, r in circles:
+            detections.append({
+                "bbox": [
+                    max(0, int(cx - r)),
+                    max(0, int(cy - r)),
+                    min(w, int(cx + r)),
+                    min(h, int(cy + r)),
+                ],
+                "confidence": self.HOUGH_CONFIDENCE,
+                "class": 0,
+            })
+
+        # Apply the same area/isolation filters used on AI detections
+        detections = self.filter_by_area(detections, (h, w))
+        detections = self.filter_isolated_detections(detections, min_neighbors=2)
+
+        print(f"[HOUGH] After filtering: {len(detections)}")
+        return len(detections), detections
+
+    def _apply_hough_enhancement(self, image: np.ndarray,
+                                  ai_count: int,
+                                  ai_dets: List[dict]) -> Tuple[int, List[dict]]:
+        """Merge AI detections with HoughCircles detections to improve accuracy.
+
+        - AI double-detections: both mapped to the same Hough circle → merged to 1
+        - AI missed batteries: Hough circle adds them back
+        - Hough false positives: removed by filter_isolated_detections (no neighbours)
+
+        Returns updated (count, detections).
+        """
+        radius_hint = self._estimate_battery_radius_from_detections(ai_dets)
+        _, hough_dets = self.detect_with_hough(image, radius_hint=radius_hint)
+
+        if not hough_dets:
+            print(f"[HYBRID] No Hough detections – keeping AI count: {ai_count}")
+            return ai_count, ai_dets
+
+        # Merge both sets: NMS + center-distance dedup removes genuine duplicates
+        combined = ai_dets + hough_dets
+        merged = self.merge_detections(combined, iou_threshold=self.SAHI_MERGE_IOU)
+        merged = self.filter_by_area(merged, image.shape[:2])
+        merged = self.filter_by_center_distance(merged)
+        merged = self.filter_small_circles(merged)
+        merged = self.filter_isolated_detections(merged)
+
+        print(f"[HYBRID] AI={ai_count}, Hough={len(hough_dets)} → merged={len(merged)}")
+        return len(merged), merged
+
     # ==================== SAHI (Slicing Aided Hyper Inference) ====================
-    
+
     def get_slices(self, image_shape: Tuple[int, int], overlap_ratio: float = None) -> List[Tuple[int, int, int, int]]:
         """Calculate slice coordinates for SAHI - ensures full image coverage
         
@@ -928,11 +1071,16 @@ class AIEngine:
                     filtered = self.filter_edge_duplicates(filtered)
                     filtered = self.filter_by_center_distance(filtered)
                     filtered = self.filter_small_circles(filtered)
+                    if self.HOUGH_ENABLED:
+                        _, filtered = self._apply_hough_enhancement(
+                            image, len(filtered), filtered)
                     print(f"Total time: {time.time()-t_start:.3f}s")
                     return len(filtered), filtered
             
             if use_sahi:
                 count, dets = self.detect_with_sahi(image, effective_confidence)
+                if self.HOUGH_ENABLED:
+                    count, dets = self._apply_hough_enhancement(image, count, dets)
                 print(f"Total time: {time.time()-t_start:.3f}s")
                 return count, dets
             
@@ -968,7 +1116,11 @@ class AIEngine:
             detections = self.filter_edge_duplicates(detections)
             detections = self.filter_by_center_distance(detections)
             detections = self.filter_small_circles(detections)
-            
+
+            if self.HOUGH_ENABLED:
+                _, detections = self._apply_hough_enhancement(
+                    image, len(detections), detections)
+
             print(f"Total time: {time.time()-t_start:.3f}s")
             return len(detections), detections
             

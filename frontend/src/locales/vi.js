@@ -541,6 +541,7 @@ export default {
   dm2000StartDate: 'Ngày bắt đầu',
   dm2000Type: 'Kiểu pin',
   dm2000Name: 'Tên lô',
+  dm2000File: 'Tệp',
   dm2000DisCondition: 'Điều kiện phóng',
   dm2000Duration: 'Thời gian',
   dm2000UnifRate: 'Đồng đều',

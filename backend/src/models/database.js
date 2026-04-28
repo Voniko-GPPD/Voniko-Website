@@ -236,6 +236,25 @@ function createTables() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_battery_presets_type_line ON battery_presets(battery_type, product_line);
+
+    -- Battery order history snapshots (lịch sử đơn hàng)
+    CREATE TABLE IF NOT EXISTS battery_order_history (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      test_date TEXT,
+      battery_type TEXT,
+      product_line TEXT,
+      records_json TEXT NOT NULL DEFAULT '[]',
+      chart_series_json TEXT NOT NULL DEFAULT '{}',
+      readings_json TEXT NOT NULL DEFAULT '{}',
+      saved_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      created_by TEXT NOT NULL,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_battery_order_history_order_id ON battery_order_history(order_id);
+    CREATE INDEX IF NOT EXISTS idx_battery_order_history_saved_at ON battery_order_history(saved_at);
+    CREATE INDEX IF NOT EXISTS idx_battery_order_history_created_by ON battery_order_history(created_by);
   `);
 
   // Safe migration: add folder_id column to files if not present

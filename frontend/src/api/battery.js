@@ -47,3 +47,9 @@ export const getBatteryPresets = () => api.get('/presets');
 export const upsertBatteryPreset = (preset) => api.put('/presets', preset);
 export const deleteBatteryPreset = (batteryType, productLine) =>
   api.delete(`/presets/${encodeURIComponent(batteryType)}/${encodeURIComponent(productLine)}`);
+
+// Battery Order History
+export const getOrderHistory = () => api.get('/order-history');
+export const saveOrderHistorySnapshot = (snapshot) => api.post('/order-history', snapshot);
+export const deleteOrderHistorySnapshot = (id) => api.delete(`/order-history/${id}`);
+export const clearOrderHistory = () => api.delete('/order-history');

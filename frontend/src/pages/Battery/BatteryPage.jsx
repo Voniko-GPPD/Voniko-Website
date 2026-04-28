@@ -72,6 +72,25 @@ function makePresetKey(batteryType, productLine) {
   return `${batteryType}_${productLine}`;
 }
 
+function mapPresetsResponse(presets) {
+  const presetsMap = {};
+  for (const p of (presets || [])) {
+    presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
+      batteryType: p.battery_type,
+      productLine: p.product_line,
+      resistance: p.resistance,
+      ocvTime: p.ocv_time,
+      loadTime: p.load_time,
+      kCoeff: p.k_coeff,
+      ocvMin: p.ocv_min,
+      ocvMax: p.ocv_max,
+      ccvMin: p.ccv_min,
+      ccvMax: p.ccv_max,
+    };
+  }
+  return presetsMap;
+}
+
 function buildSnapshotSignature(snapshot) {
   return JSON.stringify({
     orderId: normalizeOrderId(snapshot.orderId),
@@ -1065,22 +1084,7 @@ export default function BatteryPage() {
         ccvMax: setupForm.ccvMax,
       });
       const res = await getBatteryPresets();
-      const presetsMap = {};
-      for (const p of res.data.presets) {
-        presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
-          batteryType: p.battery_type,
-          productLine: p.product_line,
-          resistance: p.resistance,
-          ocvTime: p.ocv_time,
-          loadTime: p.load_time,
-          kCoeff: p.k_coeff,
-          ocvMin: p.ocv_min,
-          ocvMax: p.ocv_max,
-          ccvMin: p.ccv_min,
-          ccvMax: p.ccv_max,
-        };
-      }
-      setPresets(presetsMap);
+      setPresets(mapPresetsResponse(res.data.presets));
       notification.success({ message: t('batterySetupSaved') });
     } catch (e) {
       notification.error({ message: e?.response?.data?.error || e.message });
@@ -1091,26 +1095,39 @@ export default function BatteryPage() {
     try {
       await deleteBatteryPreset(batteryTypeVal, productLineVal);
       const res = await getBatteryPresets();
-      const presetsMap = {};
-      for (const p of res.data.presets) {
-        presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
-          batteryType: p.battery_type,
-          productLine: p.product_line,
-          resistance: p.resistance,
-          ocvTime: p.ocv_time,
-          loadTime: p.load_time,
-          kCoeff: p.k_coeff,
-          ocvMin: p.ocv_min,
-          ocvMax: p.ocv_max,
-          ccvMin: p.ccv_min,
-          ccvMax: p.ccv_max,
-        };
-      }
-      setPresets(presetsMap);
+      setPresets(mapPresetsResponse(res.data.presets));
     } catch (e) {
       notification.error({ message: e?.response?.data?.error || e.message });
     }
   }, []);
+
+  const handleAddBatteryType = useCallback(async () => {
+    if (!newTypeName.trim()) return;
+    setTypeLineLoading(true);
+    try {
+      await createBatteryType(newTypeName.trim());
+      const res = await getBatteryTypes();
+      setBatteryTypes(res.data.types || []);
+      setNewTypeName('');
+      notification.success({ message: t('batteryTypeAdded') });
+    } catch (e) {
+      notification.error({ message: e?.response?.status === 409 ? t('batteryTypeExists') : (e?.response?.data?.error || e.message) });
+    } finally { setTypeLineLoading(false); }
+  }, [newTypeName, t]);
+
+  const handleAddBatteryLine = useCallback(async () => {
+    if (!newLineName.trim()) return;
+    setTypeLineLoading(true);
+    try {
+      await createBatteryProductLine(newLineName.trim());
+      const res = await getBatteryProductLines();
+      setProductLines(res.data.productLines || []);
+      setNewLineName('');
+      notification.success({ message: t('batteryLineAdded') });
+    } catch (e) {
+      notification.error({ message: e?.response?.status === 409 ? t('batteryLineExists') : (e?.response?.data?.error || e.message) });
+    } finally { setTypeLineLoading(false); }
+  }, [newLineName, t]);
 
   const ocvSpec = React.useMemo(() => {
     const min = parseFloat(ocvMin);
@@ -1408,22 +1425,7 @@ export default function BatteryPage() {
         ]);
         setBatteryTypes(typesRes.data.types || []);
         setProductLines(linesRes.data.productLines || []);
-        const presetsMap = {};
-        for (const p of (presetsRes.data.presets || [])) {
-          presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
-            batteryType: p.battery_type,
-            productLine: p.product_line,
-            resistance: p.resistance,
-            ocvTime: p.ocv_time,
-            loadTime: p.load_time,
-            kCoeff: p.k_coeff,
-            ocvMin: p.ocv_min,
-            ocvMax: p.ocv_max,
-            ccvMin: p.ccv_min,
-            ccvMax: p.ccv_max,
-          };
-        }
-        setPresets(presetsMap);
+        setPresets(mapPresetsResponse(presetsRes.data.presets));
       } catch { }
     };
     loadServerData();
@@ -2220,36 +2222,12 @@ export default function BatteryPage() {
                     value={newTypeName}
                     onChange={(e) => setNewTypeName(e.target.value)}
                     placeholder={t('batteryTypeNamePlaceholder')}
-                    onPressEnter={async () => {
-                      if (!newTypeName.trim()) return;
-                      setTypeLineLoading(true);
-                      try {
-                        await createBatteryType(newTypeName.trim());
-                        const res = await getBatteryTypes();
-                        setBatteryTypes(res.data.types || []);
-                        setNewTypeName('');
-                        notification.success({ message: t('batteryTypeAdded') });
-                      } catch (e) {
-                        notification.error({ message: e?.response?.status === 409 ? t('batteryTypeExists') : (e?.response?.data?.error || e.message) });
-                      } finally { setTypeLineLoading(false); }
-                    }}
+                    onPressEnter={handleAddBatteryType}
                   />
                   <Button
                     type="primary"
                     loading={typeLineLoading}
-                    onClick={async () => {
-                      if (!newTypeName.trim()) return;
-                      setTypeLineLoading(true);
-                      try {
-                        await createBatteryType(newTypeName.trim());
-                        const res = await getBatteryTypes();
-                        setBatteryTypes(res.data.types || []);
-                        setNewTypeName('');
-                        notification.success({ message: t('batteryTypeAdded') });
-                      } catch (e) {
-                        notification.error({ message: e?.response?.status === 409 ? t('batteryTypeExists') : (e?.response?.data?.error || e.message) });
-                      } finally { setTypeLineLoading(false); }
-                    }}
+                    onClick={handleAddBatteryType}
                   >
                     {t('batteryAddType')}
                   </Button>
@@ -2293,36 +2271,12 @@ export default function BatteryPage() {
                     value={newLineName}
                     onChange={(e) => setNewLineName(e.target.value)}
                     placeholder={t('batteryLineNamePlaceholder')}
-                    onPressEnter={async () => {
-                      if (!newLineName.trim()) return;
-                      setTypeLineLoading(true);
-                      try {
-                        await createBatteryProductLine(newLineName.trim());
-                        const res = await getBatteryProductLines();
-                        setProductLines(res.data.productLines || []);
-                        setNewLineName('');
-                        notification.success({ message: t('batteryLineAdded') });
-                      } catch (e) {
-                        notification.error({ message: e?.response?.status === 409 ? t('batteryLineExists') : (e?.response?.data?.error || e.message) });
-                      } finally { setTypeLineLoading(false); }
-                    }}
+                    onPressEnter={handleAddBatteryLine}
                   />
                   <Button
                     type="primary"
                     loading={typeLineLoading}
-                    onClick={async () => {
-                      if (!newLineName.trim()) return;
-                      setTypeLineLoading(true);
-                      try {
-                        await createBatteryProductLine(newLineName.trim());
-                        const res = await getBatteryProductLines();
-                        setProductLines(res.data.productLines || []);
-                        setNewLineName('');
-                        notification.success({ message: t('batteryLineAdded') });
-                      } catch (e) {
-                        notification.error({ message: e?.response?.status === 409 ? t('batteryLineExists') : (e?.response?.data?.error || e.message) });
-                      } finally { setTypeLineLoading(false); }
-                    }}
+                    onClick={handleAddBatteryLine}
                   >
                     {t('batteryAddLine')}
                   </Button>
@@ -2541,8 +2495,8 @@ export default function BatteryPage() {
             setReadingsByBattery({});
             setOrderId('');
             setTestDate(dayjs());
-            setBatteryType(batteryTypes[0]?.name || 'LR6');
-            setProductLine(productLines[0]?.name || 'UD+');
+            setBatteryType(batteryTypes[0]?.name || '');
+            setProductLine(productLines[0]?.name || '');
             setOcvMin(null);
             setOcvMax(null);
             setCcvMin(null);

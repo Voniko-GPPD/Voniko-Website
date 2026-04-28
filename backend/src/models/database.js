@@ -26,6 +26,7 @@ function initDb() {
 
   createTables();
   seedAdmin();
+  seedDefaults();
   logger.info('Database initialized', { path: dbPath });
   return db;
 }
@@ -272,12 +273,17 @@ function createTables() {
     db.exec('ALTER TABLE files ADD COLUMN lock_reason TEXT DEFAULT NULL');
   }
 
+}
+
+function seedDefaults() {
+  const { v4: uuidv4 } = require('uuid');
+  const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+  const adminId = adminUser ? adminUser.id : null;
+  if (!adminId) return; // should not happen — seedAdmin() runs first
+
   // Seed default battery types if table is empty
   const typeCount = db.prepare('SELECT COUNT(*) as c FROM battery_types').get().c;
   if (typeCount === 0) {
-    const { v4: uuidv4 } = require('uuid');
-    const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
-    const adminId = adminUser ? adminUser.id : 'system';
     for (const name of ['LR6', 'LR03']) {
       db.prepare('INSERT OR IGNORE INTO battery_types (id, name, created_by) VALUES (?, ?, ?)').run(uuidv4(), name, adminId);
     }
@@ -286,9 +292,6 @@ function createTables() {
   // Seed default battery product lines if table is empty
   const lineCount = db.prepare('SELECT COUNT(*) as c FROM battery_product_lines').get().c;
   if (lineCount === 0) {
-    const { v4: uuidv4 } = require('uuid');
-    const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
-    const adminId = adminUser ? adminUser.id : 'system';
     for (const name of ['UD+', 'UD', 'HP']) {
       db.prepare('INSERT OR IGNORE INTO battery_product_lines (id, name, created_by) VALUES (?, ?, ?)').run(uuidv4(), name, adminId);
     }

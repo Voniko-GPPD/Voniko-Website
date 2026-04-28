@@ -724,10 +724,12 @@ class AIEngine:
     def _compute_detection_spacing(self, detections: List[dict], sample_size: int = 100) -> float:
         """Estimate the typical centre-to-centre distance between adjacent detections.
 
-        Returns the median of the nearest-neighbour distances, sampling up to
-        *sample_size* detections for efficiency.  This is independent of bbox size
-        and gives a reliable spacing estimate even when the detected radius is
-        smaller than the true battery radius (e.g. HoughCircles finding inner caps).
+        Returns the median of the nearest-neighbour distances, using evenly-spaced
+        index sampling across the full detection list (up to *sample_size* points)
+        to avoid spatial bias when detections are ordered spatially.
+        This is independent of bbox size and gives a reliable spacing estimate even
+        when the detected radius is smaller than the true battery radius (e.g.
+        HoughCircles finding inner caps).
         Returns float('inf') when detections are too few to measure.
         """
         n = len(detections)
@@ -736,9 +738,11 @@ class AIEngine:
         bboxes = np.array([d["bbox"] for d in detections])
         cx = (bboxes[:, 0] + bboxes[:, 2]) / 2.0
         cy = (bboxes[:, 1] + bboxes[:, 3]) / 2.0
-        sample_n = min(n, sample_size)
+        # Evenly-spaced indices avoid clustering bias that would arise from
+        # always taking the first sample_n detections.
+        sample_idx = np.linspace(0, n - 1, min(n, sample_size), dtype=int)
         min_dists: List[float] = []
-        for i in range(sample_n):
+        for i in sample_idx:
             dists = np.sqrt((cx[i] - cx) ** 2 + (cy[i] - cy) ** 2)
             dists[i] = float('inf')
             min_dists.append(float(np.min(dists)))

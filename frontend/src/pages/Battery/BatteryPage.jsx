@@ -1967,7 +1967,7 @@ export default function BatteryPage() {
                 </Col>
 
                 {/* Diameter — read-only display */}
-                <Col xs={12} sm="auto">
+                <Col xs="auto">
                   <Space direction="vertical" size={4}>
                     <span style={{ fontSize: 11, color: caliperMode === 'dia' ? '#1677ff' : '#8c8c8c', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'dia' ? 600 : 400 }}>
                       {t('batteryCaliperDia')} (mm)
@@ -1997,7 +1997,7 @@ export default function BatteryPage() {
                 </Col>
 
                 {/* Height — read-only display */}
-                <Col xs={12} sm="auto">
+                <Col xs="auto">
                   <Space direction="vertical" size={4}>
                     <span style={{ fontSize: 11, color: caliperMode === 'hei' ? '#52c41a' : '#8c8c8c', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'hei' ? 600 : 400 }}>
                       {t('batteryCaliperHei')} (mm)

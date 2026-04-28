@@ -18,21 +18,21 @@ const { Option } = Select;
 const { RangePicker } = DatePicker;
 
 const STATUS_COLORS = {
-  'Waiting...': '#ffffff',
-  'Testing...': '#00e5ff',
-  'Done': '#69f0ae',
-  'Remove': '#69f0ae',
-  'Saving...': '#ffee58',
-  'Stopped': '#9e9e9e',
-  'Error': '#ef5350',
+  'Waiting...': '#8c8c8c',
+  'Testing...': '#1677ff',
+  'Done': '#52c41a',
+  'Remove': '#52c41a',
+  'Saving...': '#d48806',
+  'Stopped': '#8c8c8c',
+  'Error': '#f5222d',
 };
 
 function getStatusColor(text) {
-  if (!text) return '#ffffff';
+  if (!text) return '#595959';
   for (const [key, color] of Object.entries(STATUS_COLORS)) {
     if (text.includes(key)) return color;
   }
-  return '#ffffff';
+  return '#595959';
 }
 
 const MAX_RETRIES = 3;
@@ -126,19 +126,18 @@ function RowWithPopover({ record, readingsByBattery, buildMiniChartOption, ...ro
     return <tr {...rowProps} />;
   }
   const popoverContent = (
-    <div style={{ width: 900, background: '#1a1a1a', borderRadius: 6, padding: 4 }}>
+    <div style={{ width: 900, borderRadius: 6, padding: 4, border: '1px solid #f0f0f0' }}>
       <ReactECharts
         option={buildMiniChartOption(record.id)}
         style={{ height: 450, width: 900 }}
         notMerge
-        theme="dark"
       />
     </div>
   );
   return (
     <Popover
       content={popoverContent}
-      overlayInnerStyle={{ background: '#1a1a1a', padding: 0 }}
+      overlayInnerStyle={{ padding: 0 }}
       overlayStyle={{ maxWidth: 940 }}
       placement="left"
       mouseEnterDelay={0.3}
@@ -1052,24 +1051,24 @@ export default function BatteryPage() {
       top: 4,
       data: ['OCV', 'CCV'],
       selected: legendSelected,
-      textStyle: { color: '#aaa', fontSize: 12 },
+      textStyle: { color: '#595959', fontSize: 12 },
     },
     tooltip: { trigger: 'axis', formatter: (params) => params.map(p => `${p.marker}${p.seriesName}: ${p.value[1]?.toFixed(3)} V @ ${p.value[0]}s`).join('<br/>') },
     xAxis: {
       type: 'value',
       name: 's',
       nameLocation: 'end',
-      axisLabel: { color: '#aaa' },
-      axisLine: { lineStyle: { color: '#444' } },
-      splitLine: { lineStyle: { color: '#2a2a2a' } },
+      axisLabel: { color: '#595959' },
+      axisLine: { lineStyle: { color: '#d9d9d9' } },
+      splitLine: { lineStyle: { color: '#f0f0f0' } },
     },
     yAxis: {
       type: 'value',
       name: 'V',
       nameLocation: 'end',
-      axisLabel: { color: '#aaa' },
-      axisLine: { lineStyle: { color: '#444' } },
-      splitLine: { lineStyle: { color: '#2a2a2a' } },
+      axisLabel: { color: '#595959' },
+      axisLine: { lineStyle: { color: '#d9d9d9' } },
+      splitLine: { lineStyle: { color: '#f0f0f0' } },
       ...yAxisScale,
     },
     dataZoom: autoScroll
@@ -1403,15 +1402,15 @@ export default function BatteryPage() {
       xAxis: {
         type: 'value',
         name: 's',
-        axisLabel: { color: '#aaa', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#2a2a2a' } },
+        axisLabel: { color: '#595959', fontSize: 10 },
+        splitLine: { lineStyle: { color: '#f0f0f0' } },
       },
       yAxis: {
         type: 'value',
         name: 'V',
         scale: true,
-        axisLabel: { color: '#aaa', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#2a2a2a' } },
+        axisLabel: { color: '#595959', fontSize: 10 },
+        splitLine: { lineStyle: { color: '#f0f0f0' } },
       },
       series: [
         { name: 'OCV', type: 'line', data: ocvData, symbol: 'none', lineStyle: { color: '#ffee58', width: 1.5 } },
@@ -1544,14 +1543,14 @@ export default function BatteryPage() {
     <div>
       <style>{`.battery-row-bad td { background: rgba(255,77,79,0.12) !important; }`}</style>
       {/* Station Selector */}
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 8 }}>
         <Card
           size="small"
-          style={{ borderColor: selectedStation ? '#177ddc' : '#434343', background: '#141414' }}
+          style={{ borderColor: selectedStation ? '#1677ff' : '#d9d9d9' }}
           title={
             <Space>
               <span>🏭</span>
-              <span style={{ color: '#fff' }}>Chọn trạm kiểm tra</span>
+              <span>Chọn trạm kiểm tra</span>
               {selectedStation && (
                 <Badge status="success" text={
                   <span style={{ color: '#52c41a', fontSize: 12 }}>{selectedStation.name}</span>
@@ -1616,11 +1615,11 @@ export default function BatteryPage() {
       </div>
 
       {/* Header */}
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 8 }}>
         <Tabs
           activeKey={pageTab}
           onChange={setPageTab}
-          size="large"
+          size="small"
           items={[
             { key: 'test', label: t('batteryTestTab') },
             { key: 'history', label: t('batteryHistoryTab') },
@@ -1886,16 +1885,18 @@ export default function BatteryPage() {
           {/* Status Bar */}
           <div
             style={{
-              background: '#000',
+              background: '#fafafa',
+              border: '1px solid #f0f0f0',
+              borderLeft: `4px solid ${statusColor}`,
               borderRadius: 8,
-              padding: '12px 20px',
-              marginBottom: 16,
+              padding: '8px 16px',
+              marginBottom: 8,
               color: statusColor,
-              fontSize: 18,
+              fontSize: 15,
               fontWeight: 600,
               fontFamily: 'monospace',
               letterSpacing: 1,
-              minHeight: 48,
+              minHeight: 36,
               display: 'flex',
               alignItems: 'center',
               gap: 12,
@@ -1922,7 +1923,7 @@ export default function BatteryPage() {
                   )}
                 </Space>
               }
-              style={{ marginBottom: 16, border: '1px solid #3a3a5c', background: '#14142a' }}
+              style={{ marginBottom: 8 }}
             >
               {/* Row 1: mode selector + live buffer + read-only value cells */}
               <Row gutter={[16, 12]} align="middle" wrap>
@@ -1958,9 +1959,9 @@ export default function BatteryPage() {
                       style={{
                         width: 170,
                         fontFamily: 'monospace',
-                        background: caliperBuffer ? '#0d2b0d' : '#1a1a2e',
-                        borderColor: caliperBuffer ? '#52c41a' : '#3a3a5c',
-                        color: caliperBuffer ? '#52c41a' : '#888',
+                        background: caliperBuffer ? '#f6ffed' : '#fafafa',
+                        borderColor: caliperBuffer ? '#52c41a' : '#d9d9d9',
+                        color: caliperBuffer ? '#389e0d' : '#8c8c8c',
                       }}
                       readOnly
                       tabIndex={-1}
@@ -1971,7 +1972,7 @@ export default function BatteryPage() {
                 {/* Diameter — read-only display */}
                 <Col xs={12} sm="auto">
                   <Space direction="vertical" size={4}>
-                    <span style={{ fontSize: 11, color: caliperMode === 'dia' ? '#69b1ff' : '#888', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'dia' ? 600 : 400 }}>
+                    <span style={{ fontSize: 11, color: caliperMode === 'dia' ? '#1677ff' : '#8c8c8c', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'dia' ? 600 : 400 }}>
                       {t('batteryCaliperDia')} (mm)
                     </span>
                     <div
@@ -1983,13 +1984,13 @@ export default function BatteryPage() {
                         fontFamily: 'monospace',
                         fontSize: 14,
                         fontWeight: 600,
-                        border: `1px solid ${caliperMode === 'dia' ? '#69b1ff' : '#3a3a5c'}`,
+                        border: `1px solid ${caliperMode === 'dia' ? '#1677ff' : '#d9d9d9'}`,
                         borderRadius: 6,
-                        background: caliperDia ? '#1a2a3a' : '#111',
-                        color: caliperDia ? '#69b1ff' : '#555',
+                        background: caliperDia ? '#e6f4ff' : '#fafafa',
+                        color: caliperDia ? '#1677ff' : '#bfbfbf',
                         userSelect: 'none',
                         cursor: 'default',
-                        boxShadow: caliperMode === 'dia' ? '0 0 6px #69b1ff55' : 'none',
+                        boxShadow: caliperMode === 'dia' ? '0 0 6px #1677ff33' : 'none',
                         transition: 'all 0.2s',
                       }}
                     >
@@ -2001,7 +2002,7 @@ export default function BatteryPage() {
                 {/* Height — read-only display */}
                 <Col xs={12} sm="auto">
                   <Space direction="vertical" size={4}>
-                    <span style={{ fontSize: 11, color: caliperMode === 'hei' ? '#95de64' : '#888', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'hei' ? 600 : 400 }}>
+                    <span style={{ fontSize: 11, color: caliperMode === 'hei' ? '#52c41a' : '#8c8c8c', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'hei' ? 600 : 400 }}>
                       {t('batteryCaliperHei')} (mm)
                     </span>
                     <div
@@ -2013,13 +2014,13 @@ export default function BatteryPage() {
                         fontFamily: 'monospace',
                         fontSize: 14,
                         fontWeight: 600,
-                        border: `1px solid ${caliperMode === 'hei' ? '#95de64' : '#3a3a5c'}`,
+                        border: `1px solid ${caliperMode === 'hei' ? '#52c41a' : '#d9d9d9'}`,
                         borderRadius: 6,
-                        background: caliperHei ? '#1a2b1a' : '#111',
-                        color: caliperHei ? '#95de64' : '#555',
+                        background: caliperHei ? '#f6ffed' : '#fafafa',
+                        color: caliperHei ? '#389e0d' : '#bfbfbf',
                         userSelect: 'none',
                         cursor: 'default',
-                        boxShadow: caliperMode === 'hei' ? '0 0 6px #95de6455' : 'none',
+                        boxShadow: caliperMode === 'hei' ? '0 0 6px #52c41a33' : 'none',
                         transition: 'all 0.2s',
                       }}
                     >
@@ -2150,14 +2151,13 @@ export default function BatteryPage() {
                 }
                 extra={<Button icon={<FullscreenOutlined />} size="small" onClick={() => setChartZoomVisible(true)} />}
                 size="small"
-                bodyStyle={{ padding: 8, background: '#111', borderRadius: '0 0 8px 8px' }}
+                bodyStyle={{ padding: 8 }}
               >
                 <ReactECharts
                   option={chartOption}
                   style={{ height: 280 }}
                   notMerge={true}
                   lazyUpdate={true}
-                  theme="dark"
                   onEvents={{
                     legendselectchanged: (params) => setLegendSelected(params.selected),
                   }}
@@ -2721,13 +2721,12 @@ export default function BatteryPage() {
         width="90vw"
         title={t('batteryChart')}
         destroyOnClose
-        bodyStyle={{ background: '#111', padding: 8 }}
+        bodyStyle={{ padding: 8 }}
       >
         <ReactECharts
           option={{ ...chartOption, dataZoom: ZOOM_CHART_DATA_ZOOM }}
           style={{ height: 'calc(80vh - 60px)' }}
           notMerge={true}
-          theme="dark"
           onEvents={{
             legendselectchanged: (params) => setLegendSelected(params.selected),
           }}

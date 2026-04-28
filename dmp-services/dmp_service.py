@@ -1726,6 +1726,23 @@ def get_batches(year: Optional[int] = None):
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_batches: could not load para_pur data: %s", exc)
 
+    # Load dcph (serial no.) and bz (remarks) from para_singl.
+    # In DMP V7.x databases these fields are stored per-channel in para_singl
+    # rather than in para_pur, so they serve as a reliable fallback when
+    # para_pur is absent or its join key does not match.
+    singl_extras_by_sid: dict[str, dict] = {}
+    try:
+        extras_rows = _read_dmpdata(
+            "SELECT sid, MIN(dcph) AS dcph, MIN(bz) AS bz"
+            " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
+        )
+        for er in extras_rows:
+            sid = er.get("sid")
+            if sid is not None:
+                singl_extras_by_sid[str(sid)] = er
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_batches: could not load para_singl dcph/bz: %s", exc)
+
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
 
@@ -1789,6 +1806,20 @@ def get_batches(year: Optional[int] = None):
                 row["duration"] = _dm2000_get_value(pur, "duration", "fdts")
             if not row.get("uniformity"):
                 row["uniformity"] = _dm2000_get_value(pur, "uniformity", "unifrate", "hl", "hlfd")
+
+        # Fallback: read serialno (dcph) and remarks (bz) from para_singl when
+        # para_pur was unavailable or did not carry these fields.  This covers DMP
+        # V7.x databases where employees record notes in para_singl.dcph / bz.
+        singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
+        if singl_ext:
+            if not row.get("serialno"):
+                dcph_val = singl_ext.get("dcph")
+                if dcph_val not in (None, "", "--"):
+                    row["serialno"] = str(dcph_val).strip()
+            if not row.get("remarks"):
+                bz_val = singl_ext.get("bz")
+                if bz_val not in (None, "", "--"):
+                    row["remarks"] = str(bz_val).strip()
 
         # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
         # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is

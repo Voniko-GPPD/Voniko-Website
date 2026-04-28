@@ -12,7 +12,7 @@ import {
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import { useLang } from '../../contexts/LangContext';
-import { uploadTemplate, getTemplateInfo, downloadReportFromTemplate, uploadArchive, getArchiveInfo, downloadArchiveReport, getStations } from '../../api/battery';
+import { uploadTemplate, getTemplateInfo, downloadReportFromTemplate, uploadArchive, getArchiveInfo, downloadArchiveReport, getStations, getBatteryTypes, createBatteryType, deleteBatteryType, getBatteryProductLines, createBatteryProductLine, deleteBatteryProductLine, getBatteryPresets, upsertBatteryPreset, deleteBatteryPreset } from '../../api/battery';
 
 const { Option } = Select;
 const { RangePicker } = DatePicker;
@@ -159,14 +159,17 @@ export default function BatteryPage() {
   const [ocvMax, setOcvMax] = useState(() => getInitialSession().ocvMax ?? null);
   const [ccvMin, setCcvMin] = useState(() => getInitialSession().ccvMin ?? null);
   const [ccvMax, setCcvMax] = useState(() => getInitialSession().ccvMax ?? null);
-  const [presets, setPresets] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('battery_presets') || '{}'); } catch { return {}; }
-  });
+  const [presets, setPresets] = useState({});
+  const [batteryTypes, setBatteryTypes] = useState([]);
+  const [productLines, setProductLines] = useState([]);
   const [setupForm, setSetupForm] = useState({
-    batteryType: 'LR6', productLine: 'UD+',
+    batteryType: '', productLine: '',
     resistance: 3.9, ocvTime: 1.0, loadTime: 0.3, kCoeff: 1.0,
     ocvMin: null, ocvMax: null, ccvMin: null, ccvMax: null,
   });
+  const [newTypeName, setNewTypeName] = useState('');
+  const [newLineName, setNewLineName] = useState('');
+  const [typeLineLoading, setTypeLineLoading] = useState(false);
 
   // Display
   const [statusText, setStatusText] = useState('Waiting...');
@@ -1039,7 +1042,7 @@ export default function BatteryPage() {
   ];
 
   // Preset handlers
-  const handleSavePreset = useCallback(() => {
+  const handleSavePreset = useCallback(async () => {
     if (!setupForm.batteryType || !setupForm.productLine) {
       notification.warning({ message: t('batterySelectTypeAndLine') });
       return;
@@ -1048,10 +1051,8 @@ export default function BatteryPage() {
       notification.warning({ message: t('batteryFillRequiredFields') });
       return;
     }
-    const key = makePresetKey(setupForm.batteryType, setupForm.productLine);
-    const newPresets = {
-      ...presets,
-      [key]: {
+    try {
+      await upsertBatteryPreset({
         batteryType: setupForm.batteryType,
         productLine: setupForm.productLine,
         resistance: setupForm.resistance,
@@ -1062,19 +1063,54 @@ export default function BatteryPage() {
         ocvMax: setupForm.ocvMax,
         ccvMin: setupForm.ccvMin,
         ccvMax: setupForm.ccvMax,
-      },
-    };
-    setPresets(newPresets);
-    try { localStorage.setItem('battery_presets', JSON.stringify(newPresets)); } catch { }
-    notification.success({ message: t('batterySetupSaved') });
-  }, [setupForm, presets, t]);
+      });
+      const res = await getBatteryPresets();
+      const presetsMap = {};
+      for (const p of res.data.presets) {
+        presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
+          batteryType: p.battery_type,
+          productLine: p.product_line,
+          resistance: p.resistance,
+          ocvTime: p.ocv_time,
+          loadTime: p.load_time,
+          kCoeff: p.k_coeff,
+          ocvMin: p.ocv_min,
+          ocvMax: p.ocv_max,
+          ccvMin: p.ccv_min,
+          ccvMax: p.ccv_max,
+        };
+      }
+      setPresets(presetsMap);
+      notification.success({ message: t('batterySetupSaved') });
+    } catch (e) {
+      notification.error({ message: e?.response?.data?.error || e.message });
+    }
+  }, [setupForm, t]);
 
-  const handleDeletePreset = useCallback((key) => {
-    const newPresets = { ...presets };
-    delete newPresets[key];
-    setPresets(newPresets);
-    try { localStorage.setItem('battery_presets', JSON.stringify(newPresets)); } catch { }
-  }, [presets]);
+  const handleDeletePreset = useCallback(async (batteryTypeVal, productLineVal) => {
+    try {
+      await deleteBatteryPreset(batteryTypeVal, productLineVal);
+      const res = await getBatteryPresets();
+      const presetsMap = {};
+      for (const p of res.data.presets) {
+        presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
+          batteryType: p.battery_type,
+          productLine: p.product_line,
+          resistance: p.resistance,
+          ocvTime: p.ocv_time,
+          loadTime: p.load_time,
+          kCoeff: p.k_coeff,
+          ocvMin: p.ocv_min,
+          ocvMax: p.ocv_max,
+          ccvMin: p.ccv_min,
+          ccvMax: p.ccv_max,
+        };
+      }
+      setPresets(presetsMap);
+    } catch (e) {
+      notification.error({ message: e?.response?.data?.error || e.message });
+    }
+  }, []);
 
   const ocvSpec = React.useMemo(() => {
     const min = parseFloat(ocvMin);
@@ -1361,7 +1397,37 @@ export default function BatteryPage() {
     }).catch(() => { });
   }, []);
 
-  // Auto-fill params from preset when batteryType/productLine changes
+  // Load battery types, product lines, and presets from server on mount
+  useEffect(() => {
+    const loadServerData = async () => {
+      try {
+        const [typesRes, linesRes, presetsRes] = await Promise.all([
+          getBatteryTypes(),
+          getBatteryProductLines(),
+          getBatteryPresets(),
+        ]);
+        setBatteryTypes(typesRes.data.types || []);
+        setProductLines(linesRes.data.productLines || []);
+        const presetsMap = {};
+        for (const p of (presetsRes.data.presets || [])) {
+          presetsMap[makePresetKey(p.battery_type, p.product_line)] = {
+            batteryType: p.battery_type,
+            productLine: p.product_line,
+            resistance: p.resistance,
+            ocvTime: p.ocv_time,
+            loadTime: p.load_time,
+            kCoeff: p.k_coeff,
+            ocvMin: p.ocv_min,
+            ocvMax: p.ocv_max,
+            ccvMin: p.ccv_min,
+            ccvMax: p.ccv_max,
+          };
+        }
+        setPresets(presetsMap);
+      } catch { }
+    };
+    loadServerData();
+  }, []);
   useEffect(() => {
     const preset = presets[makePresetKey(batteryType, productLine)];
     if (preset) {
@@ -1655,8 +1721,7 @@ export default function BatteryPage() {
                         disabled={inputsDisabled}
                         style={{ width: '100%' }}
                       >
-                        <Option value="LR6">LR6</Option>
-                        <Option value="LR03">LR03</Option>
+                        {batteryTypes.map(bt => <Option key={bt.id} value={bt.name}>{bt.name}</Option>)}
                       </Select>
                     </Form.Item>
                   </Col>
@@ -1668,9 +1733,7 @@ export default function BatteryPage() {
                         disabled={inputsDisabled}
                         style={{ width: '100%' }}
                       >
-                        <Option value="UD+">UD+</Option>
-                        <Option value="UD">UD</Option>
-                        <Option value="HP">HP</Option>
+                        {productLines.map(pl => <Option key={pl.id} value={pl.name}>{pl.name}</Option>)}
                       </Select>
                     </Form.Item>
                   </Col>
@@ -2063,8 +2126,7 @@ export default function BatteryPage() {
                 allowClear
                 onChange={(value) => setHistoryTypeFilter(value || '')}
               >
-                <Option value="LR6">LR6</Option>
-                <Option value="LR03">LR03</Option>
+                {batteryTypes.map(bt => <Option key={bt.id} value={bt.name}>{bt.name}</Option>)}
               </Select>
             </Col>
             <Col xs={12} sm={8} md={4} lg={3}>
@@ -2075,9 +2137,7 @@ export default function BatteryPage() {
                 allowClear
                 onChange={(value) => setHistoryLineFilter(value || '')}
               >
-                <Option value="UD+">UD+</Option>
-                <Option value="UD">UD</Option>
-                <Option value="HP">HP</Option>
+                {productLines.map(pl => <Option key={pl.id} value={pl.name}>{pl.name}</Option>)}
               </Select>
             </Col>
             <Col xs={24} sm={16} md={8} lg={6}>
@@ -2151,31 +2211,180 @@ export default function BatteryPage() {
           size="small"
           title={t('batterySetupTab')}
         >
+          {/* Manage Battery Types and Product Lines */}
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={12}>
+              <Card size="small" title={t('batteryManageTypes')} style={{ marginBottom: 8 }}>
+                <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
+                  <Input
+                    value={newTypeName}
+                    onChange={(e) => setNewTypeName(e.target.value)}
+                    placeholder={t('batteryTypeNamePlaceholder')}
+                    onPressEnter={async () => {
+                      if (!newTypeName.trim()) return;
+                      setTypeLineLoading(true);
+                      try {
+                        await createBatteryType(newTypeName.trim());
+                        const res = await getBatteryTypes();
+                        setBatteryTypes(res.data.types || []);
+                        setNewTypeName('');
+                        notification.success({ message: t('batteryTypeAdded') });
+                      } catch (e) {
+                        notification.error({ message: e?.response?.status === 409 ? t('batteryTypeExists') : (e?.response?.data?.error || e.message) });
+                      } finally { setTypeLineLoading(false); }
+                    }}
+                  />
+                  <Button
+                    type="primary"
+                    loading={typeLineLoading}
+                    onClick={async () => {
+                      if (!newTypeName.trim()) return;
+                      setTypeLineLoading(true);
+                      try {
+                        await createBatteryType(newTypeName.trim());
+                        const res = await getBatteryTypes();
+                        setBatteryTypes(res.data.types || []);
+                        setNewTypeName('');
+                        notification.success({ message: t('batteryTypeAdded') });
+                      } catch (e) {
+                        notification.error({ message: e?.response?.status === 409 ? t('batteryTypeExists') : (e?.response?.data?.error || e.message) });
+                      } finally { setTypeLineLoading(false); }
+                    }}
+                  >
+                    {t('batteryAddType')}
+                  </Button>
+                </Space.Compact>
+                <Space wrap>
+                  {batteryTypes.map(bt => (
+                    <Tag
+                      key={bt.id}
+                      closable
+                      onClose={(e) => {
+                        e.preventDefault();
+                        Modal.confirm({
+                          title: t('batteryDeleteTypeConfirm'),
+                          content: bt.name,
+                          okText: t('delete'),
+                          cancelText: t('cancel'),
+                          okButtonProps: { danger: true },
+                          onOk: async () => {
+                            try {
+                              await deleteBatteryType(bt.id);
+                              const res = await getBatteryTypes();
+                              setBatteryTypes(res.data.types || []);
+                              notification.success({ message: t('batteryTypeDeleted') });
+                            } catch (err) {
+                              notification.error({ message: err?.response?.data?.error || err.message });
+                            }
+                          },
+                        });
+                      }}
+                    >
+                      {bt.name}
+                    </Tag>
+                  ))}
+                </Space>
+              </Card>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Card size="small" title={t('batteryManageLines')} style={{ marginBottom: 8 }}>
+                <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
+                  <Input
+                    value={newLineName}
+                    onChange={(e) => setNewLineName(e.target.value)}
+                    placeholder={t('batteryLineNamePlaceholder')}
+                    onPressEnter={async () => {
+                      if (!newLineName.trim()) return;
+                      setTypeLineLoading(true);
+                      try {
+                        await createBatteryProductLine(newLineName.trim());
+                        const res = await getBatteryProductLines();
+                        setProductLines(res.data.productLines || []);
+                        setNewLineName('');
+                        notification.success({ message: t('batteryLineAdded') });
+                      } catch (e) {
+                        notification.error({ message: e?.response?.status === 409 ? t('batteryLineExists') : (e?.response?.data?.error || e.message) });
+                      } finally { setTypeLineLoading(false); }
+                    }}
+                  />
+                  <Button
+                    type="primary"
+                    loading={typeLineLoading}
+                    onClick={async () => {
+                      if (!newLineName.trim()) return;
+                      setTypeLineLoading(true);
+                      try {
+                        await createBatteryProductLine(newLineName.trim());
+                        const res = await getBatteryProductLines();
+                        setProductLines(res.data.productLines || []);
+                        setNewLineName('');
+                        notification.success({ message: t('batteryLineAdded') });
+                      } catch (e) {
+                        notification.error({ message: e?.response?.status === 409 ? t('batteryLineExists') : (e?.response?.data?.error || e.message) });
+                      } finally { setTypeLineLoading(false); }
+                    }}
+                  >
+                    {t('batteryAddLine')}
+                  </Button>
+                </Space.Compact>
+                <Space wrap>
+                  {productLines.map(pl => (
+                    <Tag
+                      key={pl.id}
+                      closable
+                      onClose={(e) => {
+                        e.preventDefault();
+                        Modal.confirm({
+                          title: t('batteryDeleteLineConfirm'),
+                          content: pl.name,
+                          okText: t('delete'),
+                          cancelText: t('cancel'),
+                          okButtonProps: { danger: true },
+                          onOk: async () => {
+                            try {
+                              await deleteBatteryProductLine(pl.id);
+                              const res = await getBatteryProductLines();
+                              setProductLines(res.data.productLines || []);
+                              notification.success({ message: t('batteryLineDeleted') });
+                            } catch (err) {
+                              notification.error({ message: err?.response?.data?.error || err.message });
+                            }
+                          },
+                        });
+                      }}
+                    >
+                      {pl.name}
+                    </Tag>
+                  ))}
+                </Space>
+              </Card>
+            </Col>
+          </Row>
+
           {/* Preset Form */}
           <Card size="small" title={t('batterySetupAddEdit')} style={{ marginBottom: 16 }}>
             <Row gutter={[8, 8]}>
               <Col xs={12} sm={6}>
                 <Form.Item label={t('batteryType')} style={{ marginBottom: 0 }}>
                   <Select
-                    value={setupForm.batteryType}
+                    value={setupForm.batteryType || undefined}
+                    placeholder={t('batteryType')}
                     onChange={(v) => setSetupForm(f => ({ ...f, batteryType: v }))}
                     style={{ width: '100%' }}
                   >
-                    <Option value="LR6">LR6</Option>
-                    <Option value="LR03">LR03</Option>
+                    {batteryTypes.map(bt => <Option key={bt.id} value={bt.name}>{bt.name}</Option>)}
                   </Select>
                 </Form.Item>
               </Col>
               <Col xs={12} sm={6}>
                 <Form.Item label={t('batteryProductLine')} style={{ marginBottom: 0 }}>
                   <Select
-                    value={setupForm.productLine}
+                    value={setupForm.productLine || undefined}
+                    placeholder={t('batteryProductLine')}
                     onChange={(v) => setSetupForm(f => ({ ...f, productLine: v }))}
                     style={{ width: '100%' }}
                   >
-                    <Option value="UD+">UD+</Option>
-                    <Option value="UD">UD</Option>
-                    <Option value="HP">HP</Option>
+                    {productLines.map(pl => <Option key={pl.id} value={pl.name}>{pl.name}</Option>)}
                   </Select>
                 </Form.Item>
               </Col>
@@ -2302,7 +2511,7 @@ export default function BatteryPage() {
                             okText: t('delete'),
                             cancelText: t('cancel'),
                             okButtonProps: { danger: true },
-                            onOk: () => handleDeletePreset(makePresetKey(preset.batteryType, preset.productLine)),
+                            onOk: () => handleDeletePreset(preset.batteryType, preset.productLine),
                           });
                         }}
                       />
@@ -2332,8 +2541,8 @@ export default function BatteryPage() {
             setReadingsByBattery({});
             setOrderId('');
             setTestDate(dayjs());
-            setBatteryType('LR6');
-            setProductLine('UD+');
+            setBatteryType(batteryTypes[0]?.name || 'LR6');
+            setProductLine(productLines[0]?.name || 'UD+');
             setOcvMin(null);
             setOcvMax(null);
             setCcvMin(null);

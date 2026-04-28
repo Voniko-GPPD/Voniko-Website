@@ -1677,6 +1677,19 @@ def get_batches(year: Optional[int] = None):
             logger.error("get_batches: fallback query also failed: %s", exc)
             raise HTTPException(status_code=500, detail="Database query failed") from exc
 
+    # Build a channel-count map from para_singl in a single query so every batch
+    # row can be annotated without an N+1 per-batch lookup.
+    channel_counts: dict[str, int] = {}
+    try:
+        cc_rows = _read_dmpdata("SELECT sid, COUNT(baty) AS channel_count FROM para_singl GROUP BY sid")
+        for cc in cc_rows:
+            sid = cc.get("sid")
+            cnt = cc.get("channel_count")
+            if sid is not None and cnt is not None:
+                channel_counts[str(sid)] = int(cnt)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_batches: could not load channel counts from para_singl: %s", exc)
+
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
 
@@ -1704,6 +1717,21 @@ def get_batches(year: Optional[int] = None):
             val = row.get(_df)
             if val is not None and hasattr(val, "strftime"):
                 row[_df] = val.strftime("%Y-%m-%d")
+
+        # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
+        # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is
+        # the closest DMP equivalent to an archive identifier.  Map it to the
+        # display fields the frontend expects so those columns are not empty.
+        cdmc_val = (row.get("cdmc") or "").strip()
+        if cdmc_val:
+            if not row.get("name"):
+                row["name"] = cdmc_val
+            if not row.get("database"):
+                row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb")
+
+        # Attach the pre-computed channel count for this batch.
+        batch_id = row.get("id")
+        row["channel_count"] = channel_counts.get(str(batch_id)) if batch_id is not None else None
 
         if year is not None and row_year != year:
             continue

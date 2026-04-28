@@ -80,7 +80,7 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
     },
     { title: t('dm2000StartDate'), dataIndex: 'fdrq', key: 'fdrq', width: 120, render: (v) => v || '-' },
     { title: t('dm2000Type'), dataIndex: 'dcxh', key: 'dcxh', width: 120, render: (v) => v || '-' },
-    { title: t('dm2000Name'), dataIndex: 'name', key: 'name', width: 160, render: (v) => v || '-' },
+    { title: t('dm2000Name'), dataIndex: 'name', key: 'name', width: 200, ellipsis: true, render: (v) => v || '-' },
     {
       title: t('dm2000DisCondition'),
       dataIndex: 'fdfs',
@@ -88,13 +88,7 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
       width: 240,
       render: (v) => v || '-',
     },
-    { title: t('dm2000Duration'), dataIndex: 'duration', key: 'duration', width: 100, render: (v) => (v != null && v !== '') ? String(v) : '-' },
-    { title: t('dm2000UnifRate'), dataIndex: 'unifrate', key: 'unifrate', width: 100, render: (v) => (v != null && v !== '') ? String(v) : '-' },
-    { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 140, render: (v) => v || '-' },
-    { title: t('dm2000MadeDate'), dataIndex: 'madedate', key: 'madedate', width: 120, render: (v) => v || '-' },
-    { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160, render: (v) => v || '-' },
-    { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 120, render: (v) => v || '-' },
-    { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160, render: (v) => v || '-' },
+    { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
     { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 280, ellipsis: true, render: (v) => v || '-' },
   ];
 

@@ -525,6 +525,7 @@ export default {
   dmpSelectBatchToChart: 'Chọn lô để xem biểu đồ',
   dmpSelectBatchToExport: 'Chọn lô để xuất báo cáo',
   dmpBatchId: 'Mã lô',
+  dmpChannelCount: 'Số kênh',
   dmpPattern: 'Kịch bản phóng',
   dmpTotal: 'Tổng: {count} bản ghi',
   dmpKeywordFilterPlaceholder: 'Kiểu pin, Ngày, Kịch bản...',

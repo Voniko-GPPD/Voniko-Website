@@ -2644,12 +2644,26 @@ export default function BatteryPage() {
             setReadingsByBattery({});
             setOrderId('');
             setTestDate(dayjs());
-            setBatteryType(batteryTypes[0]?.name || '');
-            setProductLine(productLines[0]?.name || '');
-            setOcvMin(null);
-            setOcvMax(null);
-            setCcvMin(null);
-            setCcvMax(null);
+            const newBatteryType = batteryTypes[0]?.name || '';
+            const newProductLine = productLines[0]?.name || '';
+            setBatteryType(newBatteryType);
+            setProductLine(newProductLine);
+            const newPreset = presets[makePresetKey(newBatteryType, newProductLine)];
+            if (newPreset) {
+              setResistance(newPreset.resistance);
+              setOcvTime(newPreset.ocvTime);
+              setLoadTime(newPreset.loadTime);
+              setKCoeff(newPreset.kCoeff);
+              setOcvMin(newPreset.ocvMin ?? null);
+              setOcvMax(newPreset.ocvMax ?? null);
+              setCcvMin(newPreset.ccvMin ?? null);
+              setCcvMax(newPreset.ccvMax ?? null);
+            } else {
+              setOcvMin(null);
+              setOcvMax(null);
+              setCcvMin(null);
+              setCcvMax(null);
+            }
             resetLoadedSnapshotTracking();
             setResumeModalVisible(false);
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {

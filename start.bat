@@ -73,6 +73,15 @@ if not exist "backend\node_modules" (
     echo  [OK] Backend dependencies installed.
 ) else (
     echo  [OK] Backend node_modules already present.
+    echo  [..] Rebuilding native modules for this machine's Node.js...
+    cd backend
+    call npm rebuild
+    if errorlevel 1 (
+        echo  [WARN] npm rebuild failed. Backend may not start correctly.
+    ) else (
+        echo  [OK] Native modules rebuilt.
+    )
+    cd ..
 )
 
 if not exist "frontend\node_modules" (
@@ -166,6 +175,42 @@ if exist "frontend\dist" (
 
 call pm2 save --force >nul 2>&1
 echo  [OK] PM2 processes saved.
+echo.
+
+:: -------------------------------------------------------
+::  POST-START: Health check for voniko-backend
+:: -------------------------------------------------------
+echo  [..] Waiting 6 seconds for backend to stabilise...
+timeout /t 6 /nobreak >nul
+
+set BSTATUS=unknown
+for /f "tokens=2 delims=:" %%s in ('pm2 describe voniko-backend 2^>nul ^| findstr /i "status"') do (
+    set BSTATUS=%%s
+)
+
+echo  [..] Backend status:!BSTATUS!
+
+echo !BSTATUS! | findstr /i "online" >nul
+if errorlevel 1 (
+    echo.
+    echo  [ERROR] voniko-backend is NOT running correctly.
+    echo  [ERROR] Status:!BSTATUS!
+    echo  [ERROR] Last 30 lines of backend error log:
+    echo  -----------------------------------------------
+    if exist "logs\backend-error.log" (
+        powershell -Command "Get-Content 'logs\backend-error.log' -Tail 30"
+    ) else (
+        echo  ^(log file not found yet -- run: pm2 logs voniko-backend --lines 50^)
+    )
+    echo  -----------------------------------------------
+    echo  [HINT] Common causes:
+    echo         1. Node.js version mismatch -- run: node -v  on both machines
+    echo         2. Missing or invalid backend\.env  (check JWT_SECRET etc.)
+    echo         3. Port 3001 still occupied -- re-run start.bat
+    echo.
+) else (
+    echo  [OK] Backend is online.
+)
 echo.
 
 echo  +======================================================+

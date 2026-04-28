@@ -96,6 +96,7 @@ _WATCHED_CHANGES: dict[str, float] = {}
 _SCHEMA_TABLE_WHITELIST = {
     "para_singl",
     "para_pub",
+    "para_pur",
     "vidata",
     "ls_jb_cs",
     "ls_pam2",
@@ -1680,6 +1681,7 @@ def get_batches(year: Optional[int] = None):
     # Build a channel-count map from para_singl in a single query so every batch
     # row can be annotated without an N+1 per-batch lookup.
     channel_counts: dict[str, int] = {}
+    singl_cdmc_by_sid: dict[str, str] = {}
     try:
         cc_rows = _read_dmpdata("SELECT sid, COUNT(baty) AS channel_count FROM para_singl GROUP BY sid")
         for cc in cc_rows:
@@ -1690,8 +1692,43 @@ def get_batches(year: Optional[int] = None):
     except Exception as exc:  # noqa: BLE001
         logger.debug("get_batches: could not load channel counts from para_singl: %s", exc)
 
+    # Build a first-cdmc lookup from para_singl so the database path can be
+    # derived for batches where para_pub.cdmc is NULL.
+    try:
+        cdmc_rows = _read_dmpdata(
+            "SELECT sid, MIN(cdmc) AS cdmc FROM para_singl WHERE cdmc IS NOT NULL GROUP BY sid",
+        )
+        for cr in cdmc_rows:
+            sid = cr.get("sid")
+            cdmc = cr.get("cdmc")
+            if sid is not None and cdmc:
+                singl_cdmc_by_sid[str(sid)] = str(cdmc).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_batches: could not load para_singl cdmc: %s", exc)
+
+    # Load para_pur for extended batch info: battery type, batch name,
+    # manufacturer, made date, serial no., remarks, duration, uniformity.
+    # para_pur.sid = para_pub.id (same JOIN key as para_singl).
+    para_pur_by_sid: dict[str, dict] = {}
+    try:
+        pur_rows = _read_dmpdata("SELECT * FROM para_pur")
+        for pur in pur_rows:
+            sid = pur.get("sid")
+            if sid is not None:
+                para_pur_by_sid[str(sid)] = pur
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_batches: could not load para_pur data: %s", exc)
+
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
+
+    def _to_date_str(value):
+        if value is None:
+            return None
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d")
+        s = str(value)[:10]
+        return s if s and s != "None" else None
 
     result = []
     for row in rows:
@@ -1718,19 +1755,49 @@ def get_batches(year: Optional[int] = None):
             if val is not None and hasattr(val, "strftime"):
                 row[_df] = val.strftime("%Y-%m-%d")
 
+        # Merge extended fields from para_pur when available (dcxh, name,
+        # manufacturer, madedate, serialno, remarks, duration, uniformity).
+        batch_id = row.get("id")
+        pur = para_pur_by_sid.get(str(batch_id)) if batch_id is not None else None
+        if pur:
+            if not row.get("dcxh"):
+                row["dcxh"] = _dm2000_get_value(pur, "dcxh")
+            if not row.get("name"):
+                row["name"] = _dm2000_get_value(pur, "name", "batna", "batname", "dcmc")
+            if not row.get("manufacturer"):
+                row["manufacturer"] = _dm2000_get_value(pur, "manufacturer", "scdw")
+            if not row.get("madedate"):
+                row["madedate"] = _to_date_str(_dm2000_get_value(pur, "madedate", "scrq"))
+            if not row.get("serialno"):
+                row["serialno"] = _dm2000_get_value(pur, "serialno", "sno", "dcph")
+            if not row.get("remarks"):
+                row["remarks"] = _dm2000_get_value(pur, "remarks", "bz")
+            if not row.get("duration"):
+                row["duration"] = _dm2000_get_value(pur, "duration", "fdts")
+            if not row.get("uniformity"):
+                row["uniformity"] = _dm2000_get_value(pur, "uniformity", "unifrate", "hl", "hlfd")
+
         # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
         # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is
         # the closest DMP equivalent to an archive identifier.  Map it to the
         # display fields the frontend expects so those columns are not empty.
+        # Fall back to para_singl cdmc, then to the batch id itself.
         cdmc_val = (row.get("cdmc") or "").strip()
+        if not cdmc_val and batch_id is not None:
+            cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "")
+        if not cdmc_val and batch_id is not None:
+            cdmc_val = str(batch_id)
         if cdmc_val:
             if not row.get("name"):
                 row["name"] = cdmc_val
             if not row.get("database"):
                 row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb")
 
+        # Expose archname (= batch id) so the frontend keyword search can use it.
+        if not row.get("archname") and batch_id is not None:
+            row["archname"] = str(batch_id)
+
         # Attach the pre-computed channel count for this batch.
-        batch_id = row.get("id")
         row["channel_count"] = channel_counts.get(str(batch_id)) if batch_id is not None else None
 
         if year is not None and row_year != year:

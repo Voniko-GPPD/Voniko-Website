@@ -88,7 +88,7 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
       width: 240,
       render: (v) => v || '-',
     },
-    { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 200, ellipsis: true, render: (v) => v || '-' },
+    { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
     { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 280, ellipsis: true, render: (v) => v || '-' },
   ];
 

@@ -525,6 +525,7 @@ export default {
   dmpSelectBatchToChart: '请选择批次查看图表',
   dmpSelectBatchToExport: '请选择批次导出报告',
   dmpBatchId: '批次ID',
+  dmpChannelCount: '通道数',
   dmpPattern: '放电模式',
   dmpTotal: '共 {count} 条记录',
   dmpKeywordFilterPlaceholder: '型号、日期、模式...',

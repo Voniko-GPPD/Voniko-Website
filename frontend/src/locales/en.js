@@ -525,6 +525,7 @@ export default {
   dmpSelectBatchToChart: 'Select a batch to view chart',
   dmpSelectBatchToExport: 'Select a batch to export reports',
   dmpBatchId: 'Batch ID',
+  dmpChannelCount: 'Channels',
   dmpPattern: 'Discharge Pattern',
   dmpTotal: 'Total: {count} records',
   dmpKeywordFilterPlaceholder: 'Type, Date, Pattern...',

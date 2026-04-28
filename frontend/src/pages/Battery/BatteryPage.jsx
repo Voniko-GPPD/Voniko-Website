@@ -12,7 +12,7 @@ import {
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import { useLang } from '../../contexts/LangContext';
-import { uploadTemplate, getTemplateInfo, downloadReportFromTemplate, uploadArchive, getArchiveInfo, downloadArchiveReport, getStations, getBatteryTypes, createBatteryType, deleteBatteryType, getBatteryProductLines, createBatteryProductLine, deleteBatteryProductLine, getBatteryPresets, upsertBatteryPreset, deleteBatteryPreset } from '../../api/battery';
+import { uploadTemplate, getTemplateInfo, downloadReportFromTemplate, uploadArchive, getArchiveInfo, downloadArchiveReport, getStations, getBatteryTypes, createBatteryType, deleteBatteryType, getBatteryProductLines, createBatteryProductLine, deleteBatteryProductLine, getBatteryPresets, upsertBatteryPreset, deleteBatteryPreset, getOrderHistory, saveOrderHistorySnapshot, deleteOrderHistorySnapshot, clearOrderHistory } from '../../api/battery';
 
 const { Option } = Select;
 const { RangePicker } = DatePicker;
@@ -231,21 +231,18 @@ export default function BatteryPage() {
   const [readingsByBattery, setReadingsByBattery] = useState(() => getInitialSession().readingsByBattery || {});
 
   // Order history — each entry is a full order snapshot saved on session clear
-  const [orderHistory, setOrderHistory] = useState(() => {
-    try {
-      return dedupeOrderHistory(JSON.parse(localStorage.getItem('battery_order_history') || '[]'));
-    } catch {
-      return [];
-    }
-  });
+  const [orderHistory, setOrderHistory] = useState([]);
+  const [orderHistoryLoading, setOrderHistoryLoading] = useState(false);
   const [chartZoomVisible, setChartZoomVisible] = useState(false);
   const [tableZoomVisible, setTableZoomVisible] = useState(false);
 
   useEffect(() => {
-    try {
-      const normalized = dedupeOrderHistory(JSON.parse(localStorage.getItem('battery_order_history') || '[]'));
-      localStorage.setItem('battery_order_history', JSON.stringify(normalized));
-    } catch { }
+    setOrderHistoryLoading(true);
+    getOrderHistory().then((res) => {
+      setOrderHistory(res.data.items || []);
+    }).catch((e) => {
+      notification.error({ message: 'Không thể tải lịch sử đơn hàng', description: e?.message });
+    }).finally(() => setOrderHistoryLoading(false));
   }, []);
 
   // Order history UI state
@@ -649,19 +646,30 @@ export default function BatteryPage() {
       return;
     }
 
-    setOrderHistory(prev => {
-      const existingSnapshot = prev.find((item) => normalizeOrderId(item.orderId) === normalizedOrderId);
-      const nextSnapshot = {
-        _snapshotId: existingSnapshot?._snapshotId || loadedSnapshotIdRef.current || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        _savedAt: new Date().toISOString(),
-        ...snapshot,
-      };
-      const next = dedupeOrderHistory([
-        nextSnapshot,
-        ...prev.filter((item) => normalizeOrderId(item.orderId) !== normalizedOrderId),
-      ]);
-      try { localStorage.setItem('battery_order_history', JSON.stringify(next)); } catch { }
-      return next;
+    const payload = {
+      _snapshotId: loadedSnapshotIdRef.current || undefined,
+      ...snapshot,
+    };
+    saveOrderHistorySnapshot(payload).then((res) => {
+      const savedId = res.data.id;
+      const savedAt = res.data.savedAt;
+      setOrderHistory(prev => {
+        const entry = {
+          _snapshotId: savedId,
+          _savedAt: savedAt,
+          ...snapshot,
+        };
+        const next = dedupeOrderHistory([
+          entry,
+          ...prev.filter((item) => normalizeOrderId(item.orderId) !== normalizedOrderId),
+        ]);
+        return next;
+      });
+      if (!loadedSnapshotIdRef.current) {
+        loadedSnapshotIdRef.current = savedId;
+      }
+    }).catch((e) => {
+      notification.error({ message: 'Không thể lưu lịch sử đơn hàng', description: e?.message });
     });
   }, []);
 
@@ -693,14 +701,14 @@ export default function BatteryPage() {
 
   // Delete a specific order snapshot from history
   const handleDeleteOrderSnapshot = useCallback((snapshotId) => {
-    setOrderHistory(prev => {
-      const next = dedupeOrderHistory(prev.filter(s => s._snapshotId !== snapshotId));
-      try { localStorage.setItem('battery_order_history', JSON.stringify(next)); } catch { }
-      return next;
+    deleteOrderHistorySnapshot(snapshotId).then(() => {
+      setOrderHistory(prev => dedupeOrderHistory(prev.filter(s => s._snapshotId !== snapshotId)));
+      if (loadedSnapshotIdRef.current === snapshotId) {
+        resetLoadedSnapshotTracking();
+      }
+    }).catch((e) => {
+      notification.error({ message: 'Không thể xóa đơn hàng', description: e?.message });
     });
-    if (loadedSnapshotIdRef.current === snapshotId) {
-      resetLoadedSnapshotTracking();
-    }
   }, [resetLoadedSnapshotTracking]);
 
   // Clear session (save snapshot first, then clear)
@@ -2172,11 +2180,12 @@ export default function BatteryPage() {
                     okText: t('delete'),
                     cancelText: t('cancel'),
                     okButtonProps: { danger: true },
-                    onOk: () => {
+                    onOk: () => clearOrderHistory().then(() => {
                       setOrderHistory([]);
-                      localStorage.removeItem('battery_order_history');
                       resetLoadedSnapshotTracking();
-                    },
+                    }).catch((e) => {
+                      notification.error({ message: 'Không thể xóa lịch sử', description: e?.message });
+                    }),
                   });
                 }}
               >
@@ -2195,6 +2204,7 @@ export default function BatteryPage() {
               columns={historySummaryColumns}
               rowKey="_snapshotId"
               size="small"
+              loading={orderHistoryLoading}
               locale={{ emptyText: t('batteryHistoryNoMatch') }}
               pagination={{
                 pageSize: 10,

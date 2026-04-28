@@ -139,12 +139,39 @@ async function handleClientMessage(ws, msg) {
 
   // ── start ─────────────────────────────────────────────────────────────────
   if (action === 'start') {
+    // Ensure SSE relay is running (may have stopped after page reload)
+    startSseRelay(stationId, base);
     try {
       await axios.post(`${base}/start`, payload || {});
       broadcastToStation(stationId, { type: 'test_started', stationId });
+      // Sync current Python session state (records) to the frontend so that
+      // any records accumulated while the browser was disconnected appear immediately.
+      try {
+        const statusRes = await axios.get(`${base}/status`);
+        if (statusRes.data && Array.isArray(statusRes.data.records) && statusRes.data.records.length > 0) {
+          broadcastToStation(stationId, { type: 'status', data: statusRes.data, stationId });
+        }
+      } catch (statusErr) {
+        logger.debug('Battery status sync after start failed', { stationId, error: statusErr.message });
+      }
     } catch (e) {
       const detail = e.response?.data?.detail || e.message;
-      broadcastToStation(stationId, { type: 'error', message: detail, stationId });
+      const isAlreadyRunning = e.response?.status === 400 && detail && detail.includes('running');
+      if (isAlreadyRunning) {
+        // Test is already running (e.g. after page reload) — treat as a reconnect:
+        // tell the frontend the test is running and sync existing records.
+        broadcastToStation(stationId, { type: 'test_started', stationId });
+        try {
+          const statusRes = await axios.get(`${base}/status`);
+          if (statusRes.data) {
+            broadcastToStation(stationId, { type: 'status', data: statusRes.data, stationId });
+          }
+        } catch (statusErr) {
+          logger.debug('Battery status sync on reconnect failed', { stationId, error: statusErr.message });
+        }
+      } else {
+        broadcastToStation(stationId, { type: 'error', message: detail, stationId });
+      }
     }
     return;
   }
@@ -177,6 +204,10 @@ async function handleClientMessage(ws, msg) {
     try {
       const res = await axios.get(`${base}/status`);
       sendToClient(ws, { type: 'status', data: res.data, stationId });
+      // If a test is running, make sure the SSE relay is active for this station
+      if (res.data && res.data.running) {
+        startSseRelay(stationId, base);
+      }
     } catch (e) {
       sendToClient(ws, { type: 'error', message: e.message, stationId });
     }

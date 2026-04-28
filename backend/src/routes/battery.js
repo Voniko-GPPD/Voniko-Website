@@ -484,4 +484,108 @@ router.delete('/presets/:batteryType/:productLine', (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Battery Order History (lịch sử đơn hàng)
+// ---------------------------------------------------------------------------
+
+// GET /api/battery/order-history — list history for current user
+router.get('/order-history', (req, res) => {
+  try {
+    const rows = getDb().prepare(
+      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at FROM battery_order_history WHERE created_by = ? ORDER BY saved_at DESC LIMIT 200'
+    ).all(req.user.id);
+    const items = rows.map((row) => ({
+      _snapshotId: row.id,
+      _savedAt: row.saved_at,
+      orderId: row.order_id,
+      testDate: row.test_date,
+      batteryType: row.battery_type,
+      productLine: row.product_line,
+      records: JSON.parse(row.records_json || '[]'),
+      chartSeriesByBattery: JSON.parse(row.chart_series_json || '{}'),
+      readingsByBattery: JSON.parse(row.readings_json || '{}'),
+    }));
+    res.json({ items });
+  } catch (e) {
+    logger.error('GET /battery/order-history error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/battery/order-history — upsert a snapshot (keyed by order_id per user)
+router.post('/order-history', (req, res) => {
+  const { _snapshotId, orderId, testDate, batteryType, productLine, records, chartSeriesByBattery, readingsByBattery } = req.body || {};
+  if (!orderId || !String(orderId).trim()) {
+    return res.status(400).json({ error: 'orderId is required' });
+  }
+  try {
+    const db = getDb();
+    const normalizedOrderId = String(orderId).trim().toLowerCase();
+    // Check for existing snapshot with same order_id for this user
+    const existing = _snapshotId
+      ? db.prepare('SELECT id FROM battery_order_history WHERE id = ? AND created_by = ?').get(_snapshotId, req.user.id)
+      : db.prepare('SELECT id FROM battery_order_history WHERE lower(order_id) = ? AND created_by = ?').get(normalizedOrderId, req.user.id);
+    const savedAt = new Date().toISOString();
+    if (existing) {
+      db.prepare(
+        'UPDATE battery_order_history SET order_id=?, test_date=?, battery_type=?, product_line=?, records_json=?, chart_series_json=?, readings_json=?, saved_at=? WHERE id=?'
+      ).run(
+        String(orderId).trim(),
+        testDate || null,
+        batteryType || null,
+        productLine || null,
+        JSON.stringify(records || []),
+        JSON.stringify(chartSeriesByBattery || {}),
+        JSON.stringify(readingsByBattery || {}),
+        savedAt,
+        existing.id,
+      );
+      res.json({ ok: true, id: existing.id, savedAt });
+    } else {
+      const id = _snapshotId || uuidv4();
+      db.prepare(
+        'INSERT INTO battery_order_history (id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        id,
+        String(orderId).trim(),
+        testDate || null,
+        batteryType || null,
+        productLine || null,
+        JSON.stringify(records || []),
+        JSON.stringify(chartSeriesByBattery || {}),
+        JSON.stringify(readingsByBattery || {}),
+        savedAt,
+        req.user.id,
+      );
+      res.json({ ok: true, id, savedAt });
+    }
+  } catch (e) {
+    logger.error('POST /battery/order-history error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/battery/order-history — clear all history for current user
+router.delete('/order-history', (req, res) => {
+  try {
+    getDb().prepare('DELETE FROM battery_order_history WHERE created_by = ?').run(req.user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error('DELETE /battery/order-history error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/battery/order-history/:id — delete one snapshot
+router.delete('/order-history/:id', (req, res) => {
+  try {
+    const info = getDb().prepare('DELETE FROM battery_order_history WHERE id = ? AND created_by = ?').run(req.params.id, req.user.id);
+    if (info.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error('DELETE /battery/order-history/:id error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;

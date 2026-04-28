@@ -1726,14 +1726,13 @@ def get_batches(year: Optional[int] = None):
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_batches: could not load para_pur data: %s", exc)
 
-    # Load dcph (serial no.) and bz (remarks) from para_singl.
-    # In DMP V7.x databases these fields are stored per-channel in para_singl
-    # rather than in para_pur, so they serve as a reliable fallback when
-    # para_pur is absent or its join key does not match.
+    # Load scdw (manufacturer), dcph (serial no.), and jstj (cutoff voltage)
+    # from para_singl.  These are the primary sources for those display fields.
+    # para_singl stores values per-channel; MIN picks one representative value.
     singl_extras_by_sid: dict[str, dict] = {}
     try:
         extras_rows = _read_dmpdata(
-            "SELECT sid, MIN(dcph) AS dcph, MIN(bz) AS bz"
+            "SELECT sid, MIN(scdw) AS scdw, MIN(dcph) AS dcph, MIN(jstj) AS jstj"
             " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
         )
         for er in extras_rows:
@@ -1741,7 +1740,19 @@ def get_batches(year: Optional[int] = None):
             if sid is not None:
                 singl_extras_by_sid[str(sid)] = er
     except Exception as exc:  # noqa: BLE001
-        logger.debug("get_batches: could not load para_singl dcph/bz: %s", exc)
+        # Fallback: older schema may not have scdw/jstj columns.
+        logger.debug("get_batches: full singl extras query failed (%s), retrying without scdw/jstj", exc)
+        try:
+            extras_rows = _read_dmpdata(
+                "SELECT sid, MIN(dcph) AS dcph"
+                " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
+            )
+            for er in extras_rows:
+                sid = er.get("sid")
+                if sid is not None:
+                    singl_extras_by_sid[str(sid)] = er
+        except Exception as exc2:  # noqa: BLE001
+            logger.debug("get_batches: could not load para_singl extras: %s", exc2)
 
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
@@ -1794,32 +1805,45 @@ def get_batches(year: Optional[int] = None):
                 row["dcxh"] = _dm2000_get_value(pur, "dcxh")
             if not row.get("name"):
                 row["name"] = _dm2000_get_value(pur, "name", "batna", "batname", "dcmc")
-            if not row.get("manufacturer"):
-                row["manufacturer"] = _dm2000_get_value(pur, "manufacturer", "scdw")
             if not row.get("madedate"):
                 row["madedate"] = _to_date_str(_dm2000_get_value(pur, "madedate", "scrq"))
-            if not row.get("serialno"):
-                row["serialno"] = _dm2000_get_value(pur, "serialno", "sno", "dcph")
-            if not row.get("remarks"):
-                row["remarks"] = _dm2000_get_value(pur, "remarks", "bz")
             if not row.get("duration"):
                 row["duration"] = _dm2000_get_value(pur, "duration", "fdts")
             if not row.get("uniformity"):
                 row["uniformity"] = _dm2000_get_value(pur, "uniformity", "unifrate", "hl", "hlfd")
 
-        # Fallback: read serialno (dcph) and remarks (bz) from para_singl when
-        # para_pur was unavailable or did not carry these fields.  This covers DMP
-        # V7.x databases where employees record notes in para_singl.dcph / bz.
+        # Primary sources: manufacturer = para_singl.scdw, serialno = para_singl.dcph.
+        # Dis-condition (fdfs) is extended with the cutoff voltage from para_singl.jstj.
+        # Remarks come from para_pub.bz (already present in the row from SELECT *).
         singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
         if singl_ext:
+            scdw_val = singl_ext.get("scdw")
+            if scdw_val not in (None, "", "--"):
+                row["manufacturer"] = str(scdw_val).strip()
+            dcph_val = singl_ext.get("dcph")
+            if dcph_val not in (None, "", "--"):
+                row["serialno"] = str(dcph_val).strip()
+            # Append jstj cutoff voltage to the fdfs discharge condition string.
+            jstj_val = singl_ext.get("jstj")
+            if jstj_val not in (None, "", "--"):
+                jstj_str = str(jstj_val).strip().rstrip("Vv").strip()
+                if jstj_str:
+                    fdfs_base = (row.get("fdfs") or "").strip()
+                    row["fdfs"] = f"{fdfs_base} to {jstj_str} V" if fdfs_base else f"to {jstj_str} V"
+
+        # Fallback: fill manufacturer and serialno from para_pur when para_singl had no value.
+        if pur:
+            if not row.get("manufacturer"):
+                row["manufacturer"] = _dm2000_get_value(pur, "manufacturer", "scdw")
             if not row.get("serialno"):
-                dcph_val = singl_ext.get("dcph")
-                if dcph_val not in (None, "", "--"):
-                    row["serialno"] = str(dcph_val).strip()
-            if not row.get("remarks"):
-                bz_val = singl_ext.get("bz")
-                if bz_val not in (None, "", "--"):
-                    row["remarks"] = str(bz_val).strip()
+                row["serialno"] = _dm2000_get_value(pur, "serialno", "sno", "dcph")
+
+        # Remarks: primary source is para_pub.bz (in the row); fall back to para_pur.
+        bz_pub = _dm2000_get_value(row, "bz")
+        if bz_pub not in (None, ""):
+            row["remarks"] = str(bz_pub).strip()
+        elif pur and not row.get("remarks"):
+            row["remarks"] = _dm2000_get_value(pur, "remarks", "bz")
 
         # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
         # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is

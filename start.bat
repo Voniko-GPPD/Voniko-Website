@@ -69,6 +69,13 @@ if not exist "backend\node_modules" (
     cd backend
     call npm install
     call npm audit fix
+    echo  [..] Rebuilding native modules after install...
+    call npm rebuild
+    if errorlevel 1 (
+        echo  [WARN] npm rebuild failed. Backend may not start correctly.
+    ) else (
+        echo  [OK] Native modules rebuilt.
+    )
     cd ..
     echo  [OK] Backend dependencies installed.
 ) else (
@@ -180,21 +187,27 @@ echo.
 :: -------------------------------------------------------
 ::  POST-START: Health check for voniko-backend
 :: -------------------------------------------------------
-echo  [..] Waiting 6 seconds for backend to stabilise...
-timeout /t 6 /nobreak >nul
+echo  [..] Waiting 8 seconds for backend to stabilise...
+timeout /t 8 /nobreak >nul
 
-set BSTATUS=unknown
-for /f "tokens=2 delims=:" %%s in ('pm2 describe voniko-backend 2^>nul ^| findstr /i "status"') do (
-    set BSTATUS=%%s
+set BSTATUS=offline
+where curl >nul 2>&1
+if errorlevel 1 (
+    echo  [WARN] curl not found; skipping HTTP health check.
+    echo         Run: pm2 logs voniko-backend --lines 50  to inspect the backend.
+    set BSTATUS=unknown
+) else (
+    curl -s --max-time 10 http://localhost:3001/api/health 2>nul | findstr /i "\"ok\"" >nul 2>&1
+    if not errorlevel 1 set BSTATUS=online
 )
 
-echo  [..] Backend status:!BSTATUS!
+echo  [..] Backend status: !BSTATUS!
 
 echo !BSTATUS! | findstr /i "online" >nul
 if errorlevel 1 (
     echo.
     echo  [ERROR] voniko-backend is NOT running correctly.
-    echo  [ERROR] Status:!BSTATUS!
+    echo  [ERROR] Status: !BSTATUS!
     echo  [ERROR] Last 30 lines of backend error log:
     echo  -----------------------------------------------
     if exist "logs\backend-error.log" (
@@ -204,9 +217,11 @@ if errorlevel 1 (
     )
     echo  -----------------------------------------------
     echo  [HINT] Common causes:
-    echo         1. Node.js version mismatch -- run: node -v  on both machines
+    echo         1. Native module mismatch (better-sqlite3) -- re-run start.bat (npm rebuild
+    echo            runs automatically whether node_modules is new or already present)
     echo         2. Missing or invalid backend\.env  (check JWT_SECRET etc.)
     echo         3. Port 3001 still occupied -- re-run start.bat
+    echo         4. Run: pm2 logs voniko-backend --lines 100  for full error details
     echo.
 ) else (
     echo  [OK] Backend is online.

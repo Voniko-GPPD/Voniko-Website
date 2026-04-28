@@ -1546,7 +1546,8 @@ export default function BatteryPage() {
       <div style={{ marginBottom: 8 }}>
         <Card
           size="small"
-          style={{ borderColor: selectedStation ? '#1677ff' : '#d9d9d9' }}
+          style={{ borderColor: selectedStation ? '#1677ff' : '#d9d9d9', background: '#fff' }}
+          styles={{ header: { background: '#fff' } }}
           title={
             <Space>
               <span>🏭</span>
@@ -1885,7 +1886,7 @@ export default function BatteryPage() {
           {/* Status Bar */}
           <div
             style={{
-              background: '#fafafa',
+              background: '#fff',
               border: '1px solid #f0f0f0',
               borderLeft: `4px solid ${statusColor}`,
               borderRadius: 8,
@@ -1923,7 +1924,8 @@ export default function BatteryPage() {
                   )}
                 </Space>
               }
-              style={{ marginBottom: 8 }}
+              style={{ marginBottom: 8, background: '#fff' }}
+              styles={{ header: { background: '#fff' } }}
             >
               {/* Row 1: mode selector + live buffer + read-only value cells */}
               <Row gutter={[16, 12]} align="middle" wrap>

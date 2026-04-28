@@ -1709,15 +1709,22 @@ def get_batches(year: Optional[int] = None):
     # Load para_pur for extended batch info: battery type, batch name,
     # manufacturer, made date, serial no., remarks, duration, uniformity.
     # para_pur.sid = para_pub.id (same JOIN key as para_singl).
+    # A secondary lookup by cdmc handles databases that join via session file name.
     para_pur_by_sid: dict[str, dict] = {}
+    para_pur_by_cdmc: dict[str, dict] = {}
     try:
         pur_rows = _read_dmpdata("SELECT * FROM para_pur")
         for pur in pur_rows:
-            sid = pur.get("sid")
+            # Use case-insensitive lookup so "SID" (uppercase) in Access is handled.
+            sid = _dm2000_get_value(pur, "sid")
             if sid is not None:
                 para_pur_by_sid[str(sid)] = pur
+            # Secondary index by cdmc for schemas where para_pur joins via session name.
+            pur_cdmc = _dm2000_get_value(pur, "cdmc")
+            if pur_cdmc:
+                para_pur_by_cdmc[str(pur_cdmc).strip()] = pur
     except Exception as exc:  # noqa: BLE001
-        logger.debug("get_batches: could not load para_pur data: %s", exc)
+        logger.warning("get_batches: could not load para_pur data: %s", exc)
 
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
@@ -1759,6 +1766,12 @@ def get_batches(year: Optional[int] = None):
         # manufacturer, madedate, serialno, remarks, duration, uniformity).
         batch_id = row.get("id")
         pur = para_pur_by_sid.get(str(batch_id)) if batch_id is not None else None
+        # Fallback: join via cdmc (session file name) for alternate DB schemas.
+        if pur is None:
+            row_cdmc = (_dm2000_get_value(row, "cdmc") or "")
+            row_cdmc = str(row_cdmc).strip() if row_cdmc else ""
+            if row_cdmc:
+                pur = para_pur_by_cdmc.get(row_cdmc)
         if pur:
             if not row.get("dcxh"):
                 row["dcxh"] = _dm2000_get_value(pur, "dcxh")

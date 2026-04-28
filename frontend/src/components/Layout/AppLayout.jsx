@@ -30,7 +30,7 @@ const { Header, Sider, Content } = Layout;
 
 export default function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
-  const { user, logout, isAdmin, isQC } = useAuth();
+  const { user, logout, isAdmin, isQC, isEngineer } = useAuth();
   const { t, lang, switchLang } = useLang();
   const { notifications, unreadCount, markAllRead, clearNotifications, dbNotifications, dbUnreadCount } = useNotifications();
   const totalUnread = unreadCount + dbUnreadCount;
@@ -54,8 +54,12 @@ export default function AppLayout() {
       { key: '/files', icon: <FileOutlined />, label: t('files') },
     ] : []),
     { key: '/barcode', icon: <QrcodeOutlined />, label: t('barcode') },
-    { key: '/battery', icon: <ThunderboltOutlined />, label: t('batteryTest') },
-    { key: '/battery-dmp', icon: <ExperimentOutlined />, label: t('dmManagement') },
+    ...(!isEngineer ? [
+      { key: '/battery', icon: <ThunderboltOutlined />, label: t('batteryTest') },
+    ] : []),
+    ...(!isQC ? [
+      { key: '/battery-dmp', icon: <ExperimentOutlined />, label: t('dmManagement') },
+    ] : []),
     { key: '/count-batteries', icon: <CameraOutlined />, label: t('countBatteries') },
     ...(isAdmin ? [
       { key: '/users', icon: <TeamOutlined />, label: t('users') },

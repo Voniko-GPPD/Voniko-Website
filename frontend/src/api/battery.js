@@ -31,3 +31,19 @@ export const getArchiveInfo = () => api.get('/archive-info');
 
 export const downloadArchiveReport = (records) =>
   api.post('/download-archive-report', { records }, { responseType: 'blob' });
+
+// Battery Types
+export const getBatteryTypes = () => api.get('/types');
+export const createBatteryType = (name) => api.post('/types', { name });
+export const deleteBatteryType = (id) => api.delete(`/types/${id}`);
+
+// Battery Product Lines
+export const getBatteryProductLines = () => api.get('/product-lines');
+export const createBatteryProductLine = (name) => api.post('/product-lines', { name });
+export const deleteBatteryProductLine = (id) => api.delete(`/product-lines/${id}`);
+
+// Battery Presets
+export const getBatteryPresets = () => api.get('/presets');
+export const upsertBatteryPreset = (preset) => api.put('/presets', preset);
+export const deleteBatteryPreset = (batteryType, productLine) =>
+  api.delete(`/presets/${encodeURIComponent(batteryType)}/${encodeURIComponent(productLine)}`);

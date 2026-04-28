@@ -196,6 +196,46 @@ function createTables() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_dm2000_options_field ON dm2000_options(field);
+
+    -- Battery types (loai pin) managed by admin
+    CREATE TABLE IF NOT EXISTS battery_types (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    -- Battery product lines (dong san pham) managed by admin
+    CREATE TABLE IF NOT EXISTS battery_product_lines (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    -- Battery presets (thong so) stored on server
+    CREATE TABLE IF NOT EXISTS battery_presets (
+      id TEXT PRIMARY KEY,
+      battery_type TEXT NOT NULL,
+      product_line TEXT NOT NULL,
+      resistance REAL,
+      ocv_time REAL,
+      load_time REAL,
+      k_coeff REAL,
+      ocv_min REAL,
+      ocv_max REAL,
+      ccv_min REAL,
+      ccv_max REAL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(battery_type, product_line),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_battery_presets_type_line ON battery_presets(battery_type, product_line);
   `);
 
   // Safe migration: add folder_id column to files if not present
@@ -211,6 +251,28 @@ function createTables() {
     db.exec('ALTER TABLE files ADD COLUMN locked_by TEXT DEFAULT NULL');
     db.exec('ALTER TABLE files ADD COLUMN locked_at TEXT DEFAULT NULL');
     db.exec('ALTER TABLE files ADD COLUMN lock_reason TEXT DEFAULT NULL');
+  }
+
+  // Seed default battery types if table is empty
+  const typeCount = db.prepare('SELECT COUNT(*) as c FROM battery_types').get().c;
+  if (typeCount === 0) {
+    const { v4: uuidv4 } = require('uuid');
+    const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+    const adminId = adminUser ? adminUser.id : 'system';
+    for (const name of ['LR6', 'LR03']) {
+      db.prepare('INSERT OR IGNORE INTO battery_types (id, name, created_by) VALUES (?, ?, ?)').run(uuidv4(), name, adminId);
+    }
+  }
+
+  // Seed default battery product lines if table is empty
+  const lineCount = db.prepare('SELECT COUNT(*) as c FROM battery_product_lines').get().c;
+  if (lineCount === 0) {
+    const { v4: uuidv4 } = require('uuid');
+    const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+    const adminId = adminUser ? adminUser.id : 'system';
+    for (const name of ['UD+', 'UD', 'HP']) {
+      db.prepare('INSERT OR IGNORE INTO battery_product_lines (id, name, created_by) VALUES (?, ?, ?)').run(uuidv4(), name, adminId);
+    }
   }
 }
 

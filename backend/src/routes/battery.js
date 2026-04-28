@@ -5,9 +5,11 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const { v4: uuidv4 } = require('uuid');
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 const { upsertStation, getStations, resolveUrl } = require('../utils/stationRegistry');
+const { getDb } = require('../models/database');
 
 const PYTHON_BASE = process.env.BATTERY_SERVICE_URL || 'http://127.0.0.1:8765';
 
@@ -325,6 +327,160 @@ router.post('/download-archive-report', async (req, res) => {
   } catch (e) {
     logger.error('Battery download-archive-report error', { error: e.message });
     res.status(500).json({ error: 'Failed to generate archive report', detail: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Battery Types (loai pin)
+// ---------------------------------------------------------------------------
+
+// GET /api/battery/types
+router.get('/types', (req, res) => {
+  try {
+    const rows = getDb().prepare('SELECT id, name, created_at FROM battery_types ORDER BY created_at ASC').all();
+    res.json({ types: rows });
+  } catch (e) {
+    logger.error('GET /battery/types error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/battery/types
+router.post('/types', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  const trimmed = String(name).trim();
+  try {
+    const id = uuidv4();
+    getDb().prepare('INSERT INTO battery_types (id, name, created_by) VALUES (?, ?, ?)').run(id, trimmed, req.user.id);
+    res.json({ ok: true, id, name: trimmed });
+  } catch (e) {
+    if (e.message && e.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Battery type already exists' });
+    }
+    logger.error('POST /battery/types error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/battery/types/:id
+router.delete('/types/:id', (req, res) => {
+  try {
+    const info = getDb().prepare('DELETE FROM battery_types WHERE id = ?').run(req.params.id);
+    if (info.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error('DELETE /battery/types error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Battery Product Lines (dong san pham)
+// ---------------------------------------------------------------------------
+
+// GET /api/battery/product-lines
+router.get('/product-lines', (req, res) => {
+  try {
+    const rows = getDb().prepare('SELECT id, name, created_at FROM battery_product_lines ORDER BY created_at ASC').all();
+    res.json({ productLines: rows });
+  } catch (e) {
+    logger.error('GET /battery/product-lines error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/battery/product-lines
+router.post('/product-lines', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  const trimmed = String(name).trim();
+  try {
+    const id = uuidv4();
+    getDb().prepare('INSERT INTO battery_product_lines (id, name, created_by) VALUES (?, ?, ?)').run(id, trimmed, req.user.id);
+    res.json({ ok: true, id, name: trimmed });
+  } catch (e) {
+    if (e.message && e.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Product line already exists' });
+    }
+    logger.error('POST /battery/product-lines error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/battery/product-lines/:id
+router.delete('/product-lines/:id', (req, res) => {
+  try {
+    const info = getDb().prepare('DELETE FROM battery_product_lines WHERE id = ?').run(req.params.id);
+    if (info.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error('DELETE /battery/product-lines error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Battery Presets (thong so)
+// ---------------------------------------------------------------------------
+
+// GET /api/battery/presets
+router.get('/presets', (req, res) => {
+  try {
+    const rows = getDb().prepare('SELECT * FROM battery_presets ORDER BY battery_type, product_line').all();
+    res.json({ presets: rows });
+  } catch (e) {
+    logger.error('GET /battery/presets error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/battery/presets — upsert a preset
+router.put('/presets', (req, res) => {
+  const { batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax } = req.body || {};
+  if (!batteryType || !productLine) {
+    return res.status(400).json({ error: 'batteryType and productLine are required' });
+  }
+  if (ocvMin == null || ocvMax == null || ccvMin == null || ccvMax == null) {
+    return res.status(400).json({ error: 'ocvMin, ocvMax, ccvMin, ccvMax are required' });
+  }
+  try {
+    const db = getDb();
+    const existing = db.prepare('SELECT id FROM battery_presets WHERE battery_type = ? AND product_line = ?').get(batteryType, productLine);
+    if (existing) {
+      db.prepare(`
+        UPDATE battery_presets SET resistance=?, ocv_time=?, load_time=?, k_coeff=?, ocv_min=?, ocv_max=?, ccv_min=?, ccv_max=?,
+          updated_at=datetime('now')||'Z'
+        WHERE battery_type=? AND product_line=?
+      `).run(resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, batteryType, productLine);
+      res.json({ ok: true, id: existing.id });
+    } else {
+      const id = uuidv4();
+      db.prepare(`
+        INSERT INTO battery_presets (id, battery_type, product_line, resistance, ocv_time, load_time, k_coeff, ocv_min, ocv_max, ccv_min, ccv_max, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, req.user.id);
+      res.json({ ok: true, id });
+    }
+  } catch (e) {
+    logger.error('PUT /battery/presets error', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/battery/presets/:batteryType/:productLine
+router.delete('/presets/:batteryType/:productLine', (req, res) => {
+  try {
+    const info = getDb().prepare('DELETE FROM battery_presets WHERE battery_type = ? AND product_line = ?').run(req.params.batteryType, req.params.productLine);
+    if (info.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error('DELETE /battery/presets error', { error: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 

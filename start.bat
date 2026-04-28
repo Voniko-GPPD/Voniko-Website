@@ -13,6 +13,24 @@ echo  +==============================================================+
 echo.
 
 :: -------------------------------------------------------
+::  STEP 0: Ensure PM2 is installed
+:: -------------------------------------------------------
+where pm2 >nul 2>&1
+if errorlevel 1 (
+    echo  [INSTALL] PM2 not found. Installing pm2 globally...
+    call npm install -g pm2
+    if errorlevel 1 (
+        echo  [ERROR] Failed to install pm2. Please run: npm install -g pm2
+        pause
+        exit /b 1
+    )
+    echo  [OK] PM2 installed.
+) else (
+    echo  [OK] PM2 already installed.
+)
+echo.
+
+:: -------------------------------------------------------
 ::  STEP 1: Clean up old PM2 processes and occupied ports
 :: -------------------------------------------------------
 echo [1/6] Cleaning up old PM2 processes and ports...

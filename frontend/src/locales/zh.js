@@ -396,6 +396,7 @@ export default {
   batteryRetestRequired: '需要重新测试',
   batteryRetestNow: '立即重测',
   batterySaveTemp: '暂时保存',
+  batteryFailedNTimes: '已测{count}次，不合格',
   batteryFillRequiredFields: '请填写：订单编号、OCV标准和CCV标准',
   batteryClearSessionConfirmTitle: '清除会话？',
   batteryClearSessionConfirmContent: '此会话中的所有测试结果将被删除，确认吗？',

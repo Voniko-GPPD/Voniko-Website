@@ -396,6 +396,7 @@ export default {
   batteryRetestRequired: 'Retest required',
   batteryRetestNow: 'Re-measure Now',
   batterySaveTemp: 'Save Temporarily',
+  batteryFailedNTimes: 'Measured {count} time(s), did not pass',
   batteryFillRequiredFields: 'Please fill in: Order ID, OCV Standard and CCV Standard',
   batteryClearSessionConfirmTitle: 'Clear Session?',
   batteryClearSessionConfirmContent: 'All test results in this session will be deleted. Are you sure?',

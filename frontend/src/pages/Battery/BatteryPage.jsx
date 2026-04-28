@@ -294,6 +294,10 @@ export default function BatteryPage() {
   const pendingNewSessionRef = useRef(false);
   // Holds a record to retest after the current test stops (used by "Đo lại ngay")
   const pendingRetestRecordRef = useRef(null);
+  // Flag: after a retest completes, auto-restart the full test from the next battery
+  const autoRestartAfterRetestRef = useRef(false);
+  // Maps batteryId -> number of retests done (for "đo X lần không đạt" display)
+  const retestCountMapRef = useRef({});
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -495,6 +499,21 @@ export default function BatteryPage() {
           // Reset caliper values after saving to record
           setCaliperDia('');
           setCaliperHei('');
+          // When a retest result comes in, check if it's still out of spec
+          if (msg.record.is_retest) {
+            const rec = enrichedRecord;
+            const spec_ocv = ocvSpecRef.current;
+            const spec_ccv = ccvSpecRef.current;
+            const ocvBad = spec_ocv && rec.ocv !== null && rec.ocv !== undefined && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
+            const ccvBad = spec_ccv && rec.ccv !== null && rec.ccv !== undefined && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
+            if (ocvBad || ccvBad) {
+              const retryCount = retestCountMapRef.current[rec.id] || 0;
+              const parts = [];
+              if (ocvBad) parts.push(`OCV ${rec.ocv.toFixed(3)}V (spec: ${spec_ocv.min} - ${spec_ocv.max})`);
+              if (ccvBad) parts.push(`CCV ${rec.ccv.toFixed(3)}V (spec: ${spec_ccv.min} - ${spec_ccv.max})`);
+              setOutOfSpecModal({ record: rec, parts, retryCount });
+            }
+          }
         }
         break;
 
@@ -524,6 +543,8 @@ export default function BatteryPage() {
         setReadingsByBattery({});
         setRetestingBatteryId(null);
         pendingRetestRecordRef.current = null;
+        autoRestartAfterRetestRef.current = false;
+        retestCountMapRef.current = {};
         notification.success({ message: t('batterySessionCleared') });
         break;
 
@@ -638,6 +659,17 @@ export default function BatteryPage() {
       handleRetest(record);
     }
   }, [running, handleRetest]);
+
+  // After a retest completes, auto-restart the full test from the next battery.
+  // Only fires when: test is stopped, auto-restart flag is set, no other retest is pending,
+  // and no out-of-spec modal is blocking (if the modal is shown the restart waits for user choice).
+  useEffect(() => {
+    if (!running && autoRestartAfterRetestRef.current && !pendingRetestRecordRef.current && outOfSpecModal === null) {
+      autoRestartAfterRetestRef.current = false;
+      setRetestingBatteryId(null);
+      sendMsg({ action: 'start', payload: buildParams() });
+    }
+  }, [running, outOfSpecModal, sendMsg, buildParams]);
 
   // Store latest chart data in refs so saveCurrentOrderSnapshot can access without stale closure
   const chartSeriesByBatteryRef = useRef(chartSeriesByBattery);
@@ -1184,6 +1216,14 @@ export default function BatteryPage() {
     return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
   }, [ccvMin, ccvMax]);
 
+  // Refs for ocvSpec/ccvSpec and running — used inside WS callbacks to avoid stale closures
+  const runningRef = useRef(running);
+  useEffect(() => { runningRef.current = running; }, [running]);
+  const ocvSpecRef = useRef(ocvSpec);
+  useEffect(() => { ocvSpecRef.current = ocvSpec; }, [ocvSpec]);
+  const ccvSpecRef = useRef(ccvSpec);
+  useEffect(() => { ccvSpecRef.current = ccvSpec; }, [ccvSpec]);
+
   const recordsMap = React.useMemo(() => {
     const map = {};
     records.forEach((r) => { map[String(r.id)] = r; });
@@ -1394,14 +1434,18 @@ export default function BatteryPage() {
       if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.min} - ${ocvSpec.max})`);
       if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.min} - ${ccvSpec.max})`);
       // Show blocking modal instead of dismissible notification
-      setOutOfSpecModal({ record: latest, parts });
+      setOutOfSpecModal({ record: latest, parts, retryCount: 0 });
+      // Bug fix: stop the test immediately so it doesn't advance to the next battery
+      if (runningRef.current) {
+        sendMsg({ action: 'stop' });
+      }
     }
     // Auto-scroll the results table to the latest record
     if (resultsTableRef.current) {
       const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
       if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
     }
-  }, [records, ocvSpec, ccvSpec, t]);
+  }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
   useEffect(() => {
     try {
@@ -1866,85 +1910,147 @@ export default function BatteryPage() {
             <Card
               size="small"
               title={
-                <span>
-                  📏 {t('batteryCaliperSection')}
+                <Space>
+                  <span>📏 {t('batteryCaliperSection')}</span>
                   {records.length > 0 && records[caliperIndex] != null && (
-                    <span style={{ fontSize: 12, color: caliperSingleMode ? '#faad14' : '#69b1ff', marginLeft: 8 }}>
+                    <Tag color={caliperSingleMode ? 'warning' : 'processing'} style={{ marginLeft: 4 }}>
                       {caliperSingleMode
-                        ? `(Re-measure: ${t('batteryId')} ${records[caliperIndex].id})`
-                        : `(${t('batteryId')}: ${records[caliperIndex].id} / ${records.length})`
+                        ? `Re-measure: ${t('batteryId')} ${records[caliperIndex].id}`
+                        : `${t('batteryId')}: ${records[caliperIndex].id} / ${records.length}`
                       }
-                    </span>
+                    </Tag>
                   )}
-                </span>
+                </Space>
               }
-              style={{ marginBottom: 16 }}
+              style={{ marginBottom: 16, border: '1px solid #3a3a5c', background: '#14142a' }}
             >
-              <Space direction="horizontal" wrap>
-                <Space direction="vertical" size={2}>
-                  <span style={{ fontSize: 12, color: '#aaa' }}>{t('batteryCaliperMode')}</span>
-                  <Radio.Group
-                    value={caliperMode}
-                    onChange={(e) => setCaliperMode(e.target.value)}
-                    buttonStyle="solid"
-                    size="small"
-                  >
-                    <Radio.Button value="dia">{t('batteryCaliperModeDia')}</Radio.Button>
-                    <Radio.Button value="hei">{t('batteryCaliperModeHei')}</Radio.Button>
-                  </Radio.Group>
-                </Space>
-                <Space direction="vertical" size={2}>
-                  <span style={{ fontSize: 12, color: '#aaa' }}>{t('batteryCaliperBuffer')}</span>
-                  <Input
-                    ref={caliperInputRef}
-                    size="small"
-                    value={caliperBuffer}
-                    placeholder={t('batteryCaliperBuffer')}
-                    style={{ width: 160, fontFamily: 'monospace', background: caliperBuffer ? '#1a3a1a' : undefined }}
-                    readOnly
-                  />
-                </Space>
-                <Space direction="vertical" size={2}>
-                  <span style={{ fontSize: 12, color: '#aaa' }}>{t('batteryCaliperDia')} (mm)</span>
-                  <InputNumber
-                    size="small"
-                    value={caliperDia ? parseFloat(caliperDia) : null}
-                    onChange={(v) => setCaliperDia(v != null ? String(v) : '')}
-                    step={0.01}
-                    style={{ width: 100 }}
-                    placeholder="—"
-                  />
-                </Space>
-                <Space direction="vertical" size={2}>
-                  <span style={{ fontSize: 12, color: '#aaa' }}>{t('batteryCaliperHei')} (mm)</span>
-                  <InputNumber
-                    size="small"
-                    value={caliperHei ? parseFloat(caliperHei) : null}
-                    onChange={(v) => setCaliperHei(v != null ? String(v) : '')}
-                    step={0.01}
-                    style={{ width: 100 }}
-                    placeholder="—"
-                  />
-                </Space>
-                <Tooltip title={t('batteryCaliperHint')}>
-                  <QuestionCircleOutlined style={{ color: '#888', marginTop: 20 }} />
-                </Tooltip>
-              </Space>
-              <div style={{ marginTop: 6, fontSize: 11, color: '#666' }}>
+              {/* Row 1: mode selector + live buffer + read-only value cells */}
+              <Row gutter={[16, 12]} align="middle" wrap>
+                {/* Mode toggle */}
+                <Col xs={24} sm="auto">
+                  <Space direction="vertical" size={4}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryCaliperMode')}
+                    </span>
+                    <Radio.Group
+                      value={caliperMode}
+                      onChange={(e) => setCaliperMode(e.target.value)}
+                      buttonStyle="solid"
+                      size="small"
+                    >
+                      <Radio.Button value="dia">{t('batteryCaliperModeDia')}</Radio.Button>
+                      <Radio.Button value="hei">{t('batteryCaliperModeHei')}</Radio.Button>
+                    </Radio.Group>
+                  </Space>
+                </Col>
+
+                {/* Live buffer from caliper */}
+                <Col xs={24} sm="auto">
+                  <Space direction="vertical" size={4}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryCaliperBuffer')}
+                    </span>
+                    <Input
+                      ref={caliperInputRef}
+                      size="small"
+                      value={caliperBuffer}
+                      placeholder="Đang chờ thước kẹp..."
+                      style={{
+                        width: 170,
+                        fontFamily: 'monospace',
+                        background: caliperBuffer ? '#0d2b0d' : '#1a1a2e',
+                        borderColor: caliperBuffer ? '#52c41a' : '#3a3a5c',
+                        color: caliperBuffer ? '#52c41a' : '#888',
+                      }}
+                      readOnly
+                      tabIndex={-1}
+                    />
+                  </Space>
+                </Col>
+
+                {/* Diameter — read-only display */}
+                <Col xs={12} sm="auto">
+                  <Space direction="vertical" size={4}>
+                    <span style={{ fontSize: 11, color: caliperMode === 'dia' ? '#69b1ff' : '#888', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'dia' ? 600 : 400 }}>
+                      {t('batteryCaliperDia')} (mm)
+                    </span>
+                    <div
+                      style={{
+                        width: 110,
+                        height: 24,
+                        lineHeight: '22px',
+                        textAlign: 'center',
+                        fontFamily: 'monospace',
+                        fontSize: 14,
+                        fontWeight: 600,
+                        border: `1px solid ${caliperMode === 'dia' ? '#69b1ff' : '#3a3a5c'}`,
+                        borderRadius: 6,
+                        background: caliperDia ? '#1a2a3a' : '#111',
+                        color: caliperDia ? '#69b1ff' : '#555',
+                        userSelect: 'none',
+                        cursor: 'default',
+                        boxShadow: caliperMode === 'dia' ? '0 0 6px #69b1ff55' : 'none',
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      {caliperDia ? parseFloat(caliperDia).toFixed(2) : '—'}
+                    </div>
+                  </Space>
+                </Col>
+
+                {/* Height — read-only display */}
+                <Col xs={12} sm="auto">
+                  <Space direction="vertical" size={4}>
+                    <span style={{ fontSize: 11, color: caliperMode === 'hei' ? '#95de64' : '#888', textTransform: 'uppercase', letterSpacing: 1, fontWeight: caliperMode === 'hei' ? 600 : 400 }}>
+                      {t('batteryCaliperHei')} (mm)
+                    </span>
+                    <div
+                      style={{
+                        width: 110,
+                        height: 24,
+                        lineHeight: '22px',
+                        textAlign: 'center',
+                        fontFamily: 'monospace',
+                        fontSize: 14,
+                        fontWeight: 600,
+                        border: `1px solid ${caliperMode === 'hei' ? '#95de64' : '#3a3a5c'}`,
+                        borderRadius: 6,
+                        background: caliperHei ? '#1a2b1a' : '#111',
+                        color: caliperHei ? '#95de64' : '#555',
+                        userSelect: 'none',
+                        cursor: 'default',
+                        boxShadow: caliperMode === 'hei' ? '0 0 6px #95de6455' : 'none',
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      {caliperHei ? parseFloat(caliperHei).toFixed(2) : '—'}
+                    </div>
+                  </Space>
+                </Col>
+
+                {/* Help icon */}
+                <Col xs="auto">
+                  <Tooltip title={t('batteryCaliperHint')}>
+                    <QuestionCircleOutlined style={{ color: '#555', fontSize: 16, cursor: 'help', marginTop: 20 }} />
+                  </Tooltip>
+                </Col>
+              </Row>
+
+              {/* Hint text */}
+              <div style={{ marginTop: 8, fontSize: 11, color: '#555' }}>
                 💡 {t('batteryCaliperHint')}
               </div>
-              <div style={{ marginTop: 8 }}>
-                <Button
-                  onClick={handleSaveCaliper}
-                >
-                  {t('batteryCaliperSkip')}
-                </Button>
-                <Button
-                  style={{ marginLeft: 8 }}
-                  onClick={handleResetCaliper}
-                >
-                  {t('cancel')}
-                </Button>
+
+              {/* Action buttons */}
+              <div style={{ marginTop: 10 }}>
+                <Space>
+                  <Button size="small" onClick={handleSaveCaliper}>
+                    {t('batteryCaliperSkip')}
+                  </Button>
+                  <Button size="small" onClick={handleResetCaliper}>
+                    {t('cancel')}
+                  </Button>
+                </Space>
               </div>
             </Card>
           )}
@@ -2670,6 +2776,10 @@ export default function BatteryPage() {
             danger
             onClick={() => {
               const record = outOfSpecModal.record;
+              // Increment retry count for this battery
+              retestCountMapRef.current[record.id] = (retestCountMapRef.current[record.id] || 0) + 1;
+              // After retest completes, auto-restart the full test from the next battery
+              autoRestartAfterRetestRef.current = true;
               setOutOfSpecModal(null);
               if (running) {
                 // Stop current test then retest once stopped
@@ -2684,13 +2794,23 @@ export default function BatteryPage() {
           </Button>,
           <Button
             key="save-temp"
-            onClick={() => setOutOfSpecModal(null)}
+            onClick={() => {
+              setOutOfSpecModal(null);
+              // Restart the full test from the next battery (test was stopped when modal appeared)
+              setRetestingBatteryId(null);
+              sendMsg({ action: 'start', payload: buildParams() });
+            }}
           >
             {t('batterySaveTemp')}
           </Button>,
         ]}
       >
         <p>{outOfSpecModal?.parts?.join(', ')}</p>
+        {outOfSpecModal?.retryCount > 0 && (
+          <p style={{ color: '#ff4d4f', marginTop: 4 }}>
+            {t('batteryFailedNTimes', { count: outOfSpecModal.retryCount })}
+          </p>
+        )}
       </Modal>
     </div>
   );

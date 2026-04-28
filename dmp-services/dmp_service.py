@@ -1705,22 +1705,18 @@ def get_batches(year: Optional[int] = None):
             if val is not None and hasattr(val, "strftime"):
                 row[_df] = val.strftime("%Y-%m-%d")
 
-        # Alias para_pub column names to the frontend-expected field names so
-        # that older/variant DMP database schemas (e.g. dcmc→name, scdw→manufacturer,
-        # scrq→madedate, dcph→serialno, bz→remarks, hl→unifrate) still surface the
-        # correct values in the UI.  _dm2000_get_value skips None / "" / "--".
-        row["name"] = _dm2000_get_value(row, "name", "dcmc")
-        row["duration"] = _dm2000_get_value(row, "duration", "fdts")
-        row["unifrate"] = _dm2000_get_value(row, "unifrate", "hl", "hlfd", "yfws_pct", "yfws")
-        row["manufacturer"] = _dm2000_get_value(row, "manufacturer", "scdw")
-        if not row.get("madedate"):
-            row["madedate"] = _dm2000_get_value(row, "madedate", "scrq")
-        row["archname"] = _dm2000_get_value(row, "archname", "cdmc", "id")
-        row["serialno"] = _dm2000_get_value(row, "serialno", "dcph")
-        row["remarks"] = _dm2000_get_value(row, "remarks", "bz")
-        if not row.get("database"):
-            cdmc_val = _dm2000_get_value(row, "cdmc") or ""
-            row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb") if cdmc_val else None
+        # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
+        # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is
+        # the closest DMP equivalent to an archive identifier.  Map it to the
+        # display fields the frontend expects so those columns are not empty.
+        cdmc_val = (row.get("cdmc") or "").strip()
+        if cdmc_val:
+            if not row.get("name"):
+                row["name"] = cdmc_val
+            if not row.get("archname"):
+                row["archname"] = cdmc_val
+            if not row.get("database"):
+                row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb")
 
         if year is not None and row_year != year:
             continue

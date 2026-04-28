@@ -1669,16 +1669,16 @@ def get_batches(year: Optional[int] = None):
     has_para_pub_cdmc = _HAS_PARA_PUB_CDMC
 
     try:
-        if has_para_pub_cdmc:
-            rows = _read_dmpdata("SELECT id, cdmc, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
-        else:
-            rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+        rows = _read_dmpdata("SELECT * FROM para_pub ORDER BY fdrq DESC")
     except pyodbc.Error:
         try:
             rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
         except pyodbc.Error as exc:
             logger.error("get_batches: fallback query also failed: %s", exc)
             raise HTTPException(status_code=500, detail="Database query failed") from exc
+
+    # Date fields in para_pub that need serialisation to string
+    _DATE_FIELDS = ("fdrq", "madedate", "scrq")
 
     result = []
     for row in rows:
@@ -1696,6 +1696,14 @@ def get_batches(year: Optional[int] = None):
                 row_year = int(date_str[:4])
             except (TypeError, ValueError):
                 row_year = None
+
+        # Normalise other date columns that may arrive as datetime objects
+        for _df in _DATE_FIELDS:
+            if _df == "fdrq":
+                continue
+            val = row.get(_df)
+            if val is not None and hasattr(val, "strftime"):
+                row[_df] = val.strftime("%Y-%m-%d")
 
         if year is not None and row_year != year:
             continue

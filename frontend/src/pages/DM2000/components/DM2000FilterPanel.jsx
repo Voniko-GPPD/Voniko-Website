@@ -26,7 +26,6 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       type_filter: values.type_filter?.trim() || undefined,
       name_filter: values.name_filter?.trim() || undefined,
       mfr_filter: values.mfr_filter?.trim() || undefined,
-      serial_filter: values.serial_filter?.trim() || undefined,
       keyword: values.keyword?.trim() || undefined,
     };
 
@@ -88,7 +87,6 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160, render: (v) => v || '-' },
     { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 140, render: (v) => v || '-' },
     { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160, render: (v) => v || '-' },
-    { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 300, render: (value) => value || '-' },
   ];
 
   return (
@@ -117,11 +115,6 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
           </Col>
           <Col xs={24} sm={12} md={8} lg={6} xl={4}>
             <Form.Item name="mfr_filter" label={t('dm2000MfrFilter')} style={{ marginBottom: 8 }}>
-              <Input allowClear />
-            </Form.Item>
-          </Col>
-          <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-            <Form.Item name="serial_filter" label={t('dm2000SerialFilter')} style={{ marginBottom: 8 }}>
               <Input allowClear />
             </Form.Item>
           </Col>

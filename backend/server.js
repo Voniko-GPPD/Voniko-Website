@@ -152,9 +152,11 @@ const staticLimiter = rateLimit({
 const frontendDist = path.join(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
-  app.get('*', staticLimiter, (req, res) => {
+  app.get('*', staticLimiter, (req, res, next) => {
     if (!req.path.startsWith('/api')) {
       res.sendFile(path.join(frontendDist, 'index.html'));
+    } else {
+      next();
     }
   });
 }

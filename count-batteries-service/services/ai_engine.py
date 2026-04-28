@@ -591,9 +591,17 @@ class AIEngine:
         
         return filtered
     
-    def filter_isolated_detections(self, detections: List[dict], min_neighbors: int = 2) -> List[dict]:
+    def filter_isolated_detections(self, detections: List[dict], min_neighbors: int = 2,
+                                    neighbor_radius: Optional[float] = None) -> List[dict]:
         """Remove isolated detections (e.g. scratches on table surface).
-        Real batteries in a tray have many neighbors; false positives on the table are isolated."""
+        Real batteries in a tray have many neighbors; false positives on the table are isolated.
+
+        Args:
+            neighbor_radius: Override the search radius used to count neighbours.
+                             When None (default) the radius is derived from avg bbox radius * 3.
+                             Pass an explicit value when the detected bbox size underestimates
+                             the actual battery size (e.g. HoughCircles finding inner caps).
+        """
         if len(detections) <= 5:
             return detections
         
@@ -602,8 +610,9 @@ class AIEngine:
         cy = (bboxes[:, 1] + bboxes[:, 3]) / 2
         radii = np.maximum(bboxes[:, 2] - bboxes[:, 0], bboxes[:, 3] - bboxes[:, 1]) / 2
         
-        avg_radius = np.mean(radii)
-        neighbor_radius = avg_radius * 3.0  # Search within ~1.5 battery diameters
+        if neighbor_radius is None:
+            avg_radius = np.mean(radii)
+            neighbor_radius = avg_radius * 3.0  # Search within ~1.5 battery diameters
         
         # Count neighbors for each detection
         n = len(detections)
@@ -712,6 +721,29 @@ class AIEngine:
         ]
         return float(np.median(radii))
 
+    def _compute_detection_spacing(self, detections: List[dict], sample_size: int = 100) -> float:
+        """Estimate the typical centre-to-centre distance between adjacent detections.
+
+        Returns the median of the nearest-neighbour distances, sampling up to
+        *sample_size* detections for efficiency.  This is independent of bbox size
+        and gives a reliable spacing estimate even when the detected radius is
+        smaller than the true battery radius (e.g. HoughCircles finding inner caps).
+        Returns float('inf') when detections are too few to measure.
+        """
+        n = len(detections)
+        if n < 4:
+            return float('inf')
+        bboxes = np.array([d["bbox"] for d in detections])
+        cx = (bboxes[:, 0] + bboxes[:, 2]) / 2.0
+        cy = (bboxes[:, 1] + bboxes[:, 3]) / 2.0
+        sample_n = min(n, sample_size)
+        min_dists: List[float] = []
+        for i in range(sample_n):
+            dists = np.sqrt((cx[i] - cx) ** 2 + (cy[i] - cy) ** 2)
+            dists[i] = float('inf')
+            min_dists.append(float(np.min(dists)))
+        return float(np.median(min_dists))
+
     def _estimate_battery_radius_from_image(self, image: np.ndarray) -> Tuple[int, int]:
         """Estimate plausible battery radius range from image dimensions alone.
         Assumes the tray fills roughly 75% of the image and holds 100-1500 batteries."""
@@ -798,9 +830,16 @@ class AIEngine:
                 "class": 0,
             })
 
-        # Apply the same area/isolation filters used on AI detections
+        # Apply the same area/isolation filters used on AI detections.
+        # Use r_max (upper bound of expected battery radius) * 3 as neighbor search radius
+        # rather than avg_bbox_radius * 3, because HoughCircles may detect the small inner
+        # cap of each battery (radius << actual_battery_radius), which would make the default
+        # neighbor search radius too small to reach adjacent batteries and cause every
+        # detection to be classified as "isolated" and removed.
         detections = self.filter_by_area(detections, (h, w))
-        detections = self.filter_isolated_detections(detections, min_neighbors=2)
+        hough_neighbor_radius = r_max * 3.0
+        detections = self.filter_isolated_detections(detections, min_neighbors=2,
+                                                      neighbor_radius=hough_neighbor_radius)
 
         print(f"[HOUGH] After filtering: {len(detections)}")
         return len(detections), detections
@@ -815,6 +854,7 @@ class AIEngine:
         - Hough false positives: removed by filter_isolated_detections (no neighbours)
 
         Returns updated (count, detections).
+        Never returns a count lower than ai_count (safety fallback).
         """
         radius_hint = self._estimate_battery_radius_from_detections(ai_dets)
         _, hough_dets = self.detect_with_hough(image, radius_hint=radius_hint)
@@ -829,10 +869,26 @@ class AIEngine:
         merged = self.filter_by_area(merged, image.shape[:2])
         merged = self.filter_by_center_distance(merged)
         merged = self.filter_small_circles(merged)
-        merged = self.filter_isolated_detections(merged)
+        # Use the actual inter-detection spacing (not bbox radius) to set the isolation
+        # filter's neighbour search radius.  This is robust when Hough detects smaller
+        # inner caps whose radius << battery spacing, which would otherwise cause every
+        # detection to appear "isolated" (no neighbours within avg_radius * 3).
+        spacing = self._compute_detection_spacing(merged)
+        if spacing < float('inf'):
+            hybrid_neighbor_radius = spacing * 1.5
+            merged = self.filter_isolated_detections(merged, neighbor_radius=hybrid_neighbor_radius)
+        else:
+            merged = self.filter_isolated_detections(merged)
 
-        print(f"[HYBRID] AI={ai_count}, Hough={len(hough_dets)} → merged={len(merged)}")
-        return len(merged), merged
+        merged_count = len(merged)
+        print(f"[HYBRID] AI={ai_count}, Hough={len(hough_dets)} → merged={merged_count}")
+
+        # Safety net: never let the Hough pass reduce the count below what AI found alone.
+        if merged_count < ai_count:
+            print(f"[HYBRID] Merged count {merged_count} < AI count {ai_count}, reverting to AI-only result")
+            return ai_count, ai_dets
+
+        return merged_count, merged
 
     # ==================== SAHI (Slicing Aided Hyper Inference) ====================
 

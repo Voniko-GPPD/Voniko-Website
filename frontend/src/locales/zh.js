@@ -455,6 +455,7 @@ export default {
   batterySetupEdit: '编辑',
   batterySetupNoPresets: '暂无预设。请为每种电池类型和产品系列添加参数。',
   batteryParamsLockedHint: '参数已从预设加载。如需更改，请前往参数设置选项卡。',
+  batterySelectTypeAndLine: '请选择电池类型和产品系列',
   from: '从',
   to: '到',
   batteryHistorySavedAt: '保存时间',

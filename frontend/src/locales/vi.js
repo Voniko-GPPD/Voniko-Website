@@ -455,6 +455,7 @@ export default {
   batterySetupEdit: 'Sửa',
   batterySetupNoPresets: 'Chưa có thông số nào. Hãy thêm thông số cho từng loại pin và dòng sản phẩm.',
   batteryParamsLockedHint: 'Thông số được nạp từ cài đặt. Vào tab Thiết lập thông số để thay đổi.',
+  batterySelectTypeAndLine: 'Vui lòng chọn loại pin và dòng sản phẩm',
   from: 'Từ',
   to: 'Đến',
   batteryHistorySavedAt: 'Ngày lưu',

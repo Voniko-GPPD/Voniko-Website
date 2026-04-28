@@ -455,6 +455,7 @@ export default {
   batterySetupEdit: 'Edit',
   batterySetupNoPresets: 'No presets yet. Add parameters for each battery type and product line.',
   batteryParamsLockedHint: 'Parameters loaded from preset. Go to Parameter Setup tab to change.',
+  batterySelectTypeAndLine: 'Please select battery type and product line',
   from: 'From',
   to: 'To',
   batteryHistorySavedAt: 'Saved At',

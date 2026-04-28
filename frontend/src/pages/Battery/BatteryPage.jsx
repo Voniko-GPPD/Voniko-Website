@@ -7,7 +7,7 @@ import {
 import {
   ReloadOutlined, DownloadOutlined, DeleteOutlined, PlayCircleOutlined,
   StopOutlined, DisconnectOutlined, ApiOutlined, InboxOutlined, QuestionCircleOutlined,
-  ExportOutlined, FullscreenOutlined,
+  ExportOutlined, FullscreenOutlined, InfoCircleOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
@@ -66,6 +66,10 @@ function getInitialSession() {
 
 function normalizeOrderId(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function makePresetKey(batteryType, productLine) {
+  return `${batteryType}_${productLine}`;
 }
 
 function buildSnapshotSignature(snapshot) {
@@ -1037,14 +1041,14 @@ export default function BatteryPage() {
   // Preset handlers
   const handleSavePreset = useCallback(() => {
     if (!setupForm.batteryType || !setupForm.productLine) {
-      notification.warning({ message: 'Vui lòng chọn loại pin và dòng sản phẩm' });
+      notification.warning({ message: t('batterySelectTypeAndLine') });
       return;
     }
     if (setupForm.ocvMin == null || setupForm.ocvMax == null || setupForm.ccvMin == null || setupForm.ccvMax == null) {
       notification.warning({ message: t('batteryFillRequiredFields') });
       return;
     }
-    const key = `${setupForm.batteryType}_${setupForm.productLine}`;
+    const key = makePresetKey(setupForm.batteryType, setupForm.productLine);
     const newPresets = {
       ...presets,
       [key]: {
@@ -1359,7 +1363,7 @@ export default function BatteryPage() {
 
   // Auto-fill params from preset when batteryType/productLine changes
   useEffect(() => {
-    const preset = presets[`${batteryType}_${productLine}`];
+    const preset = presets[makePresetKey(batteryType, productLine)];
     if (preset) {
       setResistance(preset.resistance);
       setOcvTime(preset.ocvTime);
@@ -1373,7 +1377,7 @@ export default function BatteryPage() {
   }, [batteryType, productLine, presets]);
 
   const inputsDisabled = !connected;
-  const hasPreset = presets[`${batteryType}_${productLine}`] != null;
+  const hasPreset = presets[makePresetKey(batteryType, productLine)] != null;
   const paramsDisabled = inputsDisabled || hasPreset;
   const canStart = connected && !running && orderId.trim() !== '' && testDate !== null && ocvMin != null && ocvMax != null && ccvMin != null && ccvMax != null;
 
@@ -1561,7 +1565,8 @@ export default function BatteryPage() {
               <Card title={t('batteryParameters')} size="small">
                 {hasPreset && (
                   <div style={{ color: '#faad14', fontSize: 12, marginBottom: 8 }}>
-                    ℹ️ {t('batteryParamsLockedHint')}
+                    <InfoCircleOutlined style={{ marginRight: 4 }} />
+                    {t('batteryParamsLockedHint')}
                   </div>
                 )}
                 <Row gutter={[8, 8]}>
@@ -2297,7 +2302,7 @@ export default function BatteryPage() {
                             okText: t('delete'),
                             cancelText: t('cancel'),
                             okButtonProps: { danger: true },
-                            onOk: () => handleDeletePreset(`${preset.batteryType}_${preset.productLine}`),
+                            onOk: () => handleDeletePreset(makePresetKey(preset.batteryType, preset.productLine)),
                           });
                         }}
                       />

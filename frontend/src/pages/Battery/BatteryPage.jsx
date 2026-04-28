@@ -126,7 +126,7 @@ function RowWithPopover({ record, readingsByBattery, buildMiniChartOption, ...ro
     return <tr {...rowProps} />;
   }
   const popoverContent = (
-    <div style={{ width: 900, borderRadius: 6, padding: 4, border: '1px solid #f0f0f0' }}>
+    <div style={{ width: 900, borderRadius: 6, padding: 4, border: '1px solid #303030', background: '#141414' }}>
       <ReactECharts
         option={buildMiniChartOption(record.id)}
         style={{ height: 450, width: 900 }}
@@ -1396,21 +1396,23 @@ export default function BatteryPage() {
       ? [ocvData[ocvData.length - 1], ...ccvData]
       : ccvData;
     return {
-      backgroundColor: 'transparent',
+      backgroundColor: '#141414',
       grid: { top: 20, right: 16, bottom: 24, left: 48 },
       tooltip: { trigger: 'axis', formatter: (params) => params.map(p => `${p.marker}${p.seriesName}: ${p.value[1]?.toFixed(3)}V @ ${p.value[0]}s`).join('<br/>') },
       xAxis: {
         type: 'value',
         name: 's',
-        axisLabel: { color: '#595959', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#f0f0f0' } },
+        axisLabel: { color: '#aaa', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#444' } },
+        splitLine: { lineStyle: { color: '#2a2a2a' } },
       },
       yAxis: {
         type: 'value',
         name: 'V',
         scale: true,
-        axisLabel: { color: '#595959', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#f0f0f0' } },
+        axisLabel: { color: '#aaa', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#444' } },
+        splitLine: { lineStyle: { color: '#2a2a2a' } },
       },
       series: [
         { name: 'OCV', type: 'line', data: ocvData, symbol: 'none', lineStyle: { color: '#ffee58', width: 1.5 } },
@@ -2030,19 +2032,19 @@ export default function BatteryPage() {
                     <QuestionCircleOutlined style={{ color: '#555', fontSize: 16, cursor: 'help', marginTop: 20 }} />
                   </Tooltip>
                 </Col>
-              </Row>
 
-              {/* Action buttons */}
-              <div style={{ marginTop: 10 }}>
-                <Space>
-                  <Button size="small" onClick={handleSaveCaliper}>
-                    {t('batteryCaliperSkip')}
-                  </Button>
-                  <Button size="small" onClick={handleResetCaliper}>
-                    {t('cancel')}
-                  </Button>
-                </Space>
-              </div>
+                {/* Action buttons — same row */}
+                <Col xs="auto" style={{ marginTop: 18 }}>
+                  <Space>
+                    <Button size="small" onClick={handleSaveCaliper}>
+                      {t('batteryCaliperSkip')}
+                    </Button>
+                    <Button size="small" onClick={handleResetCaliper}>
+                      {t('cancel')}
+                    </Button>
+                  </Space>
+                </Col>
+              </Row>
             </Card>
           )}
 

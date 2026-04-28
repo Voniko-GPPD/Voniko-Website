@@ -394,6 +394,8 @@ export default {
   batteryCcvStandard: 'Tiêu chuẩn CCV (từ - đến)',
   batteryOutOfSpec: 'lệch chuẩn',
   batteryRetestRequired: 'Yêu cầu đo lại',
+  batteryRetestNow: 'Đo lại ngay',
+  batterySaveTemp: 'Lưu tạm thời',
   batteryFillRequiredFields: 'Vui lòng nhập đầy đủ: Mã đơn hàng, Tiêu chuẩn OCV và Tiêu chuẩn CCV',
   batteryClearSessionConfirmTitle: 'Xóa phiên làm việc?',
   batteryClearSessionConfirmContent: 'Toàn bộ kết quả đo trong phiên này sẽ bị xóa. Bạn có chắc không?',

@@ -1878,10 +1878,13 @@ export default function BatteryPage() {
                               <>
                                 <Divider style={{ margin: '4px 0' }} />
                                 <div
+                                  role="button"
+                                  tabIndex={0}
                                   style={{ padding: '4px 12px', cursor: typeLineLoading ? 'not-allowed' : 'pointer', color: '#1677ff', display: 'flex', alignItems: 'center', gap: 6 }}
                                   onMouseDown={(e) => { e.preventDefault(); handleCreateAndSelectType(typeSearchText); }}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCreateAndSelectType(typeSearchText); } }}
                                 >
-                                  <PlusOutlined /> {t('batteryTypeAddNew') || `Thêm "${typeSearchText}"`}
+                                  <PlusOutlined /> {t('batteryTypeAddNew')}
                                 </div>
                               </>
                             )}
@@ -1912,10 +1915,13 @@ export default function BatteryPage() {
                               <>
                                 <Divider style={{ margin: '4px 0' }} />
                                 <div
+                                  role="button"
+                                  tabIndex={0}
                                   style={{ padding: '4px 12px', cursor: typeLineLoading ? 'not-allowed' : 'pointer', color: '#1677ff', display: 'flex', alignItems: 'center', gap: 6 }}
                                   onMouseDown={(e) => { e.preventDefault(); handleCreateAndSelectLine(lineSearchText); }}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCreateAndSelectLine(lineSearchText); } }}
                                 >
-                                  <PlusOutlined /> {t('batteryLineAddNew') || `Thêm "${lineSearchText}"`}
+                                  <PlusOutlined /> {t('batteryLineAddNew')}
                                 </div>
                               </>
                             )}

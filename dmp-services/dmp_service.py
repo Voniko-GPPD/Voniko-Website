@@ -1670,49 +1670,52 @@ def get_batches(year: Optional[int] = None):
 
     # Build a first-cdmc lookup from para_singl so the database path can be
     # derived for batches where para_pub.cdmc is NULL.
+    # Uses a plain SELECT (no GROUP BY / MIN aggregate) to avoid a Microsoft
+    # Access ODBC driver quirk where aggregate column aliases (e.g.
+    # "MIN(cdmc) AS cdmc") are silently ignored and the column is returned
+    # under its expression form ("Min(cdmc)") rather than the alias.
     try:
         cdmc_rows = _read_dmpdata(
-            "SELECT sid, MIN(cdmc) AS cdmc FROM para_singl WHERE cdmc IS NOT NULL GROUP BY sid",
+            "SELECT sid, cdmc FROM para_singl WHERE sid IS NOT NULL AND cdmc IS NOT NULL",
         )
         for cr in cdmc_rows:
             sid = _dm2000_get_value(cr, "sid")
             cdmc = _dm2000_get_value(cr, "cdmc")
             if sid is not None and cdmc:
-                singl_cdmc_by_sid[str(sid)] = str(cdmc).strip()
+                sid_str = str(sid)
+                if sid_str not in singl_cdmc_by_sid:  # keep first occurrence per sid
+                    singl_cdmc_by_sid[sid_str] = str(cdmc).strip()
     except Exception as exc:  # noqa: BLE001
         logger.debug("get_batches: could not load para_singl cdmc: %s", exc)
 
     # Load per-channel extras from para_singl.
     # scdw = manufacturer, dcph = serial/battery id, dcmc = battery model name,
-    # scrq = sample/start date.  para_singl stores one row per channel; MIN()
-    # picks one representative value per batch (sid).
+    # scrq = sample/start date.  para_singl stores one row per channel.
+    # Uses a plain SELECT (no GROUP BY / MIN aggregate) to avoid the Access ODBC
+    # aggregate-alias quirk; the first non-null value per sid is chosen in Python.
     # Note: jstj is a para_pub column (not para_singl) and is already present
     # in each batch row from the SELECT * above.
     singl_extras_by_sid: dict[str, dict] = {}
     try:
         extras_rows = _read_dmpdata(
-            "SELECT sid, MIN(scdw) AS scdw, MIN(dcph) AS dcph,"
-            " MIN(dcmc) AS dcmc, MIN(scrq) AS scrq"
-            " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
+            "SELECT sid, scdw, dcph, dcmc, scrq"
+            " FROM para_singl WHERE sid IS NOT NULL",
         )
         for er in extras_rows:
             sid = _dm2000_get_value(er, "sid")
-            if sid is not None:
-                singl_extras_by_sid[str(sid)] = er
+            if sid is None:
+                continue
+            sid_str = str(sid)
+            if sid_str not in singl_extras_by_sid:
+                singl_extras_by_sid[sid_str] = {}
+            entry = singl_extras_by_sid[sid_str]
+            for _f in ("scdw", "dcph", "dcmc", "scrq"):
+                if not entry.get(_f):
+                    _v = _dm2000_get_value(er, _f)
+                    if _v is not None:
+                        entry[_f] = _v
     except Exception as exc:  # noqa: BLE001
-        # Fallback: some older schemas may be missing optional columns.
-        logger.debug("get_batches: singl extras query failed (%s), retrying with dcph only", exc)
-        try:
-            extras_rows = _read_dmpdata(
-                "SELECT sid, MIN(dcph) AS dcph"
-                " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
-            )
-            for er in extras_rows:
-                sid = _dm2000_get_value(er, "sid")
-                if sid is not None:
-                    singl_extras_by_sid[str(sid)] = er
-        except Exception as exc2:  # noqa: BLE001
-            logger.debug("get_batches: could not load para_singl extras: %s", exc2)
+        logger.debug("get_batches: could not load para_singl extras: %s", exc)
 
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")

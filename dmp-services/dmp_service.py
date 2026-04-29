@@ -1774,15 +1774,16 @@ def get_batches(year: Optional[int] = None):
             if scrq_val not in (None, "", "--") and not row.get("madedate"):
                 row["madedate"] = _to_date_str(scrq_val)
 
-        # Serial No comes from para_pub.bz; fall back to para_singl.dcph for
-        # older schemas that do not populate bz.
-        bz_pub = _dm2000_get_value(row, "bz")
-        if bz_pub not in (None, ""):
-            row["serialno"] = str(bz_pub).strip()
-        elif singl_ext:
+        # Serial No comes from para_singl.dcph.
+        if singl_ext:
             dcph_val = singl_ext.get("dcph")
             if dcph_val not in (None, "", "--") and not row.get("serialno"):
                 row["serialno"] = str(dcph_val).strip()
+
+        # Remark comes from para_pub.bz.
+        bz_pub = _dm2000_get_value(row, "bz")
+        if bz_pub not in (None, ""):
+            row["remarks"] = str(bz_pub).strip()
 
         # para_pub does not have a cdmc column.  The session .mdb file name is
         # stored in para_singl.cdmc and was pre-fetched into singl_cdmc_by_sid.

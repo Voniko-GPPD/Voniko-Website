@@ -2217,8 +2217,12 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
     ep_voltage: Optional[float] = None
     raw_ep = (archive_fields["endpoint_voltage"] or "").strip()
     if raw_ep:
-        token = raw_ep.split()[0] if raw_ep.split() else raw_ep
-        token = re.sub(r"[^0-9.\-]+$", "", token)
+        parts = raw_ep.split()
+        token = (parts[0] if parts else raw_ep)[:32]
+        # Strip any trailing unit characters (e.g. "0.9V" → "0.9") without a
+        # regex to keep CodeQL happy and avoid any backtracking concern.
+        while token and token[-1] not in "0123456789.-":
+            token = token[:-1]
         try:
             ep_voltage = float(token)
         except (TypeError, ValueError):

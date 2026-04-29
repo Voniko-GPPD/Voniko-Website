@@ -1,9 +1,12 @@
 /**
  * Discharge condition presets and helpers for battery test reports.
  *
- * The conditions below come from the customer's reference list (LR6, LR03,
- * LR61, 9V battery families). Each entry encodes the standardised text used
- * in the "Dis-condition" / "Remarks" cells of an exported report.
+ * The hard-coded presets in this file are only used as a *fallback* when the
+ * backend service that stores the editable list is unreachable. The runtime
+ * source of truth lives in the SQLite database and is exposed via
+ *   GET /api/dmp/discharge-presets
+ *   GET /api/dmp/family-keywords
+ * (see `src/api/dischargeConditionsApi.js` and `useDischargeConditions()`).
  *
  * Suffix convention (last character in parentheses on each line):
  *   (h) — result is reported in hours
@@ -12,11 +15,8 @@
  *   ""  — no explicit suffix; report unit is implied by the cycle string
  */
 
-/**
- * Battery family presets. The `family` is matched (case-insensitive,
- * substring) against the battery type (`dcxh`) to suggest a default group.
- */
-export const BATTERY_DISCHARGE_PRESETS = [
+/** Hard-coded fallback presets (mirrors the seed data on the backend). */
+export const FALLBACK_DISCHARGE_PRESETS = [
   {
     family: 'LR6',
     label: 'LR6 (AA)',
@@ -77,16 +77,35 @@ export const BATTERY_DISCHARGE_PRESETS = [
   },
 ];
 
-/** Suffix → human readable unit description (i18n keys are in the locale file). */
+/** Hard-coded fallback family-detection keywords (used when API is down). */
+export const FALLBACK_FAMILY_KEYWORDS = [
+  { keyword: 'LR03', family: 'LR03' },
+  { keyword: 'LR61', family: 'LR61' },
+  { keyword: 'LR6', family: 'LR6' },
+  { keyword: '9V', family: '9V' },
+  { keyword: '6F22', family: '9V' },
+  { keyword: '6LR61', family: '9V' },
+];
+
+/** Build a default human-readable label for a family identifier. */
+export function defaultFamilyLabel(family) {
+  switch (String(family || '').toUpperCase()) {
+    case 'LR6': return 'LR6 (AA)';
+    case 'LR03': return 'LR03 (AAA)';
+    case 'LR61': return 'LR61 (AAAA)';
+    case '9V': return '9V (6F22 / 6LR61)';
+    default: return String(family || '');
+  }
+}
+
+/** Suffix → unit description (i18n keys live in the locale file). */
 export const SUFFIX_INFO = {
   h: { unitKey: 'remarkSuffixHours', short: 'h' },
   m: { unitKey: 'remarkSuffixMinutes', short: 'm' },
   t: { unitKey: 'remarkSuffixTimes', short: 't' },
 };
 
-/**
- * Format an entry's display string, e.g. "10ohm 24h/d-0.9V (h)".
- */
+/** Format an entry's display string, e.g. "10ohm 24h/d-0.9V (h)". */
 export function formatPresetEntry(entry) {
   if (!entry) return '';
   const base = String(entry.text || '').trim();
@@ -95,28 +114,57 @@ export function formatPresetEntry(entry) {
 }
 
 /**
- * Heuristically detect the battery family from a free-form battery type
- * label such as "LR6 ALKALINE" or "9V/6F22". Returns the matching preset
- * group (or null when nothing matches).
+ * Group flat preset rows ([{family, condition_text, suffix, ...}]) returned
+ * from the backend into the same {family, label, conditions[]} shape used
+ * by the FALLBACK_DISCHARGE_PRESETS array. Preserves the row order, which
+ * the API returns sorted by sort_order.
  */
-export function detectBatteryFamily(batteryType) {
+export function groupPresets(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const out = [];
+  const idx = new Map();
+  rows.forEach((row) => {
+    const family = row.family || '';
+    if (!family) return;
+    if (!idx.has(family)) {
+      idx.set(family, out.length);
+      out.push({ family, label: defaultFamilyLabel(family), conditions: [] });
+    }
+    out[idx.get(family)].conditions.push({
+      id: row.id,
+      text: row.condition_text ?? row.text ?? '',
+      suffix: (row.suffix || '').toLowerCase(),
+      sortOrder: row.sort_order ?? row.sortOrder ?? 0,
+    });
+  });
+  return out;
+}
+
+/**
+ * Heuristically detect the battery family from a free-form battery type
+ * label such as "LR6 ALKALINE" or "9V/6F22". Iterates through the supplied
+ * keyword list (lowest sort_order first) and returns the first match's
+ * family identifier (or null when nothing matches).
+ *
+ * @param {string} batteryType   The battery type text (e.g. dcxh).
+ * @param {Array}  keywords      Optional override; defaults to fallback list.
+ */
+export function detectBatteryFamily(batteryType, keywords) {
   if (!batteryType) return null;
   const upper = String(batteryType).toUpperCase();
-  // Check the most specific family first (LR03/LR61 before LR6).
-  const order = ['LR03', 'LR61', 'LR6', '9V', '6F22', '6LR61'];
-  for (const key of order) {
-    if (upper.includes(key)) {
-      const familyKey = key === '6F22' || key === '6LR61' ? '9V' : key;
-      return BATTERY_DISCHARGE_PRESETS.find((p) => p.family === familyKey) || null;
+  const list = Array.isArray(keywords) && keywords.length > 0
+    ? keywords
+    : FALLBACK_FAMILY_KEYWORDS;
+  for (const kw of list) {
+    const k = String(kw.keyword || '').toUpperCase();
+    if (k && upper.includes(k)) {
+      return kw.family || null;
     }
   }
   return null;
 }
 
-/**
- * Append a unit to a value string when the value is non-empty and does not
- * already end with that unit.
- */
+/** Append a unit to a value string when missing. */
 function withUnit(value, unit) {
   const s = String(value ?? '').trim();
   if (!s) return '';
@@ -125,28 +173,14 @@ function withUnit(value, unit) {
 }
 
 /**
- * Compose a "Discharge Condition" string from the underlying data fields.
- *
- * For DMP, `cycle` (=`jstj`) almost always already contains the full text
- * (e.g. "24h/d") so this function will return that as-is when it already
- * looks complete. For DM2000, the `load` (Load Resistance), `cycle`
- * (Dis-condition / fdfs) and `endpoint` (End-point Voltage) typically need
- * to be glued together.
- *
- * @param {object} parts
- * @param {string} parts.load     Load resistance, e.g. "10ohm" or "1000mA".
- * @param {string} parts.cycle    Cycle / dis-condition text, e.g. "24h/d".
- * @param {string} parts.endpoint Endpoint voltage, e.g. "0.9V".
- * @param {string} [parts.suffix] Suffix character (h/m/t).
- * @returns {string} Composed string, e.g. "10ohm 24h/d-0.9V (h)".
+ * Compose a "Discharge Condition" string from underlying data fields. See
+ * the inline comment in the previous version for the full description.
  */
 export function composeDischargeCondition({ load, cycle, endpoint, suffix } = {}) {
   const cycleStr = String(cycle ?? '').trim();
   const loadStr = String(load ?? '').trim();
   const epStr = String(endpoint ?? '').trim();
 
-  // If the cycle string already encodes the full condition (contains a
-  // load unit AND an endpoint voltage), don't double-prepend.
   const cycleLooksComplete = cycleStr
     && /(ohm|mA|mW|kohm)/i.test(cycleStr)
     && /-?\s*\d+(\.\d+)?\s*V/i.test(cycleStr);
@@ -156,7 +190,6 @@ export function composeDischargeCondition({ load, cycle, endpoint, suffix } = {}
     body = cycleStr;
   } else {
     const loadPart = loadStr ? loadStr.replace(/\s+/g, '') : '';
-    // Add 'ohm' suffix when load is purely numeric.
     const loadFmt = loadPart && /^\d+(\.\d+)?$/.test(loadPart)
       ? `${loadPart}ohm`
       : loadPart;
@@ -173,13 +206,16 @@ export function composeDischargeCondition({ load, cycle, endpoint, suffix } = {}
   return body;
 }
 
-/**
- * Best-effort suffix detection from a composed discharge condition string.
- * Returns one of "h", "m", "t" or null when no trailing suffix tag is
- * present.
- */
+/** Best-effort suffix detection from a composed string. */
 export function extractSuffix(text) {
   if (!text) return null;
   const m = String(text).trim().match(/\(([hmt])\)\s*$/i);
   return m ? m[1].toLowerCase() : null;
 }
+
+/**
+ * Backwards-compat alias kept for any consumer that imported the old
+ * constant name. New code should use FALLBACK_DISCHARGE_PRESETS or the
+ * useDischargeConditions() hook.
+ */
+export const BATTERY_DISCHARGE_PRESETS = FALLBACK_DISCHARGE_PRESETS;

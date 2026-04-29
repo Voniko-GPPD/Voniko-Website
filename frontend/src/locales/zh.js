@@ -474,6 +474,8 @@ export default {
   batteryLineExists: '产品系列已存在',
   batteryDeleteTypeConfirm: '删除此电池类型？',
   batteryDeleteLineConfirm: '删除此产品系列？',
+  batteryTypeAddNew: '添加并选择新类型',
+  batteryLineAddNew: '添加并选择新系列',
   from: '从',
   to: '到',
   batteryHistorySavedAt: '保存时间',

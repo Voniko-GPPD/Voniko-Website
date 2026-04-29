@@ -474,6 +474,8 @@ export default {
   batteryLineExists: 'Product line already exists',
   batteryDeleteTypeConfirm: 'Delete this battery type?',
   batteryDeleteLineConfirm: 'Delete this product line?',
+  batteryTypeAddNew: 'Add & select new type',
+  batteryLineAddNew: 'Add & select new line',
   from: 'From',
   to: 'To',
   batteryHistorySavedAt: 'Saved At',

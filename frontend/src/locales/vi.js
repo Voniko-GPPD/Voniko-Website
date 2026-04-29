@@ -474,6 +474,8 @@ export default {
   batteryLineExists: 'Dòng sản phẩm đã tồn tại',
   batteryDeleteTypeConfirm: 'Xóa loại pin này?',
   batteryDeleteLineConfirm: 'Xóa dòng sản phẩm này?',
+  batteryTypeAddNew: 'Thêm và chọn loại pin mới',
+  batteryLineAddNew: 'Thêm và chọn dòng sản phẩm mới',
   from: 'Từ',
   to: 'Đến',
   batteryHistorySavedAt: 'Ngày lưu',

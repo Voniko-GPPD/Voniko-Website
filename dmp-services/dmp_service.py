@@ -1680,13 +1680,18 @@ def get_batches(year: Optional[int] = None):
 
     # Build a channel-count map from para_singl in a single query so every batch
     # row can be annotated without an N+1 per-batch lookup.
+    # COUNT(*) is used instead of COUNT(baty) so the query works even when the
+    # DMP schema does not include a baty column.
+    # _dm2000_get_value is used for all column lookups on para_singl rows so
+    # that Access databases storing "SID" / "CHANNEL_COUNT" in uppercase are
+    # handled identically to lowercase schemas.
     channel_counts: dict[str, int] = {}
     singl_cdmc_by_sid: dict[str, str] = {}
     try:
-        cc_rows = _read_dmpdata("SELECT sid, COUNT(baty) AS channel_count FROM para_singl GROUP BY sid")
+        cc_rows = _read_dmpdata("SELECT sid, COUNT(*) AS channel_count FROM para_singl GROUP BY sid")
         for cc in cc_rows:
-            sid = cc.get("sid")
-            cnt = cc.get("channel_count")
+            sid = _dm2000_get_value(cc, "sid")
+            cnt = _dm2000_get_value(cc, "channel_count")
             if sid is not None and cnt is not None:
                 channel_counts[str(sid)] = int(cnt)
     except Exception as exc:  # noqa: BLE001
@@ -1699,8 +1704,8 @@ def get_batches(year: Optional[int] = None):
             "SELECT sid, MIN(cdmc) AS cdmc FROM para_singl WHERE cdmc IS NOT NULL GROUP BY sid",
         )
         for cr in cdmc_rows:
-            sid = cr.get("sid")
-            cdmc = cr.get("cdmc")
+            sid = _dm2000_get_value(cr, "sid")
+            cdmc = _dm2000_get_value(cr, "cdmc")
             if sid is not None and cdmc:
                 singl_cdmc_by_sid[str(sid)] = str(cdmc).strip()
     except Exception as exc:  # noqa: BLE001
@@ -1736,7 +1741,7 @@ def get_batches(year: Optional[int] = None):
             " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
         )
         for er in extras_rows:
-            sid = er.get("sid")
+            sid = _dm2000_get_value(er, "sid")
             if sid is not None:
                 singl_extras_by_sid[str(sid)] = er
     except Exception as exc:  # noqa: BLE001
@@ -1748,7 +1753,7 @@ def get_batches(year: Optional[int] = None):
                 " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
             )
             for er in extras_rows:
-                sid = er.get("sid")
+                sid = _dm2000_get_value(er, "sid")
                 if sid is not None:
                     singl_extras_by_sid[str(sid)] = er
         except Exception as exc2:  # noqa: BLE001

@@ -134,12 +134,12 @@ export default function UsersPage() {
   };
 
   const roleLabel = (role) => {
-    const map = { admin: t('admin'), engineer: t('engineerRole'), qc: t('qcRole') };
+    const map = { admin: t('admin'), engineer: t('engineerRole'), qc: t('qcRole'), lab: t('labRole') };
     return map[role] || role;
   };
 
   const roleColor = (role) => {
-    const map = { admin: 'red', engineer: 'green', qc: 'orange' };
+    const map = { admin: 'red', engineer: 'green', qc: 'orange', lab: 'purple' };
     return map[role] || 'default';
   };
 
@@ -322,6 +322,7 @@ export default function UsersPage() {
                 { value: 'admin', label: t('admin') },
                 { value: 'engineer', label: t('engineerRole') },
                 { value: 'qc', label: t('qcRole') },
+                { value: 'lab', label: t('labRole') },
               ]}
             />
           </Form.Item>

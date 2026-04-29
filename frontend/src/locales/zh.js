@@ -625,6 +625,26 @@ export default {
   dm2000DurationEndpoint: '持续时间截止电压',
   dm2000DurationEndpointAll: '全部',
 
+  // 放电条件帮助 / 备注模板
+  remarkHelpButton: '放电条件帮助',
+  remarkHelpTitle: '放电条件参考',
+  remarkHelpDesc: '按电池族列出的标准放电条件。点击"应用"可填入报表的"放电条件"字段，点击"复制"可复制到剪贴板。',
+  remarkSuffixLegend: '后缀说明',
+  remarkSuffixHours: '报告单位：小时',
+  remarkSuffixMinutes: '报告单位：分钟',
+  remarkSuffixTimes: '报告单位：次/脉冲数',
+  remarkSuffixNone: '无',
+  remarkSuffixColumn: '后缀',
+  remarkConditionText: '条件',
+  remarkActions: '操作',
+  remarkCopy: '复制',
+  remarkCopied: '已复制',
+  remarkCopyFailed: '复制失败',
+  remarkApply: '应用',
+  remarkApplied: '已应用到放电条件字段',
+  remarkDetectedFamily: '当前电池识别到的族',
+  remarkDischargeCondition: '放电条件',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',
   cbDetectTab: '计数',

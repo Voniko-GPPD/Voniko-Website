@@ -625,6 +625,26 @@ export default {
   dm2000DurationEndpoint: 'Điểm cuối thời lượng',
   dm2000DurationEndpointAll: 'Tất cả',
 
+  // Trợ giúp điều kiện phóng / mẫu Remark
+  remarkHelpButton: 'Trợ giúp điều kiện phóng',
+  remarkHelpTitle: 'Tham khảo điều kiện phóng',
+  remarkHelpDesc: 'Bảng điều kiện phóng chuẩn theo từng dòng pin. Bấm "Áp dụng" để chèn vào ô Dis-condition của báo cáo, hoặc "Sao chép" để chép vào clipboard.',
+  remarkSuffixLegend: 'Quy ước hậu tố',
+  remarkSuffixHours: 'đơn vị báo cáo: giờ',
+  remarkSuffixMinutes: 'đơn vị báo cáo: phút',
+  remarkSuffixTimes: 'đơn vị báo cáo: số lần/xung',
+  remarkSuffixNone: 'không có',
+  remarkSuffixColumn: 'Hậu tố',
+  remarkConditionText: 'Điều kiện',
+  remarkActions: 'Thao tác',
+  remarkCopy: 'Sao chép',
+  remarkCopied: 'Đã sao chép',
+  remarkCopyFailed: 'Sao chép thất bại',
+  remarkApply: 'Áp dụng',
+  remarkApplied: 'Đã áp dụng vào ô Dis-condition',
+  remarkDetectedFamily: 'Dòng pin nhận diện được',
+  remarkDischargeCondition: 'Điều kiện phóng',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',
   cbDetectTab: 'Đếm pin',

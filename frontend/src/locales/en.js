@@ -625,6 +625,26 @@ export default {
   dm2000DurationEndpoint: 'Duration End-point',
   dm2000DurationEndpointAll: 'All',
 
+  // Discharge condition help / Remark templates
+  remarkHelpButton: 'Discharge Condition Help',
+  remarkHelpTitle: 'Discharge Condition Reference',
+  remarkHelpDesc: 'Standard discharge conditions per battery family. Click "Apply" to insert the selected condition into the report\'s Dis-condition field, or "Copy" to copy it to the clipboard.',
+  remarkSuffixLegend: 'Suffix legend',
+  remarkSuffixHours: 'report unit: hours',
+  remarkSuffixMinutes: 'report unit: minutes',
+  remarkSuffixTimes: 'report unit: number of pulses/cycles',
+  remarkSuffixNone: 'no suffix',
+  remarkSuffixColumn: 'Suffix',
+  remarkConditionText: 'Condition',
+  remarkActions: 'Actions',
+  remarkCopy: 'Copy',
+  remarkCopied: 'Copied to clipboard',
+  remarkCopyFailed: 'Failed to copy',
+  remarkApply: 'Apply',
+  remarkApplied: 'Applied to Dis-condition field',
+  remarkDetectedFamily: 'Detected family for current battery type',
+  remarkDischargeCondition: 'Discharge Condition',
+
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',
   cbDetectTab: 'Count Batteries',

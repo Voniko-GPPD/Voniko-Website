@@ -86,11 +86,19 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
       title: t('dm2000DisCondition'),
       key: 'fdfs',
       width: 240,
-      render: (_v, record) => composeDischargeCondition({
-        load: record.fzdz || record.fz2 || record.load_resistance || '',
-        cycle: record.jstj || record.fdfs || '',
-        endpoint: record.zzdy || record.endpoint_voltage || '',
-      }) || '-',
+      render: (_v, record) => {
+        // For DMP, para_pub.fdfs already stores the canonical discharge
+        // condition string (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") and must
+        // be shown verbatim — do NOT recompose it from fzdz/jstj/zzdy as
+        // that injects an artificial "ohm" unit and the stop-criterion text.
+        const raw = String(record.fdfs || '').trim();
+        if (raw) return raw;
+        return composeDischargeCondition({
+          load: record.fzdz || record.fz2 || record.load_resistance || '',
+          cycle: record.jstj || '',
+          endpoint: record.zzdy || record.endpoint_voltage || '',
+        }) || '-';
+      },
     },
     { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
     { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 120, render: (v) => v || '-' },

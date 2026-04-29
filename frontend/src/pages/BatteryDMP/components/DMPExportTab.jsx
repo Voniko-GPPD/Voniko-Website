@@ -146,13 +146,14 @@ export default function DMPExportTab({ stationId, selection }) {
     setReportEndpoint(null);
     requestedBatysRef.current = new Set();
     if (selection) {
-      // Compose a "Discharge Condition" string from the discrete fields. For
-      // DMP, jstj usually holds the full condition already (e.g.
-      // "10ohm 24h/d-0.9V"); when it doesn't, fall back to combining
-      // load_resistance / fdfs / endpoint_voltage.
-      const composed = composeDischargeCondition({
+      // For DMP, para_pub.fdfs already contains the canonical discharge
+      // condition string (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") — use it
+      // as-is and only fall back to recomposing from fzdz/jstj/zzdy when
+      // fdfs is empty (so we never silently rewrite the stored value).
+      const rawFdfs = String(selection.fdfs || '').trim();
+      const composed = rawFdfs || composeDischargeCondition({
         load: selection.fzdz || selection.fz2 || '',
-        cycle: selection.jstj || selection.fdfs || '',
+        cycle: selection.jstj || '',
         endpoint: selection.zzdy || '',
       });
       setArchiveFields({

@@ -636,8 +636,16 @@ class ReportRequest(BaseModel):
 
 class DMPSimpleReportRequest(BaseModel):
     batch_id: str
-    cdmc: str
-    channel: int
+    # Legacy single-channel fields (used when ``batys`` is not provided so older
+    # callers keep working).  When ``batys`` is non-empty the new DM2000-style
+    # multi-battery preview format is generated and these fields are ignored.
+    cdmc: Optional[str] = None
+    channel: Optional[int] = None
+    # New multi-battery fields mirroring DM2000SimpleReportRequest
+    batys: list[int] = Field(default=[])
+    override_battery_type: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+    endpoint_cutoff: Optional[float] = None
 
 
 class DM2000ReportRequest(BaseModel):
@@ -1293,6 +1301,101 @@ def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> fl
     return total_mah if total_mah > 0 else None
 
 
+def _derive_thresholds_from_curves(
+    curves_by_baty: dict, endpoint_voltage: Optional[float] = None
+) -> list[float]:
+    """Derive a sensible set of voltage thresholds for DMP discharge curves.
+
+    Returns thresholds in descending order, snapped to 0.05 V steps from
+    the maximum starting voltage down to ``endpoint_voltage`` (or the lowest
+    voltage observed across all curves when no endpoint is provided).
+    """
+    max_v: Optional[float] = None
+    min_v: Optional[float] = None
+    for rows in curves_by_baty.values():
+        for r in rows or []:
+            v = r.get("VOLT")
+            if v is None or v == "" or v == "--":
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(fv):
+                continue
+            if max_v is None or fv > max_v:
+                max_v = fv
+            if min_v is None or fv < min_v:
+                min_v = fv
+    if max_v is None or min_v is None:
+        return []
+    low_bound = endpoint_voltage if endpoint_voltage is not None else min_v
+    if low_bound > max_v:
+        low_bound = min_v
+    # Snap to 0.05 V grid for clean display rows
+    step = 0.05
+    top = math.floor(max_v / step) * step
+    bot = math.ceil(low_bound / step) * step
+    if bot > top:
+        bot = top
+    thresholds: list[float] = []
+    v = top
+    # Cap the number of rows so the report stays readable for very long curves
+    max_rows = 80
+    while v >= bot - 1e-9 and len(thresholds) < max_rows:
+        thresholds.append(round(v, 3))
+        v -= step
+    return thresholds
+
+
+def _tav_from_dmp_telemetry(telemetry: list[dict], thresholds: list[float]) -> list[dict]:
+    """Build time-at-voltage rows from DMP telemetry for the given thresholds.
+
+    For each threshold V the function returns the cumulative discharge time
+    (in minutes) at which the curve first drops to or below V, interpolating
+    linearly between the two surrounding telemetry samples.
+
+    Returns rows shaped like ls_vtime: ``[{"sj": V, "minutes": M}, ...]``.
+    Thresholds that are never reached (curve still above V at the end of the
+    run) are omitted.
+    """
+    points: list[tuple[float, float]] = []  # (TIM hours, VOLT)
+    for r in telemetry or []:
+        t = r.get("TIM")
+        v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+        if t is None or v is None or t == "--" or v == "--":
+            continue
+        try:
+            tf = float(t)
+            vf = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(tf) or math.isnan(vf):
+            continue
+        points.append((tf, vf))
+    if len(points) < 2:
+        return []
+    points.sort(key=lambda p: p[0])
+
+    rows: list[dict] = []
+    for thr in thresholds:
+        cross_t: Optional[float] = None
+        for i in range(1, len(points)):
+            t1, v1 = points[i - 1]
+            t2, v2 = points[i]
+            if v1 >= thr and v2 <= thr:
+                if v1 == v2:
+                    cross_t = t1
+                else:
+                    # Linear interpolation: solve for t where v(t) = thr
+                    cross_t = t1 + (t2 - t1) * ((v1 - thr) / (v1 - v2))
+                break
+        if cross_t is not None and cross_t >= 0:
+            rows.append({"sj": round(thr, 3), "minutes": round(cross_t * 60.0, 4)})
+    return rows
+
+
+
 def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
     """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
     a single battery.
@@ -1921,77 +2024,314 @@ def generate_report(payload: ReportRequest):
 
 @app.post("/report-simple")
 def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
-    """Generate a basic Excel report for a DMP channel without requiring a template file."""
-    if not (1 <= payload.channel <= 99):
-        raise HTTPException(status_code=400, detail="Invalid channel")
+    """Generate a "Battery Discharge Curve" Excel report for one or more DMP
+    channels.
 
-    batch_rows = _read_dmpdata(
-        "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
-        (payload.batch_id,),
-    )
+    Two modes are supported:
+
+    * **Multi-battery (DM2000-style preview)** — the request supplies ``batys``
+      (1 or more channel numbers). The output uses the shared
+      ``_build_preview_workbook`` so the file is identical in shape to the
+      DM2000 simple report (archive info header, OCV/FCV/SOt mAh per battery,
+      "Duration of Series Designated Voltage" rows, plus the discharge-curve
+      chart).
+    * **Single-channel (legacy)** — when ``batys`` is empty and ``channel`` is
+      supplied, the original tabular dump (stats + raw telemetry) is generated
+      so older callers continue to work.
+    """
+    safe_id = re.sub(r'[^\w\-]', '_', str(payload.batch_id))
+
+    # ── Legacy single-channel mode ─────────────────────────────────────────
+    if not payload.batys and payload.channel is not None:
+        if not (1 <= payload.channel <= 99):
+            raise HTTPException(status_code=400, detail="Invalid channel")
+        if not payload.cdmc:
+            raise HTTPException(status_code=400, detail="cdmc is required for single-channel report")
+
+        batch_rows = _read_dmpdata(
+            "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
+        if not batch_rows:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        batch = batch_rows[0]
+
+        telemetry = _read_telemetry(payload.cdmc, payload.channel)
+        stats = compute_stats(telemetry)
+
+        duration = None
+        if telemetry:
+            try:
+                duration = max(
+                    float(r.get("TIM") or 0)
+                    for r in telemetry
+                    if r.get("TIM") not in (None, "", "--")
+                )
+            except (TypeError, ValueError):
+                duration = None
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = f"CH{payload.channel}"
+
+        ws.column_dimensions["A"].width = 24
+        ws.column_dimensions["B"].width = 30
+        ws.column_dimensions["C"].width = 14
+        ws.column_dimensions["D"].width = 16
+
+        for label, value in [
+            ("Batch ID", str(batch.get("id") or "")),
+            ("Type / Model", str(batch.get("dcxh") or "")),
+            ("Date", str(batch.get("fdrq") or "")),
+            ("Discharge Pattern", str(batch.get("fdfs") or "")),
+            ("Channel", str(payload.channel)),
+        ]:
+            ws.append([label, value])
+        ws.append([])
+
+        ws.append(["Statistics"])
+        for label, value in [
+            ("Duration (h)", round(duration, 4) if duration is not None else None),
+            ("Voltage Max (V)", stats.get("VOLT_MAX")),
+            ("Voltage Min (V)", stats.get("VOLT_MIN")),
+            ("Voltage Avg (V)", stats.get("VOLT_AVG")),
+            ("Current Max (mA)", stats.get("IM_MAX")),
+            ("Current Min (mA)", stats.get("IM_MIN")),
+            ("Current Avg (mA)", stats.get("IM_AVG")),
+        ]:
+            ws.append([label, value])
+        ws.append([])
+
+        ws.append(["#", "Time (h)", "Voltage (V)", "Current (mA)"])
+        for idx, row in enumerate(telemetry, 1):
+            tim = row.get("TIM")
+            volt = row.get("VOLT") or row.get("volt") or row.get("Volt")
+            im = row.get("Im") or row.get("IM") or row.get("im")
+            ws.append([idx, tim, volt, im])
+
+        buf = BytesIO()
+        wb.save(buf)
+        filename = f"dmp_report_{safe_id}_{payload.channel}.xlsx"
+        return StreamingResponse(
+            BytesIO(buf.getvalue()),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # ── Multi-battery mode (DM2000-style preview) ──────────────────────────
+    batys = sorted({int(b) for b in payload.batys if isinstance(b, int) and 1 <= int(b) <= 99})
+    if not batys:
+        raise HTTPException(status_code=400, detail="batys must not be empty")
+
+    # Fetch batch metadata from para_pub. SELECT * so all available columns are
+    # available to map onto archive_fields irrespective of schema variations.
+    try:
+        batch_rows = _read_dmpdata(
+            "SELECT * FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
+    except pyodbc.Error:
+        batch_rows = _read_dmpdata(
+            "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
     if not batch_rows:
         raise HTTPException(status_code=404, detail="Batch not found")
     batch = batch_rows[0]
 
-    telemetry = _read_telemetry(payload.cdmc, payload.channel)
-    stats = compute_stats(telemetry)
+    # Fetch para_singl rows for this batch to discover per-channel cdmc and
+    # additional metadata (manufacturer, dcph serial, dcmc model name, scrq date).
+    try:
+        singl_rows = _read_dmpdata(
+            "SELECT baty, cdmc, scdw, dcph, dcmc, scrq FROM para_singl WHERE sid = ?",
+            (payload.batch_id,),
+        )
+    except pyodbc.Error:
+        singl_rows = []
 
-    duration = None
-    if telemetry:
+    cdmc_by_baty: dict[int, str] = {}
+    first_singl: dict = {}
+    for row in singl_rows:
         try:
-            duration = max(
-                float(r.get("TIM") or 0)
-                for r in telemetry
-                if r.get("TIM") not in (None, "", "--")
-            )
+            b = int(float(str(row.get("baty"))))
         except (TypeError, ValueError):
-            duration = None
+            continue
+        if b <= 0:
+            continue
+        cdmc_val = row.get("cdmc")
+        if cdmc_val:
+            cdmc_by_baty[b] = str(cdmc_val).strip()
+        if not first_singl:
+            first_singl = {k: v for k, v in row.items() if v is not None}
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = f"CH{payload.channel}"
+    def _to_date_text(v):
+        if v and hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)[:10] if v not in (None, "") else ""
 
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 16
+    def _apply_override(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
 
-    for label, value in [
-        ("Batch ID", str(batch.get("id") or "")),
-        ("Type / Model", str(batch.get("dcxh") or "")),
-        ("Date", str(batch.get("fdrq") or "")),
-        ("Discharge Pattern", str(batch.get("fdfs") or "")),
-        ("Channel", str(payload.channel)),
-    ]:
-        ws.append([label, value])
-    ws.append([])
+    # Map para_pub / para_singl columns onto the archive_fields dict consumed
+    # by _build_preview_workbook.
+    archive_fields = {
+        "archname": str(batch.get("id") or payload.batch_id),
+        "name": str(batch.get("name") or first_singl.get("dcmc") or ""),
+        "startdate": _to_date_text(batch.get("fdrq")),
+        "enddate": _to_date_text(batch.get("jsrq") or batch.get("fdjssj")),
+        "dcxh": str(_apply_override(batch.get("dcxh"), payload.override_battery_type) or ""),
+        "fdfs": str(batch.get("fdfs") or ""),
+        # DMP does not store a precomputed uniform rate; let the workbook
+        # builder compute it from time-at-voltage data.
+        "unifrate": "",
+        "manufacturer": str(_apply_override(first_singl.get("scdw"), payload.override_manufacturer) or ""),
+        "madedate": _to_date_text(first_singl.get("scrq")),
+        "serialno": str(first_singl.get("dcph") or ""),
+        "remarks": str(batch.get("bz") or ""),
+        # Voltage type — para_pub.dylx; falls back to fdlx/jstj for older schemas.
+        "voltage_type": str(batch.get("dylx") or batch.get("fdlx") or ""),
+        "trademark": str(batch.get("sbmc") or batch.get("trademark") or ""),
+        "load_resistance": str(batch.get("fzdz") or batch.get("fz2") or ""),
+        "endpoint_voltage": str(batch.get("zzdy") or ""),
+        "dis_condition": str(batch.get("jstj") or batch.get("hjwd") or batch.get("wd") or ""),
+        "min_duration": str(batch.get("fdts") or ""),
+    }
 
-    ws.append(["Statistics"])
-    for label, value in [
-        ("Duration (h)", round(duration, 4) if duration is not None else None),
-        ("Voltage Max (V)", stats.get("VOLT_MAX")),
-        ("Voltage Min (V)", stats.get("VOLT_MIN")),
-        ("Voltage Avg (V)", stats.get("VOLT_AVG")),
-        ("Current Max (mA)", stats.get("IM_MAX")),
-        ("Current Min (mA)", stats.get("IM_MIN")),
-        ("Current Avg (mA)", stats.get("IM_AVG")),
-    ]:
-        ws.append([label, value])
-    ws.append([])
+    # Fetch telemetry once per battery; reuse for stats, OCV/FCV, SOt mAh and
+    # synthesised time-at-voltage rows.
+    telemetry_by_baty: dict[int, list[dict]] = {}
+    for b in batys:
+        cdmc = cdmc_by_baty.get(b) or payload.cdmc
+        if not cdmc:
+            telemetry_by_baty[b] = []
+            continue
+        try:
+            telemetry_by_baty[b] = _read_telemetry(cdmc, b)
+        except HTTPException:
+            telemetry_by_baty[b] = []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DMP report: telemetry read failed for baty=%d: %s", b, exc)
+            telemetry_by_baty[b] = []
 
-    ws.append(["#", "Time (h)", "Voltage (V)", "Current (mA)"])
-    for idx, row in enumerate(telemetry, 1):
-        tim = row.get("TIM")
-        volt = row.get("VOLT") or row.get("volt") or row.get("Volt")
-        im = row.get("Im") or row.get("IM") or row.get("im")
-        ws.append([idx, tim, volt, im])
+    # Endpoint voltage parsed from para_pub.zzdy, used to bound thresholds.
+    ep_voltage: Optional[float] = None
+    raw_ep = (archive_fields["endpoint_voltage"] or "").strip()
+    if raw_ep:
+        parts = raw_ep.split()
+        token = (parts[0] if parts else raw_ep)[:32]
+        # Strip any trailing unit characters (e.g. "0.9V" → "0.9") without a
+        # regex to keep CodeQL happy and avoid any backtracking concern.
+        while token and token[-1] not in "0123456789.-":
+            token = token[:-1]
+        try:
+            ep_voltage = float(token)
+        except (TypeError, ValueError):
+            ep_voltage = None
 
-    buf = BytesIO()
-    wb.save(buf)
-    safe_id = re.sub(r'[^\w\-]', '_', str(payload.batch_id))
-    filename = f"dmp_report_{safe_id}_{payload.channel}.xlsx"
+    thresholds = _derive_thresholds_from_curves(telemetry_by_baty, ep_voltage)
+
+    # Build OCV/FCV/SOt mAh and time-at-voltage data per battery.
+    stats_map: dict[int, dict] = {}
+    time_at_volt_map: dict[int, list[dict]] = {}
+    battery_params: dict[int, dict] = {}
+
+    try:
+        load_r = float(archive_fields["load_resistance"]) if archive_fields["load_resistance"] else None
+    except (TypeError, ValueError):
+        load_r = None
+
+    for b in batys:
+        rows = telemetry_by_baty.get(b) or []
+        s = compute_stats(rows)
+        # OCV = first voltage sample (open circuit, before discharge starts);
+        # FCV = last voltage sample (final closed-circuit). Fall back to
+        # max/min when the first/last samples are missing.
+        ocv: Optional[float] = None
+        fcv: Optional[float] = None
+        for r in rows:
+            v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    ocv = fv
+                    break
+            except (TypeError, ValueError):
+                continue
+        for r in reversed(rows):
+            v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    fcv = fv
+                    break
+            except (TypeError, ValueError):
+                continue
+        if ocv is None:
+            ocv = s.get("VOLT_MAX")
+        if fcv is None:
+            fcv = s.get("VOLT_MIN")
+        s["OCV"] = ocv
+        s["FCV"] = fcv
+        stats_map[b] = s
+
+        tav = _tav_from_dmp_telemetry(rows, thresholds)
+        time_at_volt_map[b] = tav
+
+        # Compute SOt mAh: prefer integration of measured current (Im in mA)
+        # over time, which is the most accurate. Fall back to TAV-based
+        # trapezoidal integration when Im samples are unavailable but a load
+        # resistance is configured.
+        sot_mah: Optional[float] = None
+        # Method 1: ∫ Im dt (mA · h = mAh).  Telemetry TIM is already in hours.
+        cur_points: list[tuple[float, float]] = []
+        for r in rows:
+            t = r.get("TIM")
+            im = r.get("Im") or r.get("IM") or r.get("im")
+            try:
+                tf = float(t)
+                im_f = float(im)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(tf) or math.isnan(im_f):
+                continue
+            cur_points.append((tf, im_f))
+        if len(cur_points) >= 2:
+            cur_points.sort(key=lambda p: p[0])
+            integ = 0.0
+            for i in range(len(cur_points) - 1):
+                t1, i1 = cur_points[i]
+                t2, i2 = cur_points[i + 1]
+                if t2 > t1:
+                    integ += (i1 + i2) / 2.0 * (t2 - t1)
+            if integ > 0:
+                sot_mah = round(integ, 3)
+        if sot_mah is None and load_r and load_r > 0:
+            sot_mah = _compute_sot_mah_from_tav(tav, load_r, fcv)
+
+        battery_params[b] = {
+            "baty": b,
+            "ocv": ocv,
+            "fcv": fcv,
+            "sot_mah": sot_mah,
+        }
+
+    try:
+        workbook_bytes = _build_preview_workbook(
+            archive_fields=archive_fields,
+            company=DM2000_COMPANY_NAME or "",
+            batys=batys,
+            stats_map=stats_map,
+            time_at_volt_map=time_at_volt_map,
+            battery_params=battery_params,
+            endpoint_cutoff=payload.endpoint_cutoff,
+        )
+    except Exception as exc:
+        logger.exception("Error building DMP preview workbook for batch=%s: %s", payload.batch_id, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}") from exc
+
+    filename = f"dmp_report_{safe_id}.xlsx"
     return StreamingResponse(
-        BytesIO(buf.getvalue()),
+        BytesIO(workbook_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

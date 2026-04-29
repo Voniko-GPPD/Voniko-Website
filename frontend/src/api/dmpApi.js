@@ -71,21 +71,46 @@ export async function fetchTemplates(stationId) {
   return data.templates || [];
 }
 
-export async function downloadSimpleReport({ stationId, batchId, cdmc, channel }) {
+export async function downloadSimpleReport({
+  stationId,
+  batchId,
+  cdmc,
+  channel,
+  batys,
+  overrideBatteryType,
+  overrideManufacturer,
+  endpointCutoff,
+}) {
   const token = localStorage.getItem('accessToken');
+  // stationId is consumed by the Node.js proxy; Python-bound fields use snake_case to match Pydantic models
+  const body = { stationId, batch_id: batchId };
+  if (Array.isArray(batys) && batys.length > 0) {
+    body.batys = batys;
+    if (cdmc) body.cdmc = cdmc;
+    if (overrideBatteryType != null && overrideBatteryType !== '') {
+      body.override_battery_type = overrideBatteryType;
+    }
+    if (overrideManufacturer != null && overrideManufacturer !== '') {
+      body.override_manufacturer = overrideManufacturer;
+    }
+    if (endpointCutoff != null) body.endpoint_cutoff = endpointCutoff;
+  } else {
+    // Legacy single-channel mode (kept for backwards compatibility).
+    body.cdmc = cdmc;
+    body.channel = channel;
+  }
   const res = await fetch(`${BASE}/report-simple`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    // stationId is consumed by the Node.js proxy; Python-bound fields use snake_case to match Pydantic models
-    body: JSON.stringify({ stationId, batch_id: batchId, cdmc, channel }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || err.error || 'Report generation failed');
+    throw new Error(err.message || err.error || err.detail || 'Report generation failed');
   }
 
   const blob = await res.blob();

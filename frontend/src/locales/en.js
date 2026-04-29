@@ -493,7 +493,7 @@ export default {
   folderImportSuccess: 'Import completed',
   folderExportSuccess: 'Exported successfully',
   engineerRole: 'Engineer',
-  qcRole: 'Lab Technician',
+  qcRole: 'QC',
   resetPassword: 'Reset Password',
   resetPasswordSuccess: 'Password reset successfully',
   folderManagement: 'Folder Management',

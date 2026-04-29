@@ -434,6 +434,7 @@ export default {
   batteryOcvCcvDone: 'Hoàn thành đo OCV/CCV',
   batterySaveDimensions: 'Lưu kích thước',
   batteryCaliperSkip: 'Bỏ qua pin này',
+  batteryCaliperJumpTooltip: 'Nhập ID để nhảy đến pin đó',
   batteryHistorySearch: 'Tìm theo mã đơn hàng...',
   batteryHistoryExportCsv: 'Xuất CSV',
   batteryHistoryExportExcel: 'Xuất Excel',

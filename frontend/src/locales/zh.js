@@ -434,6 +434,7 @@ export default {
   batteryOcvCcvDone: 'OCV/CCV完成',
   batterySaveDimensions: '保存尺寸',
   batteryCaliperSkip: '跳过此电池',
+  batteryCaliperJumpTooltip: '输入ID跳转到该电池',
   batteryHistorySearch: '按订单号搜索...',
   batteryHistoryExportCsv: '导出CSV',
   batteryHistoryExportExcel: '导出Excel',

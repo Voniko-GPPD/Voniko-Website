@@ -1935,7 +1935,7 @@ export default function BatteryPage() {
                     ) : (
                       <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                         <Tag color="processing" style={{ margin: 0 }}>{t('batteryId')}:</Tag>
-                        <Tooltip title="Nhập ID để nhảy đến pin đó">
+                        <Tooltip title={t('batteryCaliperJumpTooltip')}>
                           <Input
                             key={caliperIndex}
                             size="small"
@@ -1943,7 +1943,7 @@ export default function BatteryPage() {
                             style={{ width: 55, textAlign: 'center' }}
                             onPressEnter={(e) => {
                               const inputId = parseInt(e.target.value, 10);
-                              if (!isNaN(inputId)) {
+                              if (!isNaN(inputId) && inputId >= (records[0]?.id ?? 1) && inputId <= (records[records.length - 1]?.id ?? 1)) {
                                 const idx = records.findIndex(r => r.id === inputId);
                                 if (idx >= 0) {
                                   setCaliperIndex(idx);

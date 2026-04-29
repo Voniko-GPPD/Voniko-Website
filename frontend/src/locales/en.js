@@ -434,6 +434,7 @@ export default {
   batteryOcvCcvDone: 'OCV/CCV Done',
   batterySaveDimensions: 'Save Dimensions',
   batteryCaliperSkip: 'Skip this battery',
+  batteryCaliperJumpTooltip: 'Enter ID to jump to that battery',
   batteryHistorySearch: 'Search by order ID...',
   batteryHistoryExportCsv: 'Export CSV',
   batteryHistoryExportExcel: 'Export Excel',

@@ -12,8 +12,6 @@ import {
 } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 import { useAuth } from '../../../contexts/AuthContext';
-import DischargeConditionHelp from '../../../components/DischargeConditionHelp';
-import { composeDischargeCondition } from '../../../constants/dischargeConditions';
 
 function safeNum(value) {
   const n = Number(value);
@@ -110,16 +108,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
     setReportEndpoint(null);
     requestedBatysRef.current = new Set();
     if (selection) {
-      // Compose the canonical "Discharge Condition" string. For DM2000, the
-      // load resistance, dis-condition cycle (fdfs/dis_condition) and
-      // endpoint voltage are stored in separate columns and need to be
-      // glued together. composeDischargeCondition() detects when the cycle
-      // string is already complete and avoids double-prepending.
-      const composed = composeDischargeCondition({
-        load: selection.load_resistance || '',
-        cycle: selection.fdfs || selection.dis_condition || '',
-        endpoint: selection.endpoint_voltage || '',
-      });
       setArchiveFields({
         archname: selection.archname || '',
         name: selection.name || '',
@@ -136,7 +124,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
         load_resistance: selection.load_resistance || '',
         endpoint_voltage: selection.endpoint_voltage || '',
         dis_condition: selection.dis_condition || '',
-        discharge_condition: composed,
         min_duration: selection.min_duration || '',
         remarks: selection.remarks || '',
       });
@@ -391,37 +378,6 @@ export default function DM2000ExportTab({ stationId, selection }) {
             <Form layout="vertical" size="small">
               <Form.Item label={t('dm2000MadeDate')}>
                 <Input value={archiveFields.madedate} onChange={setField('madedate')} />
-              </Form.Item>
-            </Form>
-          </Col>
-          <Col xs={24} sm={12}>
-            <Form layout="vertical" size="small">
-              <Form.Item
-                label={(
-                  <Space size={6}>
-                    {t('remarkDischargeCondition')}
-                    <DischargeConditionHelp
-                      batteryType={archiveFields.dcxh}
-                      onApply={(text) => setArchiveFields((prev) => ({ ...prev, discharge_condition: text }))}
-                    />
-                  </Space>
-                )}
-              >
-                <Input
-                  value={archiveFields.discharge_condition || ''}
-                  onChange={setField('discharge_condition')}
-                  placeholder="e.g. 10ohm 24h/d-0.9V (h)"
-                />
-              </Form.Item>
-            </Form>
-          </Col>
-          <Col xs={24} sm={12}>
-            <Form layout="vertical" size="small">
-              <Form.Item label={t('dm2000Remarks')}>
-                <Input
-                  value={archiveFields.remarks || ''}
-                  onChange={setField('remarks')}
-                />
               </Form.Item>
             </Form>
           </Col>
@@ -680,7 +636,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
             <td style={labelStyle}>{t('dm2000Type')}</td>
             <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.dcxh || '-'}</td>
             <td style={labelStyle}>{t('dm2000DisCondition')}</td>
-            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.discharge_condition || archiveFields.fdfs || '-'}</td>
+            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.fdfs || '-'}</td>
           </tr>
           <tr>
             <td style={labelStyle}>{t('dm2000VoltageType')}</td>

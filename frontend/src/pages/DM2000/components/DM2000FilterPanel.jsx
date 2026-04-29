@@ -4,7 +4,6 @@ import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { fetchDM2000Archives } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
-import { composeDischargeCondition } from '../../../constants/dischargeConditions';
 
 const dateFormat = 'YYYY-MM-DD';
 
@@ -73,11 +72,13 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       title: t('dm2000DisCondition'),
       key: 'dis_condition',
       width: 240,
-      render: (_, record) => composeDischargeCondition({
-        load: record.load_resistance || '',
-        cycle: record.fdfs || record.dis_condition || '',
-        endpoint: record.endpoint_voltage || '',
-      }) || '-',
+      render: (_, record) => {
+        if (record.fdfs?.trim()) return String(record.fdfs);
+        const resistance = record.load_resistance?.trim() ? `${record.load_resistance} ohm` : '';
+        const endpoint = record.endpoint_voltage?.trim() ? `to ${record.endpoint_voltage}V` : '';
+        const parts = [resistance, endpoint].filter(Boolean);
+        return parts.length > 0 ? parts.join(', ') : '-';
+      },
     },
     { title: t('dm2000Duration'), dataIndex: 'duration', key: 'duration', width: 120, render: (v) => (v != null && v !== '') ? String(v) : '-' },
     { title: t('dm2000UnifRate'), dataIndex: 'unifrate', key: 'unifrate', width: 100, render: (v) => (v != null && v !== '') ? String(v) : '-' },

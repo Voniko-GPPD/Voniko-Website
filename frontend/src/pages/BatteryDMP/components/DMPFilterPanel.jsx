@@ -91,8 +91,8 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
         // condition string (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") and must
         // be shown verbatim — do NOT recompose it from fzdz/jstj/zzdy as
         // that injects an artificial "ohm" unit and the stop-criterion text.
-        const raw = String(record.fdfs || '').trim();
-        if (raw) return raw;
+        const rawFdfs = String(record.fdfs || '').trim();
+        if (rawFdfs) return rawFdfs;
         return composeDischargeCondition({
           load: record.fzdz || record.fz2 || record.load_resistance || '',
           cycle: record.jstj || '',

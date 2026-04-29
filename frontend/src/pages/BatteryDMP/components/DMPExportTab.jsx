@@ -151,7 +151,7 @@ export default function DMPExportTab({ stationId, selection }) {
       // as-is and only fall back to recomposing from fzdz/jstj/zzdy when
       // fdfs is empty (so we never silently rewrite the stored value).
       const rawFdfs = String(selection.fdfs || '').trim();
-      const composed = rawFdfs || composeDischargeCondition({
+      const dischargeCondition = rawFdfs || composeDischargeCondition({
         load: selection.fzdz || selection.fz2 || '',
         cycle: selection.jstj || '',
         endpoint: selection.zzdy || '',
@@ -172,7 +172,7 @@ export default function DMPExportTab({ stationId, selection }) {
         load_resistance: selection.fzdz || selection.fz2 || '',
         endpoint_voltage: selection.zzdy || '',
         dis_condition: selection.jstj || selection.hjwd || selection.wd || '',
-        discharge_condition: composed,
+        discharge_condition: dischargeCondition,
         min_duration: selection.fdts || '',
       });
     } else {

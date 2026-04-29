@@ -4,7 +4,6 @@ import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { fetchBatches } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
-import { composeDischargeCondition } from '../../../constants/dischargeConditions';
 
 const dateFormat = 'YYYY-MM-DD';
 
@@ -84,13 +83,10 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
     { title: t('dm2000Name'), dataIndex: 'name', key: 'name', width: 200, ellipsis: true, render: (v) => v || '-' },
     {
       title: t('dm2000DisCondition'),
+      dataIndex: 'fdfs',
       key: 'fdfs',
       width: 240,
-      render: (_v, record) => composeDischargeCondition({
-        load: record.fzdz || record.fz2 || record.load_resistance || '',
-        cycle: record.jstj || record.fdfs || '',
-        endpoint: record.zzdy || record.endpoint_voltage || '',
-      }) || '-',
+      render: (v) => v || '-',
     },
     { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
     { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 120, render: (v) => v || '-' },

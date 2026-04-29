@@ -7,7 +7,7 @@ import {
 import {
   ReloadOutlined, DownloadOutlined, DeleteOutlined, PlayCircleOutlined,
   StopOutlined, DisconnectOutlined, ApiOutlined, InboxOutlined, QuestionCircleOutlined,
-  ExportOutlined, FullscreenOutlined, InfoCircleOutlined,
+  ExportOutlined, FullscreenOutlined, InfoCircleOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
@@ -188,6 +188,8 @@ export default function BatteryPage() {
   const [newTypeName, setNewTypeName] = useState('');
   const [newLineName, setNewLineName] = useState('');
   const [typeLineLoading, setTypeLineLoading] = useState(false);
+  const [typeSearchText, setTypeSearchText] = useState('');
+  const [lineSearchText, setLineSearchText] = useState('');
 
   // Display
   const [statusText, setStatusText] = useState('Waiting...');
@@ -1204,6 +1206,44 @@ export default function BatteryPage() {
     } finally { setTypeLineLoading(false); }
   }, [newLineName, t]);
 
+  const handleCreateAndSelectType = useCallback(async (name) => {
+    if (!name.trim()) return;
+    setTypeLineLoading(true);
+    try {
+      await createBatteryType(name.trim());
+      const res = await getBatteryTypes();
+      setBatteryTypes(res.data.types || []);
+      setBatteryType(name.trim());
+      setTypeSearchText('');
+    } catch (e) {
+      if (e?.response?.status === 409) {
+        setBatteryType(name.trim());
+        setTypeSearchText('');
+      } else {
+        notification.error({ message: e?.response?.data?.error || e.message });
+      }
+    } finally { setTypeLineLoading(false); }
+  }, []);
+
+  const handleCreateAndSelectLine = useCallback(async (name) => {
+    if (!name.trim()) return;
+    setTypeLineLoading(true);
+    try {
+      await createBatteryProductLine(name.trim());
+      const res = await getBatteryProductLines();
+      setProductLines(res.data.productLines || []);
+      setProductLine(name.trim());
+      setLineSearchText('');
+    } catch (e) {
+      if (e?.response?.status === 409) {
+        setProductLine(name.trim());
+        setLineSearchText('');
+      } else {
+        notification.error({ message: e?.response?.data?.error || e.message });
+      }
+    } finally { setTypeLineLoading(false); }
+  }, []);
+
   const ocvSpec = React.useMemo(() => {
     const min = parseFloat(ocvMin);
     const max = parseFloat(ocvMax);
@@ -1447,6 +1487,17 @@ export default function BatteryPage() {
       if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
     }
   }, [records, ocvSpec, ccvSpec, t, sendMsg]);
+
+  // Auto-scroll results table to the currently measured caliper row
+  useEffect(() => {
+    if (!caliperPhase || !resultsTableRef.current) return;
+    const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
+    if (!tableBody) return;
+    const currentRecord = records[caliperIndex];
+    if (!currentRecord) return;
+    const row = tableBody.querySelector(`tr[data-row-key="${currentRecord.id}"]`);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }, [caliperIndex, caliperPhase, records]);
 
   useEffect(() => {
     try {
@@ -1812,8 +1863,33 @@ export default function BatteryPage() {
                     <Form.Item label={t('batteryType')} style={{ marginBottom: 0 }}>
                       <Select
                         value={batteryType}
-                        onChange={setBatteryType}
+                        onChange={(val) => { setBatteryType(val); setTypeSearchText(''); }}
                         disabled={inputsDisabled}
+                        showSearch
+                        searchValue={typeSearchText}
+                        onSearch={setTypeSearchText}
+                        filterOption={(input, option) =>
+                          option?.value?.toLowerCase().includes(input.toLowerCase())
+                        }
+                        dropdownRender={(menu) => (
+                          <>
+                            {menu}
+                            {typeSearchText && !batteryTypes.some(bt => bt.name.toLowerCase() === typeSearchText.toLowerCase()) && (
+                              <>
+                                <Divider style={{ margin: '4px 0' }} />
+                                <div
+                                  role="button"
+                                  tabIndex={0}
+                                  style={{ padding: '4px 12px', cursor: typeLineLoading ? 'not-allowed' : 'pointer', color: '#1677ff', display: 'flex', alignItems: 'center', gap: 6 }}
+                                  onMouseDown={(e) => { e.preventDefault(); handleCreateAndSelectType(typeSearchText); }}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCreateAndSelectType(typeSearchText); } }}
+                                >
+                                  <PlusOutlined /> {t('batteryTypeAddNew')}
+                                </div>
+                              </>
+                            )}
+                          </>
+                        )}
                         style={{ width: '100%' }}
                       >
                         {batteryTypes.map(bt => <Option key={bt.id} value={bt.name}>{bt.name}</Option>)}
@@ -1824,8 +1900,33 @@ export default function BatteryPage() {
                     <Form.Item label={t('batteryProductLine')} style={{ marginBottom: 0 }}>
                       <Select
                         value={productLine}
-                        onChange={setProductLine}
+                        onChange={(val) => { setProductLine(val); setLineSearchText(''); }}
                         disabled={inputsDisabled}
+                        showSearch
+                        searchValue={lineSearchText}
+                        onSearch={setLineSearchText}
+                        filterOption={(input, option) =>
+                          option?.value?.toLowerCase().includes(input.toLowerCase())
+                        }
+                        dropdownRender={(menu) => (
+                          <>
+                            {menu}
+                            {lineSearchText && !productLines.some(pl => pl.name.toLowerCase() === lineSearchText.toLowerCase()) && (
+                              <>
+                                <Divider style={{ margin: '4px 0' }} />
+                                <div
+                                  role="button"
+                                  tabIndex={0}
+                                  style={{ padding: '4px 12px', cursor: typeLineLoading ? 'not-allowed' : 'pointer', color: '#1677ff', display: 'flex', alignItems: 'center', gap: 6 }}
+                                  onMouseDown={(e) => { e.preventDefault(); handleCreateAndSelectLine(lineSearchText); }}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCreateAndSelectLine(lineSearchText); } }}
+                                >
+                                  <PlusOutlined /> {t('batteryLineAddNew')}
+                                </div>
+                              </>
+                            )}
+                          </>
+                        )}
                         style={{ width: '100%' }}
                       >
                         {productLines.map(pl => <Option key={pl.id} value={pl.name}>{pl.name}</Option>)}
@@ -1917,12 +2018,37 @@ export default function BatteryPage() {
                 <Space>
                   <span>📏 {t('batteryCaliperSection')}</span>
                   {records.length > 0 && records[caliperIndex] != null && (
-                    <Tag color={caliperSingleMode ? 'warning' : 'processing'} style={{ marginLeft: 4 }}>
-                      {caliperSingleMode
-                        ? `Re-measure: ${t('batteryId')} ${records[caliperIndex].id}`
-                        : `${t('batteryId')}: ${records[caliperIndex].id} / ${records.length}`
-                      }
-                    </Tag>
+                    caliperSingleMode ? (
+                      <Tag color="warning" style={{ marginLeft: 4 }}>
+                        Re-measure: {t('batteryId')} {records[caliperIndex].id}
+                      </Tag>
+                    ) : (
+                      <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Tag color="processing" style={{ margin: 0 }}>{t('batteryId')}:</Tag>
+                        <Tooltip title={t('batteryCaliperJumpTooltip')}>
+                          <Input
+                            key={caliperIndex}
+                            size="small"
+                            defaultValue={String(records[caliperIndex].id)}
+                            style={{ width: 55, textAlign: 'center' }}
+                            onPressEnter={(e) => {
+                              const inputId = parseInt(e.target.value, 10);
+                              if (!isNaN(inputId) && inputId >= (records[0]?.id ?? 1) && inputId <= (records[records.length - 1]?.id ?? 1)) {
+                                const idx = records.findIndex(r => r.id === inputId);
+                                if (idx >= 0) {
+                                  setCaliperIndex(idx);
+                                  setCaliperDia('');
+                                  setCaliperHei('');
+                                  setCaliperMode('dia');
+                                }
+                              }
+                              e.target.blur();
+                            }}
+                          />
+                        </Tooltip>
+                        <span style={{ color: '#1677ff', fontSize: 13 }}>/ {records.length}</span>
+                      </span>
+                    )
                   )}
                 </Space>
               }
@@ -1940,7 +2066,12 @@ export default function BatteryPage() {
                     <Space size={8}>
                       <Radio.Group
                         value={caliperMode}
-                        onChange={(e) => setCaliperMode(e.target.value)}
+                        onChange={(e) => {
+                          setCaliperMode(e.target.value);
+                          // Blur the radio button so the caliper's next Enter keypress
+                          // is caught by the global window keydown listener, not the button
+                          e.target.blur();
+                        }}
                         buttonStyle="solid"
                         size="small"
                       >
@@ -2035,14 +2166,9 @@ export default function BatteryPage() {
 
                 {/* Action buttons — same row */}
                 <Col xs="auto" style={{ marginTop: 18 }}>
-                  <Space>
-                    <Button size="small" onClick={handleSaveCaliper}>
-                      {t('batteryCaliperSkip')}
-                    </Button>
-                    <Button size="small" onClick={handleResetCaliper}>
-                      {t('cancel')}
-                    </Button>
-                  </Space>
+                  <Button size="small" onClick={handleResetCaliper}>
+                    {t('cancel')}
+                  </Button>
                 </Col>
               </Row>
             </Card>
@@ -2634,7 +2760,6 @@ export default function BatteryPage() {
         keyboard={false}
         footer={[
           <Button key="new" danger onClick={() => {
-            saveCurrentOrderSnapshot();
             localStorage.removeItem('battery_session');
             setRecords([]);
             setChartData([]);

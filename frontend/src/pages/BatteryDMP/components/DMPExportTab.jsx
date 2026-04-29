@@ -69,6 +69,23 @@ function timeAtVoltage(rows, thr) {
   return null;
 }
 
+/** Number of discharge "times" (1-based position of the first time-sorted
+ *  telemetry sample whose voltage is <= ``thr``). Returns null if the
+ *  threshold is never reached. */
+function countAtVoltage(rows, thr) {
+  const points = (rows || [])
+    .map((r) => ({ t: safeNum(r.TIM), v: safeNum(r.VOLT ?? r.volt ?? r.Volt) }))
+    .filter((p) => p.t != null && p.v != null)
+    .sort((a, b) => a.t - b.t);
+  if (points.length < 2) return null;
+  for (let i = 1; i < points.length; i++) {
+    if (points[i - 1].v >= thr && points[i].v <= thr) {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
 /** Integrate Im (mA) over TIM (hours) using the trapezoidal rule → SOt mAh. */
 function computeSotMah(rows) {
   const points = (rows || [])
@@ -433,7 +450,6 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
 
   const [ocvMax, ocvMin, ocvAvg] = rowAgg((b) => perBat[b]?.ocv);
   const [fcvMax, fcvMin, fcvAvg] = rowAgg((b) => perBat[b]?.fcv);
-  const [sotMax, sotMin, sotAvg] = rowAgg((b) => perBat[b]?.sot);
 
   const cellValue = (val) => {
     const n = safeNum(val);
@@ -520,42 +536,39 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
               <td style={cellStyle}>{ocvAvg}</td>
             </tr>
             <tr>
-              <td style={labelStyle}>FCV V</td>
+              <td style={labelStyle}>CCV V</td>
               {previewBatys.map((b) => <td key={b} style={cellStyle}>{cellValue(perBat[b]?.ready ? perBat[b].fcv : null)}</td>)}
               <td style={cellStyle}>{fcvMax}</td>
               <td style={cellStyle}>{fcvMin}</td>
               <td style={cellStyle}>{fcvAvg}</td>
             </tr>
             <tr>
-              <td style={labelStyle}>SOt mAh</td>
-              {previewBatys.map((b) => <td key={b} style={cellStyle}>{cellValue(perBat[b]?.ready ? perBat[b].sot : null)}</td>)}
-              <td style={cellStyle}>{sotMax}</td>
-              <td style={cellStyle}>{sotMin}</td>
-              <td style={cellStyle}>{sotAvg}</td>
-            </tr>
-            <tr>
               <td colSpan={numCols} style={{ ...cellStyle, fontStyle: 'italic', background: '#f0f5ff' }}>
-                The Duration of Series Designated Voltage (Unit: hour)
+                The Duration of Series Designated Voltage (Unit: times)
               </td>
             </tr>
             {visibleThresholds.map((threshold) => {
               const cellVals = previewBatys.map((b) => {
                 const rows = telemetryMap[b];
                 if (!rows) return null;
-                const t_h = timeAtVoltage(rows, threshold);
-                return t_h;
+                return countAtVoltage(rows, threshold);
               });
               const numericVals = cellVals.filter((v) => v != null);
               if (numericVals.length === 0 && cellVals.every((v) => v == null)) return null;
+              const maxV = numericVals.length > 0 ? Math.max(...numericVals) : '-';
+              const minV = numericVals.length > 0 ? Math.min(...numericVals) : '-';
+              const avgV = numericVals.length > 0
+                ? Math.round(numericVals.reduce((s, v) => s + v, 0) / numericVals.length)
+                : '-';
               return (
                 <tr key={threshold}>
                   <td style={labelStyle}>{threshold.toFixed(3)}</td>
                   {previewBatys.map((b, idx) => (
-                    <td key={b} style={cellStyle}>{cellVals[idx] != null ? cellVals[idx].toFixed(3) : '-'}</td>
+                    <td key={b} style={cellStyle}>{cellVals[idx] != null ? cellVals[idx] : '-'}</td>
                   ))}
-                  <td style={cellStyle}>{numericVals.length > 0 ? Math.max(...numericVals).toFixed(3) : '-'}</td>
-                  <td style={cellStyle}>{numericVals.length > 0 ? Math.min(...numericVals).toFixed(3) : '-'}</td>
-                  <td style={cellStyle}>{numericVals.length > 0 ? (numericVals.reduce((s, v) => s + v, 0) / numericVals.length).toFixed(3) : '-'}</td>
+                  <td style={cellStyle}>{maxV}</td>
+                  <td style={cellStyle}>{minV}</td>
+                  <td style={cellStyle}>{avgV}</td>
                 </tr>
               );
             })}

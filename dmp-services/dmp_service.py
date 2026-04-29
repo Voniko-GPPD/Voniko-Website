@@ -1792,7 +1792,9 @@ def get_batches(year: Optional[int] = None):
 
         # Merge extended fields from para_pur when available (dcxh, name,
         # manufacturer, madedate, serialno, remarks, duration, uniformity).
-        batch_id = row.get("id")
+        # Use case-insensitive lookup so Access columns named "ID" (uppercase)
+        # are handled identically to lowercase "id".
+        batch_id = _dm2000_get_value(row, "id")
         pur = para_pur_by_sid.get(str(batch_id)) if batch_id is not None else None
         # Fallback: join via cdmc (session file name) for alternate DB schemas.
         if pur is None:
@@ -1816,6 +1818,12 @@ def get_batches(year: Optional[int] = None):
         # Dis-condition (fdfs) is extended with the cutoff voltage from para_singl.jstj.
         # Remarks come from para_pub.bz (already present in the row from SELECT *).
         singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
+        # Fallback: some schemas store para_singl.sid as the cdmc session filename,
+        # not the numeric batch id — try a cdmc-keyed lookup when the id lookup fails.
+        if singl_ext is None:
+            _cdmc_key = str(_dm2000_get_value(row, "cdmc") or "").strip()
+            if _cdmc_key:
+                singl_ext = singl_extras_by_sid.get(_cdmc_key)
         if singl_ext:
             scdw_val = singl_ext.get("scdw")
             if scdw_val not in (None, "", "--"):
@@ -1850,7 +1858,9 @@ def get_batches(year: Optional[int] = None):
         # the closest DMP equivalent to an archive identifier.  Map it to the
         # display fields the frontend expects so those columns are not empty.
         # Fall back to para_singl cdmc, then to the batch id itself.
-        cdmc_val = (row.get("cdmc") or "").strip()
+        # Use _dm2000_get_value for case-insensitive column access (Access may
+        # store the column as "CDMC" in uppercase).
+        cdmc_val = str(_dm2000_get_value(row, "cdmc") or "").strip()
         if not cdmc_val and batch_id is not None:
             cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "")
         if not cdmc_val and batch_id is not None:
@@ -1866,7 +1876,12 @@ def get_batches(year: Optional[int] = None):
             row["archname"] = str(batch_id)
 
         # Attach the pre-computed channel count for this batch.
-        row["channel_count"] = channel_counts.get(str(batch_id)) if batch_id is not None else None
+        # Try by numeric batch id first; fall back to cdmc key for schemas where
+        # para_singl.sid stores the session filename rather than the numeric id.
+        _cc = channel_counts.get(str(batch_id)) if batch_id is not None else None
+        if _cc is None and cdmc_val:
+            _cc = channel_counts.get(cdmc_val)
+        row["channel_count"] = _cc
 
         if year is not None and row_year != year:
             continue

@@ -1448,6 +1448,17 @@ export default function BatteryPage() {
     }
   }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
+  // Auto-scroll results table to the currently measured caliper row
+  useEffect(() => {
+    if (!caliperPhase || !resultsTableRef.current) return;
+    const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
+    if (!tableBody) return;
+    const currentRecord = records[caliperIndex];
+    if (!currentRecord) return;
+    const row = tableBody.querySelector(`tr[data-row-key="${currentRecord.id}"]`);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }, [caliperIndex, caliperPhase, records]);
+
   useEffect(() => {
     try {
       const sessionData = {
@@ -1917,12 +1928,37 @@ export default function BatteryPage() {
                 <Space>
                   <span>📏 {t('batteryCaliperSection')}</span>
                   {records.length > 0 && records[caliperIndex] != null && (
-                    <Tag color={caliperSingleMode ? 'warning' : 'processing'} style={{ marginLeft: 4 }}>
-                      {caliperSingleMode
-                        ? `Re-measure: ${t('batteryId')} ${records[caliperIndex].id}`
-                        : `${t('batteryId')}: ${records[caliperIndex].id} / ${records.length}`
-                      }
-                    </Tag>
+                    caliperSingleMode ? (
+                      <Tag color="warning" style={{ marginLeft: 4 }}>
+                        Re-measure: {t('batteryId')} {records[caliperIndex].id}
+                      </Tag>
+                    ) : (
+                      <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Tag color="processing" style={{ margin: 0 }}>{t('batteryId')}:</Tag>
+                        <Tooltip title="Nhập ID để nhảy đến pin đó">
+                          <Input
+                            key={caliperIndex}
+                            size="small"
+                            defaultValue={String(records[caliperIndex].id)}
+                            style={{ width: 55, textAlign: 'center' }}
+                            onPressEnter={(e) => {
+                              const inputId = parseInt(e.target.value, 10);
+                              if (!isNaN(inputId)) {
+                                const idx = records.findIndex(r => r.id === inputId);
+                                if (idx >= 0) {
+                                  setCaliperIndex(idx);
+                                  setCaliperDia('');
+                                  setCaliperHei('');
+                                  setCaliperMode('dia');
+                                }
+                              }
+                              e.target.blur();
+                            }}
+                          />
+                        </Tooltip>
+                        <span style={{ color: '#1677ff', fontSize: 13 }}>/ {records.length}</span>
+                      </span>
+                    )
                   )}
                 </Space>
               }
@@ -2634,7 +2670,6 @@ export default function BatteryPage() {
         keyboard={false}
         footer={[
           <Button key="new" danger onClick={() => {
-            saveCurrentOrderSnapshot();
             localStorage.removeItem('battery_session');
             setRecords([]);
             setChartData([]);

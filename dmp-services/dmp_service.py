@@ -104,11 +104,6 @@ _SCHEMA_TABLE_WHITELIST = {
     "ls_evolt",
     "ls_timev",
 }
-# Cached result of para_pub schema check (None = not yet determined)
-_HAS_PARA_PUB_CDMC: bool | None = None
-_HAS_PARA_PUB_CDMC_LOCK = threading.Lock()
-
-
 def _get_local_ip() -> str:
     try:
         host = VONIKO_SERVER_URL.split("://")[-1].split(":")[0].split("/")[0]
@@ -375,11 +370,6 @@ def _dmpdata_refresh_cache(force: bool = False) -> None:
         _DMPDATA_CACHE_PATH = cache_final
         _DMPDATA_SOURCE_MTIME = current_mtime
         logger.info("dmpdata_cache: refreshed local copy from %s (mtime=%s)", dmpdata_path, current_mtime)
-
-        # Invalidate HAS_PARA_PUB_CDMC so schema is re-detected from new cache
-        global _HAS_PARA_PUB_CDMC  # noqa: PLW0603
-        with _HAS_PARA_PUB_CDMC_LOCK:
-            _HAS_PARA_PUB_CDMC = None
 
         _DMPDATA_CACHE_READY.set()
 
@@ -1651,24 +1641,6 @@ def get_batch_years():
 
 @app.get("/batches")
 def get_batches(year: Optional[int] = None):
-    global _HAS_PARA_PUB_CDMC
-
-    # Determine schema once and cache for the lifetime of the process
-    with _HAS_PARA_PUB_CDMC_LOCK:
-        if _HAS_PARA_PUB_CDMC is None:
-            detected = True  # default: assume cdmc column exists
-            try:
-                para_pub_columns = _get_table_columns(
-                    _DMPDATA_CACHE_PATH if _DMPDATA_CACHE_PATH else get_dmpdata_path(),
-                    "para_pub",
-                )
-                detected = "cdmc" in para_pub_columns
-            except (pyodbc.Error, HTTPException) as exc:
-                logger.debug("Could not inspect para_pub schema, using query fallback: %s", exc)
-            _HAS_PARA_PUB_CDMC = detected
-
-    has_para_pub_cdmc = _HAS_PARA_PUB_CDMC
-
     try:
         rows = _read_dmpdata("SELECT * FROM para_pub ORDER BY fdrq DESC")
     except pyodbc.Error:
@@ -1680,11 +1652,10 @@ def get_batches(year: Optional[int] = None):
 
     # Build a channel-count map from para_singl in a single query so every batch
     # row can be annotated without an N+1 per-batch lookup.
-    # COUNT(*) is used instead of COUNT(baty) so the query works even when the
-    # DMP schema does not include a baty column.
-    # _dm2000_get_value is used for all column lookups on para_singl rows so
-    # that Access databases storing "SID" / "CHANNEL_COUNT" in uppercase are
-    # handled identically to lowercase schemas.
+    # COUNT(*) is used so the query never depends on a specific column name.
+    # _dm2000_get_value is used for all column lookups on pyodbc result rows so
+    # that Access databases that return column names in uppercase are handled
+    # identically to lowercase schemas.
     channel_counts: dict[str, int] = {}
     singl_cdmc_by_sid: dict[str, str] = {}
     try:
@@ -1711,33 +1682,17 @@ def get_batches(year: Optional[int] = None):
     except Exception as exc:  # noqa: BLE001
         logger.debug("get_batches: could not load para_singl cdmc: %s", exc)
 
-    # Load para_pur for extended batch info: battery type, batch name,
-    # manufacturer, made date, serial no., remarks, duration, uniformity.
-    # para_pur.sid = para_pub.id (same JOIN key as para_singl).
-    # A secondary lookup by cdmc handles databases that join via session file name.
-    para_pur_by_sid: dict[str, dict] = {}
-    para_pur_by_cdmc: dict[str, dict] = {}
-    try:
-        pur_rows = _read_dmpdata("SELECT * FROM para_pur")
-        for pur in pur_rows:
-            # Use case-insensitive lookup so "SID" (uppercase) in Access is handled.
-            sid = _dm2000_get_value(pur, "sid")
-            if sid is not None:
-                para_pur_by_sid[str(sid)] = pur
-            # Secondary index by cdmc for schemas where para_pur joins via session name.
-            pur_cdmc = _dm2000_get_value(pur, "cdmc")
-            if pur_cdmc:
-                para_pur_by_cdmc[str(pur_cdmc).strip()] = pur
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("get_batches: could not load para_pur data: %s", exc)
-
-    # Load scdw (manufacturer), dcph (serial no.), and jstj (cutoff voltage)
-    # from para_singl.  These are the primary sources for those display fields.
-    # para_singl stores values per-channel; MIN picks one representative value.
+    # Load per-channel extras from para_singl.
+    # scdw = manufacturer, dcph = serial/battery id, dcmc = battery model name,
+    # scrq = sample/start date.  para_singl stores one row per channel; MIN()
+    # picks one representative value per batch (sid).
+    # Note: jstj is a para_pub column (not para_singl) and is already present
+    # in each batch row from the SELECT * above.
     singl_extras_by_sid: dict[str, dict] = {}
     try:
         extras_rows = _read_dmpdata(
-            "SELECT sid, MIN(scdw) AS scdw, MIN(dcph) AS dcph, MIN(jstj) AS jstj"
+            "SELECT sid, MIN(scdw) AS scdw, MIN(dcph) AS dcph,"
+            " MIN(dcmc) AS dcmc, MIN(scrq) AS scrq"
             " FROM para_singl WHERE sid IS NOT NULL GROUP BY sid",
         )
         for er in extras_rows:
@@ -1745,8 +1700,8 @@ def get_batches(year: Optional[int] = None):
             if sid is not None:
                 singl_extras_by_sid[str(sid)] = er
     except Exception as exc:  # noqa: BLE001
-        # Fallback: older schema may not have scdw/jstj columns.
-        logger.debug("get_batches: full singl extras query failed (%s), retrying without scdw/jstj", exc)
+        # Fallback: some older schemas may be missing optional columns.
+        logger.debug("get_batches: singl extras query failed (%s), retrying with dcph only", exc)
         try:
             extras_rows = _read_dmpdata(
                 "SELECT sid, MIN(dcph) AS dcph"
@@ -1795,33 +1750,9 @@ def get_batches(year: Optional[int] = None):
             if val is not None and hasattr(val, "strftime"):
                 row[_df] = val.strftime("%Y-%m-%d")
 
-        # Merge extended fields from para_pur when available (dcxh, name,
-        # manufacturer, madedate, serialno, remarks, duration, uniformity).
-        # Use case-insensitive lookup so Access columns named "ID" (uppercase)
-        # are handled identically to lowercase "id".
+        # Merge fields from para_singl extras: manufacturer, serial number,
+        # battery model name, and sample date.
         batch_id = _dm2000_get_value(row, "id")
-        pur = para_pur_by_sid.get(str(batch_id)) if batch_id is not None else None
-        # Fallback: join via cdmc (session file name) for alternate DB schemas.
-        if pur is None:
-            row_cdmc = (_dm2000_get_value(row, "cdmc") or "")
-            row_cdmc = str(row_cdmc).strip() if row_cdmc else ""
-            if row_cdmc:
-                pur = para_pur_by_cdmc.get(row_cdmc)
-        if pur:
-            if not row.get("dcxh"):
-                row["dcxh"] = _dm2000_get_value(pur, "dcxh")
-            if not row.get("name"):
-                row["name"] = _dm2000_get_value(pur, "name", "batna", "batname", "dcmc")
-            if not row.get("madedate"):
-                row["madedate"] = _to_date_str(_dm2000_get_value(pur, "madedate", "scrq"))
-            if not row.get("duration"):
-                row["duration"] = _dm2000_get_value(pur, "duration", "fdts")
-            if not row.get("uniformity"):
-                row["uniformity"] = _dm2000_get_value(pur, "uniformity", "unifrate", "hl", "hlfd")
-
-        # Primary sources: manufacturer = para_singl.scdw, serialno = para_singl.dcph.
-        # Dis-condition (fdfs) is extended with the cutoff voltage from para_singl.jstj.
-        # Remarks come from para_pub.bz (already present in the row from SELECT *).
         singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
         # Fallback: some schemas store para_singl.sid as the cdmc session filename,
         # not the numeric batch id — try a cdmc-keyed lookup when the id lookup fails.
@@ -1836,38 +1767,25 @@ def get_batches(year: Optional[int] = None):
             dcph_val = singl_ext.get("dcph")
             if dcph_val not in (None, "", "--"):
                 row["serialno"] = str(dcph_val).strip()
-            # Append jstj cutoff voltage to the fdfs discharge condition string.
-            jstj_val = singl_ext.get("jstj")
-            if jstj_val not in (None, "", "--"):
-                jstj_str = str(jstj_val).strip().rstrip("Vv").strip()
-                if jstj_str:
-                    fdfs_base = (row.get("fdfs") or "").strip()
-                    row["fdfs"] = f"{fdfs_base} to {jstj_str} V" if fdfs_base else f"to {jstj_str} V"
+            # dcmc is the battery model name stored per-channel; use it as the
+            # batch name when no name has been set yet.
+            dcmc_val_singl = singl_ext.get("dcmc")
+            if dcmc_val_singl not in (None, "", "--") and not row.get("name"):
+                row["name"] = str(dcmc_val_singl).strip()
+            # scrq is the sample/start date from para_singl; use it as madedate.
+            scrq_val = singl_ext.get("scrq")
+            if scrq_val not in (None, "", "--") and not row.get("madedate"):
+                row["madedate"] = _to_date_str(scrq_val)
 
-        # Fallback: fill manufacturer and serialno from para_pur when para_singl had no value.
-        if pur:
-            if not row.get("manufacturer"):
-                row["manufacturer"] = _dm2000_get_value(pur, "manufacturer", "scdw")
-            if not row.get("serialno"):
-                row["serialno"] = _dm2000_get_value(pur, "serialno", "sno", "dcph")
-
-        # Remarks: primary source is para_pub.bz (in the row); fall back to para_pur.
+        # Remarks come from para_pub.bz (already present in the row from SELECT *).
         bz_pub = _dm2000_get_value(row, "bz")
         if bz_pub not in (None, ""):
             row["remarks"] = str(bz_pub).strip()
-        elif pur and not row.get("remarks"):
-            row["remarks"] = _dm2000_get_value(pur, "remarks", "bz")
 
-        # para_pub (DMPDATA.mdb) stores only DMP-specific columns: id, cdmc, dcxh,
-        # fdrq, fdfs.  The "cdmc" column holds the session .mdb file name and is
-        # the closest DMP equivalent to an archive identifier.  Map it to the
-        # display fields the frontend expects so those columns are not empty.
-        # Fall back to para_singl cdmc, then to the batch id itself.
-        # Use _dm2000_get_value for case-insensitive column access (Access may
-        # store the column as "CDMC" in uppercase).
-        cdmc_val = str(_dm2000_get_value(row, "cdmc") or "").strip()
-        if not cdmc_val and batch_id is not None:
-            cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "")
+        # para_pub does not have a cdmc column.  The session .mdb file name is
+        # stored in para_singl.cdmc and was pre-fetched into singl_cdmc_by_sid.
+        # Use that as the session identifier; fall back to the batch id itself.
+        cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "") if batch_id is not None else ""
         if not cdmc_val and batch_id is not None:
             cdmc_val = str(batch_id)
         if cdmc_val:
@@ -1899,21 +1817,12 @@ def get_channels(batch_id: str):
     """
     Get the channel list for a batch.
 
-    Access schema:
-    - para_pub.id = batch_id (Archive ID)
-    - para_pub.cdmc = session .mdb file name
-    - para_singl.sid = para_pub.id (JOIN key, not para_singl.id)
+    DMP Access schema:
+    - para_pub.id = batch_id (batch identifier)
+    - para_singl.sid = para_pub.id (JOIN key)
     - para_singl.baty = channel number
-    - para_singl.cdmc = session .mdb file name (can be NULL, fallback to para_pub.cdmc)
+    - para_singl.cdmc = session .mdb file name (the source of telemetry data)
     """
-    cdmc_value: str | None = None
-    try:
-        pub_rows = _read_dmpdata("SELECT cdmc FROM para_pub WHERE id = ?", (batch_id,))
-        if pub_rows and pub_rows[0].get("cdmc") is not None:
-            cdmc_value = str(pub_rows[0]["cdmc"])
-    except Exception as exc:
-        logger.debug("get_channels: could not read para_pub cdmc for %r: %s", batch_id, exc)
-
     rows: list[dict] = []
     last_error: Exception | None = None
     try:
@@ -1934,10 +1843,6 @@ def get_channels(batch_id: str):
 
     if not rows and last_error is not None:
         raise HTTPException(status_code=500, detail=f"Database query failed: {str(last_error)}")
-
-    for row in rows:
-        if not row.get("cdmc") and cdmc_value:
-            row["cdmc"] = cdmc_value
 
     return {"channels": rows}
 

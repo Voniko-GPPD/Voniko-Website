@@ -1395,6 +1395,52 @@ def _tav_from_dmp_telemetry(telemetry: list[dict], thresholds: list[float]) -> l
     return rows
 
 
+def _count_at_volt_from_dmp_telemetry(
+    telemetry: list[dict], thresholds: list[float]
+) -> list[dict]:
+    """Build sample-count rows from DMP telemetry for the given thresholds.
+
+    For each threshold V, returns the 1-based position (along the time-sorted
+    telemetry) of the first sample whose voltage is ``<= V``. Equivalently,
+    the number of "times" / discharge samples accumulated from the start of
+    the run up to and including the sample that crosses the threshold. This
+    matches the DMP-1 sample report's "Unit: times" column.
+
+    Returns rows shaped as ``[{"sj": V, "count": N}, ...]``. Thresholds that
+    are never reached (curve still above V at end of run) are omitted.
+    """
+    points: list[tuple[float, float]] = []  # (TIM, VOLT)
+    for r in telemetry or []:
+        t = r.get("TIM")
+        v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+        if t is None or v is None or t == "--" or v == "--":
+            continue
+        try:
+            tf = float(t)
+            vf = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(tf) or math.isnan(vf):
+            continue
+        points.append((tf, vf))
+    if len(points) < 2:
+        return []
+    points.sort(key=lambda p: p[0])
+
+    rows: list[dict] = []
+    for thr in thresholds:
+        cross_idx: Optional[int] = None
+        for i in range(1, len(points)):
+            v1 = points[i - 1][1]
+            v2 = points[i][1]
+            if v1 >= thr and v2 <= thr:
+                cross_idx = i + 1  # 1-based ordinal of the sample at/after crossing
+                break
+        if cross_idx is not None:
+            rows.append({"sj": round(thr, 3), "count": cross_idx})
+    return rows
+
+
 
 def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
     """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
@@ -2233,6 +2279,7 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
     # Build OCV/FCV/SOt mAh and time-at-voltage data per battery.
     stats_map: dict[int, dict] = {}
     time_at_volt_map: dict[int, list[dict]] = {}
+    count_at_volt_map: dict[int, list[dict]] = {}
     battery_params: dict[int, dict] = {}
 
     try:
@@ -2276,7 +2323,7 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
 
         tav = _tav_from_dmp_telemetry(rows, thresholds)
         time_at_volt_map[b] = tav
-
+        count_at_volt_map[b] = _count_at_volt_from_dmp_telemetry(rows, thresholds)
         # Compute SOt mAh: prefer integration of measured current (Im in mA)
         # over time, which is the most accurate. Fall back to TAV-based
         # trapezoidal integration when Im samples are unavailable but a load
@@ -2324,6 +2371,9 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
             time_at_volt_map=time_at_volt_map,
             battery_params=battery_params,
             endpoint_cutoff=payload.endpoint_cutoff,
+            report_kind="dmp",
+            telemetry_by_baty=telemetry_by_baty,
+            count_at_volt_map=count_at_volt_map,
         )
     except Exception as exc:
         logger.exception("Error building DMP preview workbook for batch=%s: %s", payload.batch_id, exc)
@@ -2984,8 +3034,21 @@ def _build_preview_workbook(  # noqa: C901
     time_at_volt_map: dict,
     battery_params: dict,
     endpoint_cutoff: Optional[float] = None,
+    *,
+    report_kind: str = "dm2000",
+    telemetry_by_baty: Optional[dict] = None,
+    count_at_volt_map: Optional[dict] = None,
 ) -> bytes:
-    """Build a simple Excel workbook matching the ReportPreview HTML format."""
+    """Build a simple Excel workbook matching the ReportPreview HTML format.
+
+    ``report_kind`` selects the layout. ``"dm2000"`` (default) keeps the legacy
+    DM2000 layout (OCV/FCV/SOt mAh rows, "Unit: hour" durations and an average
+    discharge curve). ``"dmp"`` switches to the DMP variant matching the
+    DMP-1 sample report: only OCV/CCV rows, "Unit: times" with integer
+    sample counts, DMP-specific archive labels and a per-channel chart built
+    from ``telemetry_by_baty``.
+    """
+    is_dmp = report_kind == "dmp"
     from openpyxl import Workbook as _Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter as _get_col_letter
@@ -3001,6 +3064,15 @@ def _build_preview_workbook(  # noqa: C901
                     sj_set.add(round(float(sj_raw), 4))
             except (TypeError, ValueError):
                 pass
+    if is_dmp and count_at_volt_map:
+        for cnt_rows in count_at_volt_map.values():
+            for row in (cnt_rows or []):
+                sj_raw = row.get("sj") or row.get("SJ")
+                try:
+                    if sj_raw is not None:
+                        sj_set.add(round(float(sj_raw), 4))
+                except (TypeError, ValueError):
+                    pass
     THRESHOLDS = sorted(sj_set, reverse=True)  # descending
     # Apply optional cutoff: only show thresholds >= endpoint_cutoff
     if endpoint_cutoff is not None:
@@ -3092,16 +3164,27 @@ def _build_preview_workbook(  # noqa: C901
     _load_resistance_val = _append_unit(archive_fields.get("load_resistance") or "", "ohm")
     _endpoint_voltage_val = _append_unit(archive_fields.get("endpoint_voltage") or "", "V")
 
-    info_rows_data = [
-        ("Name", archive_fields.get("name") or "-", "Record Name", archive_fields.get("archname") or "-"),
-        ("Type", archive_fields.get("dcxh") or "-", "Discharge Pattern", archive_fields.get("fdfs") or "-"),
-        ("Voltage Type", _voltage_type_val, "Load Resistance", _load_resistance_val),
-        ("Trademark", archive_fields.get("trademark") or "-", "End-point Voltage", _endpoint_voltage_val),
-        ("Serial No", archive_fields.get("serialno") or "-", "Uniform Rate", _unifrate_display),
-        ("Manufacturer", archive_fields.get("manufacturer") or "-", "Start Date", archive_fields.get("startdate") or "-"),
-        ("Made date", archive_fields.get("madedate") or "-", "Last Date", archive_fields.get("enddate") or "-"),
-        ("Minimum Duration", archive_fields.get("min_duration") or "-", "Dis-condition", archive_fields.get("dis_condition") or "-"),
-    ]
+    if is_dmp:
+        info_rows_data = [
+            ("Battery Name", archive_fields.get("name") or "-", "Archive Name", archive_fields.get("archname") or "-"),
+            ("Battery Type", archive_fields.get("dcxh") or "-", "Voltage Type", _voltage_type_val),
+            ("Dis-Pattern", archive_fields.get("fdfs") or "-", "Uniformity", _unifrate_display),
+            ("Trademark", archive_fields.get("trademark") or "-", "Manufacturer", archive_fields.get("manufacturer") or "-"),
+            ("Start Date", archive_fields.get("startdate") or "-", "Made date", archive_fields.get("madedate") or "-"),
+            ("Last Date", archive_fields.get("enddate") or "-", "Minimum Duration", archive_fields.get("min_duration") or "-"),
+            ("Dis-Surroundings", archive_fields.get("dis_condition") or "-", "End-point Voltage", _endpoint_voltage_val),
+        ]
+    else:
+        info_rows_data = [
+            ("Name", archive_fields.get("name") or "-", "Record Name", archive_fields.get("archname") or "-"),
+            ("Type", archive_fields.get("dcxh") or "-", "Discharge Pattern", archive_fields.get("fdfs") or "-"),
+            ("Voltage Type", _voltage_type_val, "Load Resistance", _load_resistance_val),
+            ("Trademark", archive_fields.get("trademark") or "-", "End-point Voltage", _endpoint_voltage_val),
+            ("Serial No", archive_fields.get("serialno") or "-", "Uniform Rate", _unifrate_display),
+            ("Manufacturer", archive_fields.get("manufacturer") or "-", "Start Date", archive_fields.get("startdate") or "-"),
+            ("Made date", archive_fields.get("madedate") or "-", "Last Date", archive_fields.get("enddate") or "-"),
+            ("Minimum Duration", archive_fields.get("min_duration") or "-", "Dis-condition", archive_fields.get("dis_condition") or "-"),
+        ]
     for left_lbl, left_val, right_lbl, right_val in info_rows_data:
         _set(r, 1, left_lbl, fill=fill_label, align="left")
         _set(r, 2, left_val, align="left", merge_to=half)
@@ -3109,9 +3192,13 @@ def _build_preview_workbook(  # noqa: C901
         _set(r, half + 2, right_val, align="left", merge_to=total_cols)
         r += 1
 
-    # Measure Instrument row (full width, italic)
-    _set(r, 1, "Measure Instrument: Type DM2000 Automatic Discharge Test System (V6.22)",
-         italic=True, align="left", merge_to=total_cols)
+    # Instrument row (full width, italic)
+    if is_dmp:
+        _set(r, 1, "Testing equipment: Type DMP-1 Power Discharge Analyzer (V7.00)",
+             italic=True, align="left", merge_to=total_cols)
+    else:
+        _set(r, 1, "Measure Instrument: Type DM2000 Automatic Discharge Test System (V6.22)",
+             italic=True, align="left", merge_to=total_cols)
     r += 1
 
     # Battery column headers
@@ -3141,26 +3228,29 @@ def _build_preview_workbook(  # noqa: C901
     _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
     r += 1
 
-    # FCV row
+    # FCV/CCV row
     fcv_vals = [_safe_float(_get_batt_field(b, "fcv", "FCV")) for b in batys]
     mx, mn, av = _agg(fcv_vals)
-    _set(r, 1, "FCV V", fill=fill_label, align="left")
+    _set(r, 1, "CCV V" if is_dmp else "FCV V", fill=fill_label, align="left")
     for i, v in enumerate(fcv_vals):
         _set(r, 2 + i, _fmt_num(v))
     _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
     r += 1
 
-    # SOt mAh row
-    sot_vals = [_safe_float(_get_batt_field(b, "sot_mah", "sot", "SOT", "sh", "rql", "fdrl")) for b in batys]
-    mx, mn, av = _agg(sot_vals)
-    _set(r, 1, "SOt mAh", fill=fill_label, align="left")
-    for i, v in enumerate(sot_vals):
-        _set(r, 2 + i, _fmt_num(v))
-    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
-    r += 1
+    # SOt mAh row (omitted for DMP per sample report)
+    if not is_dmp:
+        sot_vals = [_safe_float(_get_batt_field(b, "sot_mah", "sot", "SOT", "sh", "rql", "fdrl")) for b in batys]
+        mx, mn, av = _agg(sot_vals)
+        _set(r, 1, "SOt mAh", fill=fill_label, align="left")
+        for i, v in enumerate(sot_vals):
+            _set(r, 2 + i, _fmt_num(v))
+        _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        r += 1
 
     # Duration section header
-    _set(r, 1, "The Duration of Series Designated Voltage (Unit: hour)", fill=fill_section, merge_to=total_cols, italic=True, align="left")
+    _duration_unit_label = "times" if is_dmp else "hour"
+    _set(r, 1, f"The Duration of Series Designated Voltage (Unit: {_duration_unit_label})",
+         fill=fill_section, merge_to=total_cols, italic=True, align="left")
     r += 1
 
     def _get_tav(baty, threshold):
@@ -3177,16 +3267,45 @@ def _build_preview_workbook(  # noqa: C901
                 pass
         return None
 
+    def _get_count(baty, threshold):
+        rows = (count_at_volt_map or {}).get(baty) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - threshold) < 0.001:
+                    cnt = row.get("count") or row.get("COUNT")
+                    if cnt is not None:
+                        return int(cnt)
+            except (TypeError, ValueError):
+                pass
+        return None
+
     for threshold in THRESHOLDS:
-        tav_vals = [_get_tav(b, threshold) for b in batys]
+        if is_dmp:
+            cell_vals = [_get_count(b, threshold) for b in batys]
+        else:
+            cell_vals = [_get_tav(b, threshold) for b in batys]
         # Skip rows where no battery has data for this threshold
-        if all(v is None for v in tav_vals):
+        if all(v is None for v in cell_vals):
             continue
-        mx, mn, av = _agg(tav_vals)
-        _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
-        for i, v in enumerate(tav_vals):
-            _set(r, 2 + i, round(v, 3) if v is not None else "-")
-        _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        if is_dmp:
+            numeric = [v for v in cell_vals if v is not None]
+            if numeric:
+                mx = max(numeric)
+                mn = min(numeric)
+                av = int(round(sum(numeric) / len(numeric)))
+            else:
+                mx, mn, av = "-", "-", "-"
+            _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
+            for i, v in enumerate(cell_vals):
+                _set(r, 2 + i, v if v is not None else "-")
+            _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        else:
+            mx, mn, av = _agg(cell_vals)
+            _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
+            for i, v in enumerate(cell_vals):
+                _set(r, 2 + i, round(v, 3) if v is not None else "-")
+            _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
         r += 1
 
     # Remarks
@@ -3194,48 +3313,104 @@ def _build_preview_workbook(  # noqa: C901
     _set(r, 2, archive_fields.get("remarks") or "-", align="left", merge_to=total_cols)
 
     # ── Discharge-curve chart ────────────────────────────────────────────────
-    # Collect average-duration data points (voltage threshold vs average hours).
-    # Prepend the average FCV at t=0 so the curve starts at the initial voltage.
-    chart_points: list[tuple[float, float]] = []
-    _, _, avg_fcv_raw = _agg(fcv_vals)
-    avg_fcv = _safe_float(avg_fcv_raw)
-    if avg_fcv is not None:
-        chart_points.append((round(avg_fcv, 4), 0.0))
-    for threshold in THRESHOLDS:
-        tav_vals = [_get_tav(b, threshold) for b in batys]
-        if all(v is None for v in tav_vals):
-            continue
-        _, _, av = _agg(tav_vals)
-        if isinstance(av, (int, float)):
-            chart_points.append((round(threshold, 3), round(av, 4)))
+    chart_img_buf: Optional[BytesIO] = None
+    if is_dmp:
+        # DMP: plot every channel's raw VOLT vs TIM curve so the embedded chart
+        # matches the on-screen "all channels" view.
+        series: list[tuple[int, list[float], list[float]]] = []
+        for b in batys:
+            rows = (telemetry_by_baty or {}).get(b) or []
+            pts: list[tuple[float, float]] = []
+            for rec in rows:
+                t = rec.get("TIM")
+                v = rec.get("VOLT") or rec.get("volt") or rec.get("Volt")
+                try:
+                    tf = float(t)
+                    vf = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(tf) or math.isnan(vf):
+                    continue
+                pts.append((tf, vf))
+            if len(pts) >= 2:
+                pts.sort(key=lambda p: p[0])
+                series.append((b, [p[0] for p in pts], [p[1] for p in pts]))
 
-    if len(chart_points) >= 2:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from openpyxl.drawing.image import Image as _XLImage
+        if series:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from openpyxl.drawing.image import Image as _XLImage
 
-        # chart_points = [(voltage, hours), ...] — X axis is hours, Y is voltage
-        xs = [p[1] for p in chart_points]
-        ys = [p[0] for p in chart_points]
+            colors = [
+                "#1677ff", "#f5222d", "#52c41a", "#faad14", "#722ed1",
+                "#13c2c2", "#eb2f96", "#fa8c16", "#a0d911", "#2f54eb",
+            ]
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for idx, (b, xs, ys) in enumerate(series):
+                ax.plot(
+                    xs, ys,
+                    color=colors[idx % len(colors)],
+                    linewidth=1.2,
+                    label=f"No.{b}",
+                )
+            ax.set_xlabel("Time (h)")
+            ax.set_ylabel("Voltage (V)")
+            ax.set_title("Battery Discharge Curve")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best", fontsize=8, ncol=min(len(series), 5))
+            fig.tight_layout()
 
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(xs, ys, color="#1677ff", linewidth=1.5, marker="o", markersize=3)
-        ax.set_xlabel("Hour")
-        ax.set_ylabel("Voltage (V)")
-        ax.set_title("The Duration of Series Designated Voltage")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+            chart_img_buf = BytesIO()
+            fig.savefig(chart_img_buf, format="png", dpi=100)
+            plt.close(fig)
+            chart_img_buf.seek(0)
 
-        img_buf = BytesIO()
-        fig.savefig(img_buf, format="png", dpi=100)
-        plt.close(fig)
-        img_buf.seek(0)
+            xl_img = _XLImage(chart_img_buf)
+            xl_img.width = 640
+            xl_img.height = 360
+            ws.add_image(xl_img, f"A{r + 2}")
+    else:
+        # DM2000 (legacy): single average-curve plot using TAV aggregates.
+        chart_points: list[tuple[float, float]] = []
+        _, _, avg_fcv_raw = _agg(fcv_vals)
+        avg_fcv = _safe_float(avg_fcv_raw)
+        if avg_fcv is not None:
+            chart_points.append((round(avg_fcv, 4), 0.0))
+        for threshold in THRESHOLDS:
+            tav_vals = [_get_tav(b, threshold) for b in batys]
+            if all(v is None for v in tav_vals):
+                continue
+            _, _, av = _agg(tav_vals)
+            if isinstance(av, (int, float)):
+                chart_points.append((round(threshold, 3), round(av, 4)))
 
-        xl_img = _XLImage(img_buf)
-        xl_img.width = 480
-        xl_img.height = 320
-        ws.add_image(xl_img, f"A{r + 2}")
+        if len(chart_points) >= 2:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from openpyxl.drawing.image import Image as _XLImage
+
+            xs = [p[1] for p in chart_points]
+            ys = [p[0] for p in chart_points]
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(xs, ys, color="#1677ff", linewidth=1.5, marker="o", markersize=3)
+            ax.set_xlabel("Hour")
+            ax.set_ylabel("Voltage (V)")
+            ax.set_title("The Duration of Series Designated Voltage")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+
+            chart_img_buf = BytesIO()
+            fig.savefig(chart_img_buf, format="png", dpi=100)
+            plt.close(fig)
+            chart_img_buf.seek(0)
+
+            xl_img = _XLImage(chart_img_buf)
+            xl_img.width = 480
+            xl_img.height = 320
+            ws.add_image(xl_img, f"A{r + 2}")
 
     # Column widths
     ws.column_dimensions["A"].width = 22

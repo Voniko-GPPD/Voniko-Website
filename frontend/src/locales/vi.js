@@ -494,6 +494,7 @@ export default {
   folderExportSuccess: 'Xuất thành công',
   engineerRole: 'Kỹ sư',
   qcRole: 'QC',
+  labRole: 'Nhân viên thí nghiệm',
   resetPassword: 'Đặt lại mật khẩu',
   resetPasswordSuccess: 'Đã đặt lại mật khẩu thành công',
   folderManagement: 'Quản lý Folder',

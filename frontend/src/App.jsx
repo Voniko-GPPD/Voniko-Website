@@ -49,8 +49,9 @@ function AdminRoute({ children }) {
 }
 
 function QCRedirect() {
-  const { isQC } = useAuth();
-  if (isQC) return <Navigate to="/barcode" replace />;
+  const { isQC, isLab } = useAuth();
+  if (isQC) return <Navigate to="/battery" replace />;
+  if (isLab) return <Navigate to="/battery-dmp" replace />;
   return <DashboardPage />;
 }
 

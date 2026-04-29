@@ -30,7 +30,7 @@ const { Header, Sider, Content } = Layout;
 
 export default function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
-  const { user, logout, isAdmin, isQC, isEngineer } = useAuth();
+  const { user, logout, isAdmin, isQC, isEngineer, isLab } = useAuth();
   const { t, lang, switchLang } = useLang();
   const { notifications, unreadCount, markAllRead, clearNotifications, dbNotifications, dbUnreadCount } = useNotifications();
   const totalUnread = unreadCount + dbUnreadCount;
@@ -49,18 +49,22 @@ export default function AppLayout() {
   }, []);
 
   const menuItems = [
-    ...(!isQC ? [
+    ...(!isQC && !isLab ? [
       { key: '/', icon: <DashboardOutlined />, label: t('dashboard') },
       { key: '/files', icon: <FileOutlined />, label: t('files') },
     ] : []),
-    { key: '/barcode', icon: <QrcodeOutlined />, label: t('barcode') },
-    ...(!isEngineer ? [
+    ...(!isQC && !isLab ? [
+      { key: '/barcode', icon: <QrcodeOutlined />, label: t('barcode') },
+    ] : []),
+    ...(!isEngineer && !isLab ? [
       { key: '/battery', icon: <ThunderboltOutlined />, label: t('batteryTest') },
     ] : []),
     ...(!isQC ? [
       { key: '/battery-dmp', icon: <ExperimentOutlined />, label: t('dmManagement') },
     ] : []),
-    { key: '/count-batteries', icon: <CameraOutlined />, label: t('countBatteries') },
+    ...(!isQC && !isLab ? [
+      { key: '/count-batteries', icon: <CameraOutlined />, label: t('countBatteries') },
+    ] : []),
     ...(isAdmin ? [
       { key: '/users', icon: <TeamOutlined />, label: t('users') },
     ] : []),

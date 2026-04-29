@@ -1764,9 +1764,6 @@ def get_batches(year: Optional[int] = None):
             scdw_val = singl_ext.get("scdw")
             if scdw_val not in (None, "", "--"):
                 row["manufacturer"] = str(scdw_val).strip()
-            dcph_val = singl_ext.get("dcph")
-            if dcph_val not in (None, "", "--"):
-                row["serialno"] = str(dcph_val).strip()
             # dcmc is the battery model name stored per-channel; use it as the
             # batch name when no name has been set yet.
             dcmc_val_singl = singl_ext.get("dcmc")
@@ -1777,10 +1774,15 @@ def get_batches(year: Optional[int] = None):
             if scrq_val not in (None, "", "--") and not row.get("madedate"):
                 row["madedate"] = _to_date_str(scrq_val)
 
-        # Remarks come from para_pub.bz (already present in the row from SELECT *).
+        # Serial No comes from para_pub.bz; fall back to para_singl.dcph for
+        # older schemas that do not populate bz.
         bz_pub = _dm2000_get_value(row, "bz")
         if bz_pub not in (None, ""):
-            row["remarks"] = str(bz_pub).strip()
+            row["serialno"] = str(bz_pub).strip()
+        elif singl_ext:
+            dcph_val = singl_ext.get("dcph")
+            if dcph_val not in (None, "", "--") and not row.get("serialno"):
+                row["serialno"] = str(dcph_val).strip()
 
         # para_pub does not have a cdmc column.  The session .mdb file name is
         # stored in para_singl.cdmc and was pre-fetched into singl_cdmc_by_sid.

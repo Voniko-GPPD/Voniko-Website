@@ -11,6 +11,8 @@ import {
   fetchTelemetry,
 } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
+import DischargeConditionHelp from '../../../components/DischargeConditionHelp';
+import { composeDischargeCondition } from '../../../constants/dischargeConditions';
 
 function safeNum(value) {
   const n = Number(value);
@@ -144,6 +146,15 @@ export default function DMPExportTab({ stationId, selection }) {
     setReportEndpoint(null);
     requestedBatysRef.current = new Set();
     if (selection) {
+      // Compose a "Discharge Condition" string from the discrete fields. For
+      // DMP, jstj usually holds the full condition already (e.g.
+      // "10ohm 24h/d-0.9V"); when it doesn't, fall back to combining
+      // load_resistance / fdfs / endpoint_voltage.
+      const composed = composeDischargeCondition({
+        load: selection.fzdz || selection.fz2 || '',
+        cycle: selection.jstj || selection.fdfs || '',
+        endpoint: selection.zzdy || '',
+      });
       setArchiveFields({
         archname: selection.id || '',
         name: selection.name || selection.dcmc || '',
@@ -160,6 +171,7 @@ export default function DMPExportTab({ stationId, selection }) {
         load_resistance: selection.fzdz || selection.fz2 || '',
         endpoint_voltage: selection.zzdy || '',
         dis_condition: selection.jstj || selection.hjwd || selection.wd || '',
+        discharge_condition: composed,
         min_duration: selection.fdts || '',
       });
     } else {
@@ -339,6 +351,37 @@ export default function DMPExportTab({ stationId, selection }) {
               </Form.Item>
             </Form>
           </Col>
+          <Col xs={24} sm={12}>
+            <Form layout="vertical" size="small">
+              <Form.Item
+                label={(
+                  <Space size={6}>
+                    {t('remarkDischargeCondition')}
+                    <DischargeConditionHelp
+                      batteryType={archiveFields.dcxh}
+                      onApply={(text) => setArchiveFields((prev) => ({ ...prev, discharge_condition: text }))}
+                    />
+                  </Space>
+                )}
+              >
+                <Input
+                  value={archiveFields.discharge_condition || ''}
+                  onChange={setField('discharge_condition')}
+                  placeholder="e.g. 10ohm 24h/d-0.9V (h)"
+                />
+              </Form.Item>
+            </Form>
+          </Col>
+          <Col xs={24} sm={12}>
+            <Form layout="vertical" size="small">
+              <Form.Item label={t('dm2000Remarks')}>
+                <Input
+                  value={archiveFields.remarks || ''}
+                  onChange={setField('remarks')}
+                />
+              </Form.Item>
+            </Form>
+          </Col>
         </Row>
       </Card>
 
@@ -488,7 +531,7 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
               <td style={labelStyle}>{t('dm2000Type')}</td>
               <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.dcxh || '-'}</td>
               <td style={labelStyle}>{t('dm2000DisCondition')}</td>
-              <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.fdfs || '-'}</td>
+              <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.discharge_condition || archiveFields.fdfs || '-'}</td>
             </tr>
             <tr>
               <td style={labelStyle}>{t('dm2000VoltageType')}</td>

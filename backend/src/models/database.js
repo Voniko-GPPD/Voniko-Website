@@ -256,6 +256,42 @@ function createTables() {
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_order_id ON battery_order_history(order_id);
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_saved_at ON battery_order_history(saved_at);
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_created_by ON battery_order_history(created_by);
+
+    -- Discharge condition presets per battery family (LR6, LR03, LR61, 9V, ...).
+    -- Editable from the admin UI so the customer can update the standard
+    -- conditions list without a code change.
+    CREATE TABLE IF NOT EXISTS discharge_condition_presets (
+      id TEXT PRIMARY KEY,
+      family TEXT NOT NULL,
+      condition_text TEXT NOT NULL,
+      suffix TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(family, condition_text),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_discharge_presets_family
+      ON discharge_condition_presets(family, sort_order);
+
+    -- Battery family detection keywords (substring match against dcxh).
+    -- The first keyword that matches (lowest sort_order) decides which
+    -- discharge_condition_presets group is suggested.
+    CREATE TABLE IF NOT EXISTS battery_family_keywords (
+      id TEXT PRIMARY KEY,
+      keyword TEXT NOT NULL,
+      family TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(keyword),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_family_keywords_sort
+      ON battery_family_keywords(sort_order);
   `);
 
   // Safe migration: add folder_id column to files if not present
@@ -295,6 +331,85 @@ function seedDefaults() {
     for (const name of ['UD+', 'UD', 'HP']) {
       db.prepare('INSERT OR IGNORE INTO battery_product_lines (id, name, created_by) VALUES (?, ?, ?)').run(uuidv4(), name, adminId);
     }
+  }
+
+  // Seed default discharge condition presets if table is empty.
+  // The list mirrors the standard conditions provided by the customer for
+  // LR6 (AA), LR03 (AAA), LR61 (AAAA) and 9V batteries. Suffix legend:
+  //   h = result reported in hours, m = minutes, t = number of pulses/cycles.
+  const presetCount = db.prepare('SELECT COUNT(*) as c FROM discharge_condition_presets').get().c;
+  if (presetCount === 0) {
+    const defaultPresets = [
+      // LR6 (AA)
+      ['LR6', '10ohm 24h/d-0.9V', 'h'],
+      ['LR6', '1000mA 24h/d-0.9V', 'm'],
+      ['LR6', '(1500mW2s,650mW28s) 10T/h,24h/d-1.05V', 't'],
+      ['LR6', '(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15 DAY', 't'],
+      ['LR6', '3.9ohm 1h/d-0.8V', 'h'],
+      ['LR6', '3.9ohm 4m/h 8h/d-0.9V', 'm'],
+      ['LR6', '250mA 1h/d-0.9V', 'h'],
+      ['LR6', '3.9ohm 24h/d-0.8V', 'm'],
+      ['LR6', '1000mA 10s/m 1h/d-0.9V', 't'],
+      ['LR6', '100mA 1h/d-0.9V', 'h'],
+      ['LR6', '50mA 1h/8h 24h/d-1V', 'h'],
+      ['LR6', '750mA 2m/h 8h/d-1.1V', 'm'],
+      ['LR6', '(450mW5s,45mW175s) 3h/124h-1.1V', 'h'],
+      ['LR6', '(1ohm,0.25s.3.0ohm,19.75s), 10m/h,1h/12h-1.0V', ''],
+      // LR03 (AAA)
+      ['LR03', '20ohm 24h/d-0.9V', 'h'],
+      ['LR03', '600mA 24h/d-0.9V', 'm'],
+      ['LR03', '5.1ohm 1h/d-0.8V', 'm'],
+      ['LR03', '5.1ohm 4m/h 8h/d-0.9V', 'm'],
+      ['LR03', '600mA 10s/m 1h/d-0.9V', 't'],
+      ['LR03', '50mA 1h/12h-0.9V', 'h'],
+      ['LR03', '250mA 5m/h 12h/d-1.1V', 'm'],
+      ['LR03', '100mA 1h/d-0.9V', 'h'],
+      ['LR03', '24ohm 15s/m 8h/d-1V', 'h'],
+      ['LR03', '3.9ohm 24h/d-0.8V', 'm'],
+      ['LR03', '75mA 1h/12h.24/d-0.9V', 'h'],
+      // LR61 (AAAA)
+      ['LR61', '35mA 24h/d-0.9V', 'h'],
+      ['LR61', '5.1ohm 5m/d-0.9V', 'm'],
+      ['LR61', '75ohm 1h/d-0.9V', 'h'],
+      ['LR61', '75ohm 1h/d-1.1V', 'h'],
+      // 9V (6F22 / 6LR61)
+      ['9V', '35mA 24h/d-5.4V', 'h'],
+      ['9V', '180ohm 4h/d-6.8V', 'h'],
+      ['9V', '270ohm 1h/d-5.4V', 'h'],
+      ['9V', '620ohm 2h/d-5.4V', 'h'],
+      ['9V', '620ohm+10Kohm 1s/60m.24h/d-7.5V', 'h'],
+    ];
+    const stmt = db.prepare(
+      'INSERT OR IGNORE INTO discharge_condition_presets '
+      + '(id, family, condition_text, suffix, sort_order, created_by) '
+      + 'VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    defaultPresets.forEach(([family, text, sfx], idx) => {
+      stmt.run(uuidv4(), family, text, sfx, idx, adminId);
+    });
+  }
+
+  // Seed default battery family detection keywords if table is empty.
+  // Order matters — the first keyword (lowest sort_order) that appears as a
+  // case-insensitive substring of the battery type wins, so more specific
+  // keywords (LR03, LR61) must come before more general ones (LR6).
+  const kwCount = db.prepare('SELECT COUNT(*) as c FROM battery_family_keywords').get().c;
+  if (kwCount === 0) {
+    const defaults = [
+      ['LR03', 'LR03', 0],
+      ['LR61', 'LR61', 1],
+      ['LR6', 'LR6', 2],
+      ['9V', '9V', 3],
+      ['6F22', '9V', 4],
+      ['6LR61', '9V', 5],
+    ];
+    const stmt = db.prepare(
+      'INSERT OR IGNORE INTO battery_family_keywords '
+      + '(id, keyword, family, sort_order, created_by) VALUES (?, ?, ?, ?, ?)',
+    );
+    defaults.forEach(([kw, fam, ord]) => {
+      stmt.run(uuidv4(), kw, fam, ord, adminId);
+    });
   }
 }
 

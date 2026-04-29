@@ -1709,11 +1709,11 @@ def get_batches(year: Optional[int] = None):
             if sid_str not in singl_extras_by_sid:
                 singl_extras_by_sid[sid_str] = {}
             entry = singl_extras_by_sid[sid_str]
-            for _f in ("scdw", "dcph", "dcmc", "scrq"):
-                if not entry.get(_f):
-                    _v = _dm2000_get_value(er, _f)
-                    if _v is not None:
-                        entry[_f] = _v
+            for field_name in ("scdw", "dcph", "dcmc", "scrq"):
+                if not entry.get(field_name):
+                    field_value = _dm2000_get_value(er, field_name)
+                    if field_value is not None:
+                        entry[field_name] = field_value
     except Exception as exc:  # noqa: BLE001
         logger.debug("get_batches: could not load para_singl extras: %s", exc)
 

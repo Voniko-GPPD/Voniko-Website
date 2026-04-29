@@ -1761,23 +1761,23 @@ def get_batches(year: Optional[int] = None):
             if _cdmc_key:
                 singl_ext = singl_extras_by_sid.get(_cdmc_key)
         if singl_ext:
-            scdw_val = singl_ext.get("scdw")
-            if scdw_val not in (None, "", "--"):
+            scdw_val = _dm2000_get_value(singl_ext, "scdw")
+            if scdw_val is not None:
                 row["manufacturer"] = str(scdw_val).strip()
             # dcmc is the battery model name stored per-channel; use it as the
             # batch name when no name has been set yet.
-            dcmc_val_singl = singl_ext.get("dcmc")
-            if dcmc_val_singl not in (None, "", "--") and not row.get("name"):
+            dcmc_val_singl = _dm2000_get_value(singl_ext, "dcmc")
+            if dcmc_val_singl is not None and not row.get("name"):
                 row["name"] = str(dcmc_val_singl).strip()
             # scrq is the sample/start date from para_singl; use it as madedate.
-            scrq_val = singl_ext.get("scrq")
-            if scrq_val not in (None, "", "--") and not row.get("madedate"):
+            scrq_val = _dm2000_get_value(singl_ext, "scrq")
+            if scrq_val is not None and not row.get("madedate"):
                 row["madedate"] = _to_date_str(scrq_val)
 
         # Serial No comes from para_singl.dcph.
         if singl_ext:
-            dcph_val = singl_ext.get("dcph")
-            if dcph_val not in (None, "", "--") and not row.get("serialno"):
+            dcph_val = _dm2000_get_value(singl_ext, "dcph")
+            if dcph_val is not None and not row.get("serialno"):
                 row["serialno"] = str(dcph_val).strip()
 
         # Remark comes from para_pub.bz.

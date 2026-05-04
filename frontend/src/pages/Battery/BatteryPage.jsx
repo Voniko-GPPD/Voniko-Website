@@ -848,6 +848,7 @@ export default function BatteryPage() {
     if (!isNaN(inputId) && inputId >= (recordsRef.current[0]?.id ?? 1) && inputId <= (recordsRef.current[recordsRef.current.length - 1]?.id ?? 1)) {
       const idx = recordsRef.current.findIndex(r => r.id === inputId);
       if (idx >= 0) {
+        caliperIndexRef.current = idx; // Update ref immediately so caliper hardware events see the new index
         setCaliperIndex(idx);
         setCaliperDia('');
         setCaliperHei('');
@@ -1145,7 +1146,9 @@ export default function BatteryPage() {
               icon={<span>📏</span>}
               onClick={() => {
                 const recordIdx = records.findIndex(r => r.id === record.id);
-                setCaliperIndex(recordIdx >= 0 ? recordIdx : 0);
+                const idx = recordIdx >= 0 ? recordIdx : 0;
+                caliperIndexRef.current = idx; // Update ref immediately
+                setCaliperIndex(idx);
                 setCaliperSingleMode(true);
                 setCaliperPhase(true);
                 setCaliperMode('dia');
@@ -1658,7 +1661,19 @@ export default function BatteryPage() {
   const inputsDisabled = !connected;
   const hasPreset = presets[makePresetKey(batteryType, productLine)] != null;
   const paramsDisabled = inputsDisabled || hasPreset;
-  const canStart = connected && !running && orderId.trim() !== '' && testDate !== null && ocvMin != null && ocvMax != null && ccvMin != null && ccvMax != null;
+
+  // Duplicate order ID: an existing history snapshot has the same orderId but is NOT the currently-loaded snapshot
+  const isDuplicateOrderId = React.useMemo(() =>
+    orderId.trim() !== '' &&
+    orderHistory.some(h =>
+      normalizeOrderId(h.orderId) === normalizeOrderId(orderId) &&
+      h._snapshotId !== loadedSnapshotId
+    ),
+    [orderId, orderHistory, loadedSnapshotId]);
+
+  const canStart = connected && !running && orderId.trim() !== '' &&
+    !(records.length === 0 && isDuplicateOrderId) &&
+    testDate !== null && ocvMin != null && ocvMax != null && ccvMin != null && ccvMax != null;
 
   return (
     <div>
@@ -1854,14 +1869,8 @@ export default function BatteryPage() {
                     <Form.Item
                       label={t('batteryOrderId')}
                       style={{ marginBottom: 0 }}
-                      validateStatus={
-                        orderId.trim() && orderHistory.some(h => normalizeOrderId(h.orderId) === normalizeOrderId(orderId)) ? 'warning' : ''
-                      }
-                      help={
-                        orderId.trim() && orderHistory.some(h => normalizeOrderId(h.orderId) === normalizeOrderId(orderId))
-                          ? t('batteryOrderIdDuplicate')
-                          : undefined
-                      }
+                      validateStatus={isDuplicateOrderId ? 'error' : ''}
+                      help={isDuplicateOrderId ? t('batteryOrderIdDuplicate') : undefined}
                     >
                       <Input
                         value={orderId}
@@ -2293,31 +2302,29 @@ export default function BatteryPage() {
                 </Col>
               </Row>
 
-              {/* Standards row — shown only when dia/hei standards are configured */}
-              {(diaMin != null || diaMax != null || heiMin != null || heiMax != null) && (
-                <Row gutter={[16, 8]} style={{ marginTop: 8 }} align="middle">
-                  <Col xs="auto">
-                    <Space direction="vertical" size={2}>
-                      <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                        {t('batteryDiaStandard')}
-                      </span>
-                      <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
-                        {diaMin != null && diaMax != null ? `${diaMin} – ${diaMax} mm` : diaMin != null ? `≥ ${diaMin} mm` : diaMax != null ? `≤ ${diaMax} mm` : '—'}
-                      </div>
-                    </Space>
-                  </Col>
-                  <Col xs="auto">
-                    <Space direction="vertical" size={2}>
-                      <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                        {t('batteryHeiStandard')}
-                      </span>
-                      <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
-                        {heiMin != null && heiMax != null ? `${heiMin} – ${heiMax} mm` : heiMin != null ? `≥ ${heiMin} mm` : heiMax != null ? `≤ ${heiMax} mm` : '—'}
-                      </div>
-                    </Space>
-                  </Col>
-                </Row>
-              )}
+              {/* Standards row — always shown in caliper phase */}
+              <Row gutter={[16, 8]} style={{ marginTop: 8 }} align="middle">
+                <Col xs="auto">
+                  <Space direction="vertical" size={2}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryDiaStandard')}
+                    </span>
+                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                      {diaMin != null && diaMax != null ? `${diaMin} – ${diaMax} mm` : diaMin != null ? `≥ ${diaMin} mm` : diaMax != null ? `≤ ${diaMax} mm` : '—'}
+                    </div>
+                  </Space>
+                </Col>
+                <Col xs="auto">
+                  <Space direction="vertical" size={2}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryHeiStandard')}
+                    </span>
+                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                      {heiMin != null && heiMax != null ? `${heiMin} – ${heiMax} mm` : heiMin != null ? `≥ ${heiMin} mm` : heiMax != null ? `≤ ${heiMax} mm` : '—'}
+                    </div>
+                  </Space>
+                </Col>
+              </Row>
             </Card>
           )}
 
@@ -2746,7 +2753,10 @@ export default function BatteryPage() {
                   <Select
                     value={setupForm.batteryType || undefined}
                     placeholder={t('batteryType')}
-                    onChange={(v) => setSetupForm(f => ({ ...f, batteryType: v }))}
+                    onChange={(v) => {
+                      const preset = presets[makePresetKey(v, setupForm.productLine)];
+                      setSetupForm(f => preset ? { ...f, ...preset } : { ...f, batteryType: v });
+                    }}
                     style={{ width: '100%' }}
                   >
                     {batteryTypes.map(bt => <Option key={bt.id} value={bt.name}>{bt.name}</Option>)}
@@ -2758,7 +2768,10 @@ export default function BatteryPage() {
                   <Select
                     value={setupForm.productLine || undefined}
                     placeholder={t('batteryProductLine')}
-                    onChange={(v) => setSetupForm(f => ({ ...f, productLine: v }))}
+                    onChange={(v) => {
+                      const preset = presets[makePresetKey(setupForm.batteryType, v)];
+                      setSetupForm(f => preset ? { ...f, ...preset } : { ...f, productLine: v });
+                    }}
                     style={{ width: '100%' }}
                   >
                     {productLines.map(pl => <Option key={pl.id} value={pl.name}>{pl.name}</Option>)}

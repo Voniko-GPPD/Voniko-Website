@@ -399,7 +399,7 @@ export default {
   batteryCcvStandard: 'CCV标准 (从 - 到)',
   batteryDiaStandard: '直径标准 (从 - 到)',
   batteryHeiStandard: '高度标准 (从 - 到)',
-  batteryOrderIdDuplicate: '该订单编号已存在于历史记录中，旧数据可能被覆盖。',
+  batteryOrderIdDuplicate: '该订单编号已存在于历史记录中，请加载旧订单或使用不同的编号后再开始。',
   batteryOutOfSpec: '超出规格',
   batteryRetestRequired: '需要重新测试',
   batteryRetestNow: '立即重测',

@@ -399,7 +399,7 @@ export default {
   batteryCcvStandard: 'Tiêu chuẩn CCV (từ - đến)',
   batteryDiaStandard: 'Tiêu chuẩn đường kính (từ - đến)',
   batteryHeiStandard: 'Tiêu chuẩn chiều cao (từ - đến)',
-  batteryOrderIdDuplicate: 'Mã đơn hàng này đã có trong lịch sử. Dữ liệu cũ có thể bị ghi đè.',
+  batteryOrderIdDuplicate: 'Mã đơn hàng này đã có trong lịch sử. Tải lại đơn cũ hoặc dùng mã khác để bắt đầu.',
   batteryOutOfSpec: 'lệch chuẩn',
   batteryRetestRequired: 'Yêu cầu đo lại',
   batteryRetestNow: 'Đo lại ngay',

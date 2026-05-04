@@ -833,6 +833,20 @@ export default function BatteryPage() {
     setCaliperBuffer('');
   }, []);
 
+  // Jump the caliper to the battery with the given ID (used by both onPressEnter and onBlur)
+  const handleCaliperIdJump = useCallback((rawValue) => {
+    const inputId = parseInt(rawValue, 10);
+    if (!isNaN(inputId) && inputId >= (recordsRef.current[0]?.id ?? 1) && inputId <= (recordsRef.current[recordsRef.current.length - 1]?.id ?? 1)) {
+      const idx = recordsRef.current.findIndex(r => r.id === inputId);
+      if (idx >= 0) {
+        setCaliperIndex(idx);
+        setCaliperDia('');
+        setCaliperHei('');
+        setCaliperMode('dia');
+      }
+    }
+  }, []);
+
   // Template upload handler
   const handleTemplateUpload = async ({ file, onSuccess, onError }) => {
     const formData = new FormData();
@@ -1508,7 +1522,7 @@ export default function BatteryPage() {
       if (instance) {
         instance.dispatchAction({ type: 'dataZoom', batch: [{ start: 0, end: 100 }] });
       }
-    } catch (_) { }
+    } catch (_) { /* ignore if chart instance is not yet mounted */ }
   }, [autoScroll, chartSeriesByBattery, chartDataOCV, chartDataCCV]);
 
   useEffect(() => {
@@ -2044,29 +2058,11 @@ export default function BatteryPage() {
                             defaultValue={String(records[caliperIndex].id)}
                             style={{ width: 55, textAlign: 'center' }}
                             onPressEnter={(e) => {
-                              const inputId = parseInt(e.target.value, 10);
-                              if (!isNaN(inputId) && inputId >= (records[0]?.id ?? 1) && inputId <= (records[records.length - 1]?.id ?? 1)) {
-                                const idx = records.findIndex(r => r.id === inputId);
-                                if (idx >= 0) {
-                                  setCaliperIndex(idx);
-                                  setCaliperDia('');
-                                  setCaliperHei('');
-                                  setCaliperMode('dia');
-                                }
-                              }
+                              handleCaliperIdJump(e.target.value);
                               e.target.blur();
                             }}
                             onBlur={(e) => {
-                              const inputId = parseInt(e.target.value, 10);
-                              if (!isNaN(inputId) && inputId >= (records[0]?.id ?? 1) && inputId <= (records[records.length - 1]?.id ?? 1)) {
-                                const idx = records.findIndex(r => r.id === inputId);
-                                if (idx >= 0) {
-                                  setCaliperIndex(idx);
-                                  setCaliperDia('');
-                                  setCaliperHei('');
-                                  setCaliperMode('dia');
-                                }
-                              }
+                              handleCaliperIdJump(e.target.value);
                             }}
                           />
                         </Tooltip>

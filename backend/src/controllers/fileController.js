@@ -27,12 +27,14 @@ async function listFiles(req, res) {
       (SELECT COUNT(*) FROM versions v WHERE v.file_id = f.id) as version_count,
       (SELECT v2.created_at FROM versions v2 WHERE v2.file_id = f.id ORDER BY v2.version_number DESC LIMIT 1) as last_modified,
       (SELECT v3.size FROM versions v3 WHERE v3.file_id = f.id ORDER BY v3.version_number DESC LIMIT 1) as current_size,
-      fo.name as folder_name,
-      pfo.name as parent_folder_name
+      fo.name as folder_name, fo.type as folder_type,
+      pfo.name as parent_folder_name, pfo.type as parent_folder_type,
+      ppfo.name as grandparent_folder_name, ppfo.type as grandparent_folder_type
     FROM files f
     LEFT JOIN users u ON f.created_by = u.id
     LEFT JOIN folders fo ON f.folder_id = fo.id
     LEFT JOIN folders pfo ON fo.parent_id = pfo.id
+    LEFT JOIN folders ppfo ON pfo.parent_id = ppfo.id
     WHERE f.is_deleted = 0
   `;
 
@@ -55,8 +57,20 @@ async function listFiles(req, res) {
 
   res.json({
     data: files.map(f => {
+      let workshopName = null;
       let folderPath = null;
-      if (f.folder_name) {
+      if (f.folder_type === 'workshop') {
+        workshopName = f.folder_name;
+      } else if (f.parent_folder_type === 'workshop') {
+        workshopName = f.parent_folder_name;
+        folderPath = f.folder_name || null;
+      } else if (f.grandparent_folder_type === 'workshop') {
+        workshopName = f.grandparent_folder_name;
+        folderPath = f.parent_folder_name
+          ? `${f.parent_folder_name} / ${f.folder_name}`
+          : f.folder_name;
+      } else if (f.folder_name) {
+        // No workshop ancestor found; fall back to original behaviour
         folderPath = f.parent_folder_name
           ? `${f.parent_folder_name} / ${f.folder_name}`
           : f.folder_name;
@@ -75,6 +89,7 @@ async function listFiles(req, res) {
         folderId: f.folder_id || null,
         folderName: f.folder_name || null,
         folderPath,
+        workshopName,
         versionCount: f.version_count,
         lastModified: f.last_modified,
         currentSize: f.current_size,

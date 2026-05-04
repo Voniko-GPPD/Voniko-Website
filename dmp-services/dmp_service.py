@@ -1141,8 +1141,7 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
 
                 # Step 3: build date/label → row index map from column A.
                 # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".
-                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THANG", "3 THANG",
-                                   "3 THÁNG", "6 THÁNG"}
+                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THÁNG", "3 THANG", "6 THANG"}
                 date_row_map: dict[str, int] = {}
                 for drow in ws.iter_rows(min_col=1, max_col=1):
                     for dcell in drow:

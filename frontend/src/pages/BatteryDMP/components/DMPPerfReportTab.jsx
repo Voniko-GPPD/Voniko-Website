@@ -97,7 +97,7 @@ function GroupEditor({ groups, onChange }) {
               onChange={(e) => handleGroupChange(idx, 'chuyen', e.target.value)}
             />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {t('dmpPerfGroupTrays')}: {(grp.trays && grp.trays.length ? grp.trays : autoTrays(groups.length, idx)).join(',')}
+              {t('dmpPerfGroupTrays')}: {(grp.trays?.length ? grp.trays : autoTrays(groups.length, idx)).join(',')}
             </Typography.Text>
             <Button
               size="small"
@@ -508,7 +508,7 @@ function ExportTab({ stationId }) {
       <Card size="small">
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <Typography.Text>
-            {loadingEntries ? <Spin size="small" /> : `${entries.length} entries registered`}
+            {loadingEntries ? <Spin size="small" /> : t('dmpPerfEntriesCount', { count: entries.length })}
           </Typography.Text>
           <Button
             type="primary"

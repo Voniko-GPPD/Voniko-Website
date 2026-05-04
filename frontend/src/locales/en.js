@@ -720,4 +720,5 @@ export default {
   dmpPerfSelectStation: 'Please select a station first',
   dmpPerfHint: 'Register DMP batch entries here. Each entry maps a discharge test to a row in the Excel performance report template.',
   dmpPerfAutoTraysHint: 'Leave trays blank for automatic assignment (1 group→all 9, 2 groups→1-4/6-9, 3 groups→1-3/4-6/7-9)',
+  dmpPerfEntriesCount: '{count} entries registered',
 };

@@ -514,19 +514,27 @@ export default function BatteryPage() {
           // Reset caliper values after saving to record
           setCaliperDia('');
           setCaliperHei('');
-          // When a retest result comes in, check if it's still out of spec
-          if (msg.record.is_retest) {
+          // Out-of-spec check — runs for every record (new or updated, retest or not).
+          // Uses refs to avoid stale-closure issues inside the WS callback.
+          {
             const rec = enrichedRecord;
             const spec_ocv = ocvSpecRef.current;
             const spec_ccv = ccvSpecRef.current;
-            const ocvBad = spec_ocv && rec.ocv !== null && rec.ocv !== undefined && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
-            const ccvBad = spec_ccv && rec.ccv !== null && rec.ccv !== undefined && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
+            const ocvBad = spec_ocv && rec.ocv != null && (rec.ocv < spec_ocv.min || rec.ocv > spec_ocv.max);
+            const ccvBad = spec_ccv && rec.ccv != null && (rec.ccv < spec_ccv.min || rec.ccv > spec_ccv.max);
             if (ocvBad || ccvBad) {
-              const retryCount = retestCountMapRef.current[rec.id] || 0;
               const parts = [];
               if (ocvBad) parts.push(`OCV ${rec.ocv.toFixed(3)}V (spec: ${spec_ocv.min} - ${spec_ocv.max})`);
               if (ccvBad) parts.push(`CCV ${rec.ccv.toFixed(3)}V (spec: ${spec_ccv.min} - ${spec_ccv.max})`);
-              setOutOfSpecModal({ record: rec, parts, retryCount });
+              if (msg.record.is_retest) {
+                const retryCount = retestCountMapRef.current[rec.id] || 0;
+                setOutOfSpecModal({ record: rec, parts, retryCount });
+              } else {
+                setOutOfSpecModal({ record: rec, parts, retryCount: 0 });
+                if (runningRef.current) {
+                  sendMsg({ action: 'stop' });
+                }
+              }
             }
           }
         }
@@ -1496,35 +1504,8 @@ export default function BatteryPage() {
     };
   }, [readingsByBattery]);
 
-  const prevRecordsLenRef = useRef(records.length);
   const prevRecordsForScrollRef = useRef(records);
   const resultsTableRef = useRef(null);
-
-  // Out-of-spec detection — only fires when a new record is added
-  useEffect(() => {
-    if (records.length < prevRecordsLenRef.current) {
-      // Records were cleared/reset — sync the ref so the next new record is detected correctly
-      prevRecordsLenRef.current = records.length;
-      return;
-    }
-    if (records.length <= prevRecordsLenRef.current) return;
-    prevRecordsLenRef.current = records.length;
-    const latest = records[records.length - 1];
-    if (!latest) return;
-    const ocvBad = ocvSpec && latest.ocv != null && (latest.ocv < ocvSpec.min || latest.ocv > ocvSpec.max);
-    const ccvBad = ccvSpec && latest.ccv != null && (latest.ccv < ccvSpec.min || latest.ccv > ccvSpec.max);
-    if (ocvBad || ccvBad) {
-      const parts = [];
-      if (ocvBad) parts.push(`OCV ${latest.ocv.toFixed(3)}V (spec: ${ocvSpec.min} - ${ocvSpec.max})`);
-      if (ccvBad) parts.push(`CCV ${latest.ccv.toFixed(3)}V (spec: ${ccvSpec.min} - ${ccvSpec.max})`);
-      // Show blocking modal instead of dismissible notification
-      setOutOfSpecModal({ record: latest, parts, retryCount: 0 });
-      // Bug fix: stop the test immediately so it doesn't advance to the next battery
-      if (runningRef.current) {
-        sendMsg({ action: 'stop' });
-      }
-    }
-  }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
   // Unified auto-scroll: scroll to whichever row was most recently added or modified.
   // Covers: new OCV/CCV record, caliper filling dia/hei, and retest/edit of existing rows.

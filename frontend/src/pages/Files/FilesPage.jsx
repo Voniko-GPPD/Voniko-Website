@@ -384,15 +384,32 @@ export default function FilesPage() {
       ),
     },
     {
+      title: t('workshop'),
+      dataIndex: 'workshopName',
+      width: 120,
+      render: (ws) => {
+        if (!ws) return <Text type="secondary">—</Text>;
+        return (
+          <Tooltip title={ws}>
+            <Text type="secondary" style={{ display: 'block', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {ws}
+            </Text>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: t('folderPath'),
       dataIndex: 'folderPath',
       render: (fp, record) => {
         if (fp) {
           return (
-            <Space size={4}>
-              <FolderOutlined style={{ color: '#1677ff' }} />
-              <Text type="secondary">{fp}</Text>
-            </Space>
+            <Tooltip title={fp}>
+              <Space size={4} style={{ maxWidth: 260, overflow: 'hidden' }}>
+                <FolderOutlined style={{ color: '#1677ff', flexShrink: 0 }} />
+                <Text type="secondary" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fp}</Text>
+              </Space>
+            </Tooltip>
           );
         }
         if (record.path && record.path !== '/') {

@@ -53,13 +53,6 @@ function autoTrays(groupCount, groupIndex) {
   return [];
 }
 
-// Trays assigned by loai type (UD→1-4, UD+→6-9, HP→auto)
-function traysByLoai(loai) {
-  if (loai === 'UD') return [1, 2, 3, 4];
-  if (loai === 'UD+') return [6, 7, 8, 9];
-  return [];
-}
-
 /** Matches exactly 6 digits — used to identify the DDMMYY date token in a remark. */
 const SIX_DIGIT_RE = /^\d{6}$/;
 
@@ -68,11 +61,14 @@ const SIX_DIGIT_RE = /^\d{6}$/;
  *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}] }
  *
  * Rules:
- *   - First token that is exactly 6 digits → DDMMYY date
+ *   - First token that is exactly 6 digits → DDMMYY date (optional)
  *   - Token matching battery family (LR6, LR03, 9V, …) → model
- *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [6,7,8,9] }
+ *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [] }
  *   - "HP<n>"  → { loai: 'HP',  chuyen: '<n>', trays: [] }
- *   - "UD<n>"  → { loai: 'UD',  chuyen: '<n>', trays: [1,2,3,4] }
+ *   - "UD<n>"  → { loai: 'UD',  chuyen: '<n>', trays: [] }
+ *
+ * Trays are always left empty so the backend assigns them positionally:
+ *   1 group → trays 1-9 | 2 groups → 1-4 / 6-9 | 3 groups → 1-3 / 4-6 / 7-9
  */
 function parseRemark(raw) {
   if (!raw || !raw.trim()) return { date: null, model: null, groups: [] };
@@ -108,11 +104,13 @@ function parseRemark(raw) {
     if (batteryRe.test(tok)) {
       model = tok;
     } else if (/^UDP\d+$/.test(tok)) {
-      groups.push({ loai: 'UD+', chuyen: tok.substring(3), trays: [6, 7, 8, 9] });
+      // Trays are assigned positionally (not by type) — leave empty for auto-assignment
+      groups.push({ loai: 'UD+', chuyen: tok.substring(3), trays: [] });
     } else if (/^HP\d+$/.test(tok)) {
       groups.push({ loai: 'HP', chuyen: tok.substring(2), trays: [] });
     } else if (/^UD\d+$/.test(tok)) {
-      groups.push({ loai: 'UD', chuyen: tok.substring(2), trays: [1, 2, 3, 4] });
+      // Trays are assigned positionally (not by type) — leave empty for auto-assignment
+      groups.push({ loai: 'UD', chuyen: tok.substring(2), trays: [] });
     }
   }
 
@@ -127,19 +125,13 @@ function GroupEditor({ groups, onChange, model }) {
   const handleGroupChange = (idx, field, value) => {
     const next = groups.map((g, i) => {
       if (i !== idx) return g;
-      const updated = { ...g, [field]: value };
-      // When loai changes, update trays automatically
-      if (field === 'loai') {
-        const derived = traysByLoai(value);
-        if (derived.length > 0) updated.trays = derived;
-      }
-      return updated;
+      return { ...g, [field]: value };
     });
     onChange(next);
   };
 
   const handleAddGroup = () => {
-    onChange([...groups, { loai: 'UD', chuyen: '', trays: [1, 2, 3, 4] }]);
+    onChange([...groups, { loai: 'UD', chuyen: '', trays: [] }]);
   };
 
   const handleRemoveGroup = (idx) => {

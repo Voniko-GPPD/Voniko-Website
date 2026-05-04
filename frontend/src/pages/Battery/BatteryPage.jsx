@@ -219,6 +219,10 @@ export default function BatteryPage() {
   // Out-of-spec blocking modal
   const [outOfSpecModal, setOutOfSpecModal] = useState(null);
 
+  // Session started flag — locks all parameters once the first test is started.
+  // Only reset when "Xóa phiên làm việc" is used to begin a new order.
+  const [sessionStarted, setSessionStarted] = useState(() => getInitialSession().sessionStarted || false);
+
   // Tracks the battery ID currently being retested (for chart display)
   const [retestingBatteryId, setRetestingBatteryId] = useState(null);
 
@@ -276,10 +280,6 @@ export default function BatteryPage() {
   // Resume session modal
   const [resumeModalVisible, setResumeModalVisible] = useState(false);
   const [savedSessionInfo, setSavedSessionInfo] = useState(null);
-
-  // Order ID change warning modal
-  const [orderIdChangeModalVisible, setOrderIdChangeModalVisible] = useState(false);
-  const [pendingOrderId, setPendingOrderId] = useState('');
 
   // Duplicate order ID blocking modal (shown when user types a code that already exists in history)
   const [duplicateOrderWarningVisible, setDuplicateOrderWarningVisible] = useState(false);
@@ -573,8 +573,13 @@ export default function BatteryPage() {
               if (ocvBad) parts.push(`OCV ${rec.ocv.toFixed(3)}V (spec: ${spec_ocv.min} - ${spec_ocv.max})`);
               if (ccvBad) parts.push(`CCV ${rec.ccv.toFixed(3)}V (spec: ${spec_ccv.min} - ${spec_ccv.max})`);
               if (msg.record.is_retest) {
-                const retryCount = retestCountMapRef.current[rec.id] || 0;
-                setOutOfSpecModal({ record: rec, parts, retryCount });
+                // When "Đo lại ngay" triggered this retest (auto-restart pending),
+                // skip the modal — auto-restart will continue to the next battery
+                // regardless of whether the retested battery is within spec or not.
+                if (!autoRestartAfterRetestRef.current) {
+                  const retryCount = retestCountMapRef.current[rec.id] || 0;
+                  setOutOfSpecModal({ record: rec, parts, retryCount });
+                }
               } else {
                 setOutOfSpecModal({ record: rec, parts, retryCount: 0 });
                 if (runningRef.current) {
@@ -611,6 +616,7 @@ export default function BatteryPage() {
         setRecords([]);
         setReadingsByBattery({});
         setRetestingBatteryId(null);
+        setSessionStarted(false);
         pendingRetestRecordRef.current = null;
         autoRestartAfterRetestRef.current = false;
         retestCountMapRef.current = {};
@@ -707,6 +713,7 @@ export default function BatteryPage() {
     if (running) {
       sendMsg({ action: 'stop' });
     } else {
+      setSessionStarted(true);
       sendMsg({ action: 'start', payload: buildParams() });
     }
   };
@@ -854,24 +861,9 @@ export default function BatteryPage() {
     localStorage.removeItem('battery_session');
     setReadingsByBattery({});
     setChartSeriesByBattery({});
+    setSessionStarted(false);
     resetLoadedSnapshotTracking();
   }, [saveCurrentOrderSnapshot, sendMsg, resetLoadedSnapshotTracking]);
-
-  // Order ID change: end current session and start fresh with new ID
-  const handleEndSessionForOrderIdChange = () => {
-    handleClearSession();
-    setOrderId(pendingOrderId);
-    setPendingOrderId('');
-    setOrderIdChangeModalVisible(false);
-  };
-
-  // Order ID change: keep all results and re-tag every record with the new ID
-  const handleRenameAllOrderId = () => {
-    const newId = pendingOrderId;
-    setOrderId(newId);
-    setPendingOrderId('');
-    setOrderIdChangeModalVisible(false);
-  };
 
   // Skip current battery (advance without saving dimensions)
   const handleSaveCaliper = useCallback(() => {
@@ -1649,10 +1641,11 @@ export default function BatteryPage() {
         heiMax,
         chartSeriesByBattery,
         readingsByBattery,
+        sessionStarted,
       };
       localStorage.setItem('battery_session', JSON.stringify(sessionData));
     } catch { }
-  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax, diaMin, diaMax, heiMin, heiMax, chartSeriesByBattery, readingsByBattery]);
+  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax, diaMin, diaMax, heiMin, heiMax, chartSeriesByBattery, readingsByBattery, sessionStarted]);
 
   useEffect(() => {
     try {
@@ -1724,7 +1717,7 @@ export default function BatteryPage() {
     }
   }, [batteryType, productLine, presets]);
 
-  const inputsDisabled = !connected;
+  const inputsDisabled = !connected || sessionStarted;
   const hasPreset = presets[makePresetKey(batteryType, productLine)] != null;
   const paramsDisabled = inputsDisabled || hasPreset;
 
@@ -1940,15 +1933,7 @@ export default function BatteryPage() {
                     >
                       <Input
                         value={orderId}
-                        onChange={(e) => {
-                          const newVal = e.target.value;
-                          if (records.length > 0 && newVal !== orderId) {
-                            setPendingOrderId(newVal);
-                            setOrderIdChangeModalVisible(true);
-                          } else {
-                            setOrderId(newVal);
-                          }
-                        }}
+                        onChange={(e) => setOrderId(e.target.value)}
                         onBlur={(e) => {
                           // Only show the duplicate modal when the user finishes typing (on blur)
                           // so that entering "121" doesn't falsely trigger a warning for "12"
@@ -3055,6 +3040,7 @@ export default function BatteryPage() {
             setReadingsByBattery({});
             setOrderId('');
             setTestDate(dayjs());
+            setSessionStarted(false);
             const newBatteryType = batteryTypes[0]?.name || '';
             const newProductLine = productLines[0]?.name || '';
             setBatteryType(newBatteryType);
@@ -3141,37 +3127,6 @@ export default function BatteryPage() {
             <li><strong>{t('batteryDuplicateOrderCount')}:</strong> {duplicateMatchingSnapshot.records?.length || 0} {t('batteryId')}</li>
           </ul>
         )}
-      </Modal>
-      {/* Order ID Change Warning Modal */}
-      <Modal
-        open={orderIdChangeModalVisible}
-        title={<Space><span style={{ color: '#faad14' }}>⚠️</span><span>{t('batteryOrderIdChangeTitle')}</span></Space>}
-        closable={false}
-        maskClosable={false}
-        keyboard={false}
-        footer={[
-          <Button key="cancel" onClick={() => { setPendingOrderId(''); setOrderIdChangeModalVisible(false); }}>{t('cancel')}</Button>,
-          <Button key="endSession" danger onClick={handleEndSessionForOrderIdChange}>{t('batteryOrderIdChangeEndSession')}</Button>,
-          <Button key="renameAll" type="primary" onClick={handleRenameAllOrderId}>{t('batteryOrderIdChangeRenameAll')}</Button>,
-        ]}
-      >
-        <p>{t('batteryOrderIdChangeDesc')}</p>
-        <ul>
-          <li><strong>{t('batteryOrderIdChangeCurrent')}:</strong> {orderId || '-'}</li>
-          <li><strong>{t('batteryOrderIdChangeNew')}:</strong> {pendingOrderId || '-'}</li>
-          <li><strong>{t('batteryResults')}:</strong> {records.length} {t('batteryId')}</li>
-        </ul>
-        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ background: '#fff1f0', border: '1px solid #ffccc7', borderRadius: 6, padding: '8px 12px' }}>
-            <strong style={{ color: '#cf1322' }}>{t('batteryOrderIdChangeEndSession')}:</strong>
-            <span style={{ marginLeft: 6 }}>{t('batteryOrderIdChangeEndSessionDesc')}</span>
-          </div>
-          <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px' }}>
-            <strong style={{ color: '#389e0d' }}>{t('batteryOrderIdChangeRenameAll')}:</strong>
-            <span style={{ marginLeft: 6 }}>{t('batteryOrderIdChangeRenameAllDesc')}</span>
-          </div>
-        </div>
-        <p style={{ color: '#ff4d4f', marginTop: 8 }}>{t('batteryOrderIdChangeWarning')}</p>
       </Modal>
       {/* Chart Zoom Modal */}
       <Modal

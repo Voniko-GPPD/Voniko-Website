@@ -2303,6 +2303,30 @@ export default function BatteryPage() {
                   </Space>
                 </Col>
 
+                {/* Dia standard — same row */}
+                <Col xs="auto">
+                  <Space direction="vertical" size={2}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryDiaStandard')}
+                    </span>
+                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                      {diaMin != null && diaMax != null ? `${diaMin} – ${diaMax} mm` : diaMin != null ? `≥ ${diaMin} mm` : diaMax != null ? `≤ ${diaMax} mm` : '—'}
+                    </div>
+                  </Space>
+                </Col>
+
+                {/* Hei standard — same row */}
+                <Col xs="auto">
+                  <Space direction="vertical" size={2}>
+                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                      {t('batteryHeiStandard')}
+                    </span>
+                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                      {heiMin != null && heiMax != null ? `${heiMin} – ${heiMax} mm` : heiMin != null ? `≥ ${heiMin} mm` : heiMax != null ? `≤ ${heiMax} mm` : '—'}
+                    </div>
+                  </Space>
+                </Col>
+
                 {/* Help icon */}
                 <Col xs="auto">
                   <Tooltip title={t('batteryCaliperHint')}>
@@ -2315,30 +2339,6 @@ export default function BatteryPage() {
                   <Button size="small" onClick={handleResetCaliper}>
                     {t('cancel')}
                   </Button>
-                </Col>
-              </Row>
-
-              {/* Standards row — always shown in caliper phase */}
-              <Row gutter={[16, 8]} style={{ marginTop: 8 }} align="middle">
-                <Col xs="auto">
-                  <Space direction="vertical" size={2}>
-                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      {t('batteryDiaStandard')}
-                    </span>
-                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
-                      {diaMin != null && diaMax != null ? `${diaMin} – ${diaMax} mm` : diaMin != null ? `≥ ${diaMin} mm` : diaMax != null ? `≤ ${diaMax} mm` : '—'}
-                    </div>
-                  </Space>
-                </Col>
-                <Col xs="auto">
-                  <Space direction="vertical" size={2}>
-                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      {t('batteryHeiStandard')}
-                    </span>
-                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
-                      {heiMin != null && heiMax != null ? `${heiMin} – ${heiMax} mm` : heiMin != null ? `≥ ${heiMin} mm` : heiMax != null ? `≤ ${heiMax} mm` : '—'}
-                    </div>
-                  </Space>
                 </Col>
               </Row>
             </Card>

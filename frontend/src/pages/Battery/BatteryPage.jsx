@@ -281,6 +281,10 @@ export default function BatteryPage() {
   const [orderIdChangeModalVisible, setOrderIdChangeModalVisible] = useState(false);
   const [pendingOrderId, setPendingOrderId] = useState('');
 
+  // Duplicate order ID blocking modal (shown when user types a code that already exists in history)
+  const [duplicateOrderWarningVisible, setDuplicateOrderWarningVisible] = useState(false);
+  const [duplicateMatchingSnapshot, setDuplicateMatchingSnapshot] = useState(null);
+
   // Excel report template
   const [templateName, setTemplateName] = useState(() => localStorage.getItem('battery_template_name') || null);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
@@ -1881,6 +1885,18 @@ export default function BatteryPage() {
                             setOrderIdChangeModalVisible(true);
                           } else {
                             setOrderId(newVal);
+                            // Check immediately if the new value is a duplicate in history
+                            const normalized = normalizeOrderId(newVal);
+                            if (normalized !== '') {
+                              const match = orderHistory.find(h =>
+                                normalizeOrderId(h.orderId) === normalized &&
+                                h._snapshotId !== loadedSnapshotId
+                              );
+                              if (match) {
+                                setDuplicateMatchingSnapshot(match);
+                                setDuplicateOrderWarningVisible(true);
+                              }
+                            }
                           }
                         }}
                         disabled={inputsDisabled}
@@ -3011,6 +3027,49 @@ export default function BatteryPage() {
             <li><strong>{t('batteryProductLine')}:</strong> {savedSessionInfo.productLine || '-'}</li>
             <li><strong>{t('batteryDate')}:</strong> {savedSessionInfo.testDate || '-'}</li>
             <li><strong>{t('batteryResults')}:</strong> {savedSessionInfo.records?.length || 0} {t('batteryId')}</li>
+          </ul>
+        )}
+      </Modal>
+      {/* Duplicate Order ID Blocking Modal */}
+      <Modal
+        open={duplicateOrderWarningVisible}
+        title={<Space><span style={{ color: '#ff4d4f', fontSize: 18 }}>⚠️</span><span style={{ color: '#cf1322' }}>{t('batteryDuplicateOrderTitle')}</span></Space>}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={[
+          <Button
+            key="useOther"
+            onClick={() => {
+              setOrderId('');
+              setDuplicateMatchingSnapshot(null);
+              setDuplicateOrderWarningVisible(false);
+            }}
+          >
+            {t('batteryDuplicateOrderUseOther')}
+          </Button>,
+          <Button
+            key="loadOld"
+            type="primary"
+            onClick={() => {
+              if (duplicateMatchingSnapshot) {
+                handleLoadOrder(duplicateMatchingSnapshot);
+              }
+              setDuplicateMatchingSnapshot(null);
+              setDuplicateOrderWarningVisible(false);
+            }}
+          >
+            {t('batteryDuplicateOrderLoadOld')}
+          </Button>,
+        ]}
+      >
+        <div style={{ background: '#fff1f0', border: '1px solid #ffccc7', borderRadius: 6, padding: '12px 16px', marginBottom: 12 }}>
+          <p style={{ margin: 0, color: '#cf1322' }}>{t('batteryDuplicateOrderDesc')}</p>
+        </div>
+        {duplicateMatchingSnapshot && (
+          <ul style={{ margin: 0 }}>
+            <li><strong>{t('batteryDuplicateOrderExisting')}:</strong> {duplicateMatchingSnapshot.orderId || '-'}</li>
+            <li><strong>{t('batteryDuplicateOrderCount')}:</strong> {duplicateMatchingSnapshot.records?.length || 0} {t('batteryId')}</li>
           </ul>
         )}
       </Modal>

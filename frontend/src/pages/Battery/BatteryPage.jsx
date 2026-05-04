@@ -455,6 +455,18 @@ export default function BatteryPage() {
         setStatusText('Testing...');
         setStatusColor(getStatusColor('Testing...'));
         notification.info({ message: t('batteryTestStarted') });
+        // Clear accumulated chart data when starting a fresh test (not a retest).
+        // Without this, new readings for battery IDs 1, 2, … are appended to the
+        // old data from the previous run.  Because each measurement resets elapsed
+        // time to 0, the combined array becomes non-monotonic and ECharts draws a
+        // chaotic zigzag line.
+        if (retestingBatteryIdRef.current === null) {
+          setChartData([]);
+          setChartDataOCV([]);
+          setChartDataCCV([]);
+          setChartSeriesByBattery({});
+          setReadingsByBattery({});
+        }
         break;
 
       case 'test_stopped':
@@ -698,9 +710,12 @@ export default function BatteryPage() {
   const chartSeriesByBatteryRef = useRef(chartSeriesByBattery);
   const readingsByBatteryRef = useRef(readingsByBattery);
   const testDateRef = useRef(testDate);
+  // Ref to read retestingBatteryId inside the stale-closure handleWsMessage callback
+  const retestingBatteryIdRef = useRef(retestingBatteryId);
   useEffect(() => { chartSeriesByBatteryRef.current = chartSeriesByBattery; }, [chartSeriesByBattery]);
   useEffect(() => { readingsByBatteryRef.current = readingsByBattery; }, [readingsByBattery]);
   useEffect(() => { testDateRef.current = testDate; }, [testDate]);
+  useEffect(() => { retestingBatteryIdRef.current = retestingBatteryId; }, [retestingBatteryId]);
 
   const resetLoadedSnapshotTracking = useCallback(() => {
     loadedSnapshotIdRef.current = null;

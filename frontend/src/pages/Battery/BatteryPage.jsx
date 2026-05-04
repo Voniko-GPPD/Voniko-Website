@@ -202,6 +202,7 @@ export default function BatteryPage() {
   const [chartSeriesByBattery, setChartSeriesByBattery] = useState(() => getInitialSession().chartSeriesByBattery || {});
   const [autoScroll, setAutoScroll] = useState(true);
   const [legendSelected, setLegendSelected] = useState({ OCV: true, CCV: true });
+  const voltChartRef = useRef(null);
 
   // Results
   const [records, setRecords] = useState(() => getInitialSession().records || []);
@@ -1499,6 +1500,17 @@ export default function BatteryPage() {
     if (row) row.scrollIntoView({ block: 'nearest' });
   }, [caliperIndex, caliperPhase, records]);
 
+  // Auto-scroll voltage chart to show the latest data when autoScroll is enabled
+  useEffect(() => {
+    if (!autoScroll || !voltChartRef.current) return;
+    try {
+      const instance = voltChartRef.current.getEchartsInstance();
+      if (instance) {
+        instance.dispatchAction({ type: 'dataZoom', batch: [{ start: 0, end: 100 }] });
+      }
+    } catch (_) { }
+  }, [autoScroll, chartSeriesByBattery, chartDataOCV, chartDataCCV]);
+
   useEffect(() => {
     try {
       const sessionData = {
@@ -2044,6 +2056,18 @@ export default function BatteryPage() {
                               }
                               e.target.blur();
                             }}
+                            onBlur={(e) => {
+                              const inputId = parseInt(e.target.value, 10);
+                              if (!isNaN(inputId) && inputId >= (records[0]?.id ?? 1) && inputId <= (records[records.length - 1]?.id ?? 1)) {
+                                const idx = records.findIndex(r => r.id === inputId);
+                                if (idx >= 0) {
+                                  setCaliperIndex(idx);
+                                  setCaliperDia('');
+                                  setCaliperHei('');
+                                  setCaliperMode('dia');
+                                }
+                              }
+                            }}
                           />
                         </Tooltip>
                         <span style={{ color: '#1677ff', fontSize: 13 }}>/ {records.length}</span>
@@ -2272,6 +2296,7 @@ export default function BatteryPage() {
                 bodyStyle={{ padding: 8 }}
               >
                 <ReactECharts
+                  ref={voltChartRef}
                   option={chartOption}
                   style={{ height: 280 }}
                   notMerge={true}

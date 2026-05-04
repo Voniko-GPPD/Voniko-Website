@@ -12,7 +12,7 @@ const config = require('./src/config');
 const { initDb } = require('./src/models/database');
 const logger = require('./src/utils/logger');
 const { scheduleCleanup } = require('./src/utils/cleanup');
-const { scheduleBackup } = require('./src/utils/backup');
+const { scheduleBackup, scheduleZipBackup } = require('./src/utils/backup');
 const { addClient, removeClient, broadcast } = require('./src/utils/notifications');
 const errorHandler = require('./src/middleware/errorHandler');
 const { authenticateToken } = require('./src/middleware/auth');
@@ -174,6 +174,9 @@ scheduleCleanup();
 
 // Schedule backup
 scheduleBackup();
+
+// Schedule weekly ZIP backup (entire data directory)
+scheduleZipBackup();
 
 // Start server
 const server = require('http').createServer(app);

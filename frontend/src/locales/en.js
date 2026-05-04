@@ -399,7 +399,7 @@ export default {
   batteryCcvStandard: 'CCV Standard (from - to)',
   batteryDiaStandard: 'Diameter Standard (from - to)',
   batteryHeiStandard: 'Height Standard (from - to)',
-  batteryOrderIdDuplicate: 'This order ID already exists in history. Old data may be overwritten.',
+  batteryOrderIdDuplicate: 'This order ID already exists in history. Load the existing order or use a different ID to start.',
   batteryOutOfSpec: 'out of spec',
   batteryRetestRequired: 'Retest required',
   batteryRetestNow: 'Re-measure Now',

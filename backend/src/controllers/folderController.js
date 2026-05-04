@@ -321,6 +321,27 @@ async function exportFolders(req, res) {
 }
 
 // Import folders from CSV or Excel
+// Helper to safely extract plain text from an ExcelJS cell value.
+// ExcelJS can return strings, numbers, Date objects, rich-text objects
+// ({ richText: [{text:...},...] }), formula results ({ formula, result }),
+// or hyperlink objects ({ text, hyperlink }) — all of which would render as
+// "[object Object]" if passed through String() directly.
+function getCellText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  if (value instanceof Date) return '';
+  // Rich text: { richText: [{ text: '...' }, ...] }
+  if (Array.isArray(value?.richText)) {
+    return value.richText.map(r => (typeof r.text === 'string' ? r.text : '')).join('').trim();
+  }
+  // Formula result: { formula: '...', result: <value> }
+  if (value?.result !== undefined) return getCellText(value.result);
+  // Hyperlink / shared string: { text: '...', hyperlink: '...' }
+  if (value?.text !== undefined) return getCellText(value.text);
+  return '';
+}
+
 async function importFolders(req, res) {
   if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
@@ -343,10 +364,10 @@ async function importFolders(req, res) {
     if (!worksheet) return res.status(400).json({ message: 'Excel file has no worksheets' });
     worksheet.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return; // skip header
-      const workshop = String(row.getCell(1).value || '').trim();
-      const line = String(row.getCell(2).value || '').trim();
-      const machine = String(row.getCell(3).value || '').trim();
-      const description = String(row.getCell(4).value || '').trim();
+      const workshop = getCellText(row.getCell(1).value);
+      const line = getCellText(row.getCell(2).value);
+      const machine = getCellText(row.getCell(3).value);
+      const description = getCellText(row.getCell(4).value);
       if (workshop || line || machine) {
         rows.push({ workshop, line, machine, description });
       }

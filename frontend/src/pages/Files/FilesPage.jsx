@@ -45,10 +45,17 @@ export default function FilesPage() {
   const [fileList, setFileList] = useState([]);
   const [folders, setFolders] = useState({ workshops: [], lines: [] });
   const foldersRef = useRef({ workshops: [], lines: [] });
+  const [uploadWorkshopId, setUploadWorkshopId] = useState(null);
   const [uploadLineId, setUploadLineId] = useState(null);
   const [uploadMachineId, setUploadMachineId] = useState(null);
   const [allTags, setAllTags] = useState([]);
   const [filterTagId, setFilterTagId] = useState(null);
+
+  // Rename state
+  const [renameModal, setRenameModal] = useState(false);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameLoading, setRenameLoading] = useState(false);
+  const [renameForm] = Form.useForm();
 
   // Folder management state
   const [fmWorkshops, setFmWorkshops] = useState([]);
@@ -165,6 +172,7 @@ export default function FilesPage() {
     try {
       const formData = new FormData();
       formData.append('file', fileList[0].originFileObj);
+      if (values.customFileName && values.customFileName.trim()) formData.append('customFileName', values.customFileName.trim());
       if (values.commitMessage) formData.append('commitMessage', values.commitMessage);
       if (values.description) formData.append('description', values.description);
       // When uploading a new version for a specific file, send fileId for stable identification
@@ -179,6 +187,7 @@ export default function FilesPage() {
       setUploadModal(false);
       form.resetFields();
       setFileList([]);
+      setUploadWorkshopId(null);
       setUploadLineId(null);
       setUploadMachineId(null);
       setUploadFileId(null);
@@ -201,6 +210,28 @@ export default function FilesPage() {
     }
   };
 
+  const openRename = (record) => {
+    setRenameTarget(record);
+    renameForm.setFieldsValue({ name: record.name });
+    setRenameModal(true);
+  };
+
+  const handleRename = async (values) => {
+    setRenameLoading(true);
+    try {
+      await api.patch(`/files/${renameTarget.id}`, { name: values.name });
+      message.success(t('renameSuccess'));
+      setRenameModal(false);
+      renameForm.resetFields();
+      setRenameTarget(null);
+      fetchFiles();
+    } catch (err) {
+      message.error(err.response?.data?.message || t('error'));
+    } finally {
+      setRenameLoading(false);
+    }
+  };
+
   const allFilterLines = filterWorkshopId
     ? ((folders.workshops || []).find(w => w.id === filterWorkshopId)?.lines || [])
     : [
@@ -209,16 +240,20 @@ export default function FilesPage() {
       ];
   const filterLine = allFilterLines.find(l => l.id === filterLineId);
   const filterMachines = filterLine ? (filterLine.machines || []) : [];
-  const uploadLine = [
-    ...(folders.workshops || []).flatMap(w => w.lines || []),
-    ...(folders.lines || []),
-  ].find(l => l.id === uploadLineId);
+  const uploadLines = uploadWorkshopId
+    ? ((folders.workshops || []).find(w => w.id === uploadWorkshopId)?.lines || [])
+    : [
+        ...(folders.workshops || []).flatMap(w => w.lines || []),
+        ...(folders.lines || []),
+      ];
+  const uploadLine = uploadLines.find(l => l.id === uploadLineId);
   const uploadMachines = uploadLine ? (uploadLine.machines || []) : [];
 
   const closeModal = () => {
     setUploadModal(false);
     form.resetFields();
     setFileList([]);
+    setUploadWorkshopId(null);
     setUploadLineId(null);
     setUploadMachineId(null);
     setUploadFileId(null);
@@ -304,6 +339,11 @@ export default function FilesPage() {
           <Tooltip title={t('viewDetails')}>
             <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => navigate(`/files/${record.id}`)} />
           </Tooltip>
+          {(canEdit || isAdmin) && (
+            <Tooltip title={t('renameFile')}>
+              <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openRename(record)} />
+            </Tooltip>
+          )}
           {(canEdit || isAdmin) && (
             <Tooltip title={t('uploadNewVersion')}>
               <Button
@@ -692,7 +732,13 @@ export default function FilesPage() {
             <Dragger
               fileList={fileList}
               beforeUpload={() => false}
-              onChange={({ fileList: fl }) => setFileList(fl.slice(-1))}
+              onChange={({ fileList: fl }) => {
+                setFileList(fl.slice(-1));
+                if (fl.length > 0 && !uploadFileId) {
+                  const name = fl[fl.length - 1].name;
+                  form.setFieldValue('customFileName', name);
+                }
+              }}
               maxCount={1}
             >
               <p className="ant-upload-drag-icon"><InboxOutlined /></p>
@@ -702,7 +748,26 @@ export default function FilesPage() {
           </Form.Item>
 
           {!uploadFileId && (
+            <Form.Item name="customFileName" label={t('customFileName')}>
+              <Input placeholder={t('customFileName')} />
+            </Form.Item>
+          )}
+
+          {!uploadFileId && (
             <>
+              {(folders.workshops || []).length > 0 && (
+                <Form.Item label={t('selectWorkshop')}>
+                  <Select
+                    allowClear
+                    placeholder={t('selectWorkshop')}
+                    onChange={(val) => { setUploadWorkshopId(val || null); setUploadLineId(null); setUploadMachineId(null); }}
+                    value={uploadWorkshopId}
+                  >
+                    {(folders.workshops || []).map(w => <Option key={w.id} value={w.id}>{w.name}</Option>)}
+                  </Select>
+                </Form.Item>
+              )}
+
               <Form.Item label={t('selectLine')}>
                 <Select
                   allowClear
@@ -710,10 +775,7 @@ export default function FilesPage() {
                   onChange={(val) => { setUploadLineId(val || null); setUploadMachineId(null); }}
                   value={uploadLineId}
                 >
-                  {[
-                    ...(folders.workshops || []).flatMap(w => w.lines || []),
-                    ...(folders.lines || []),
-                  ].map(l => <Option key={l.id} value={l.id}>{l.name}</Option>)}
+                  {uploadLines.map(l => <Option key={l.id} value={l.id}>{l.name}</Option>)}
                 </Select>
               </Form.Item>
 
@@ -745,6 +807,28 @@ export default function FilesPage() {
             <Button type="primary" htmlType="submit" loading={uploadLoading} icon={<UploadOutlined />}>
               {t('upload')}
             </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={t('renameFileTitle')}
+        open={renameModal}
+        onCancel={() => { setRenameModal(false); renameForm.resetFields(); setRenameTarget(null); }}
+        footer={null}
+        width={400}
+      >
+        <Form form={renameForm} layout="vertical" onFinish={handleRename}>
+          <Form.Item
+            name="name"
+            label={t('newFileName')}
+            rules={[{ required: true, message: t('newFileName') }]}
+          >
+            <Input />
+          </Form.Item>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => { setRenameModal(false); renameForm.resetFields(); setRenameTarget(null); }}>{t('cancel')}</Button>
+            <Button type="primary" htmlType="submit" loading={renameLoading}>{t('save')}</Button>
           </div>
         </Form>
       </Modal>

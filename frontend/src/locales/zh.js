@@ -83,6 +83,11 @@ export default {
   selectFile: '选择文件',
   fileUploaded: '文件上传成功',
   fileDeleted: '文件已删除',
+  renameFile: '重命名文件',
+  renameFileTitle: '重命名文件',
+  renameSuccess: '文件重命名成功',
+  newFileName: '新文件名',
+  customFileName: '文件名（可选重命名）',
   filePathPlaceholder: '例如：/产线-1/设备-A',
   descriptionPlaceholder: '描述此文件...',
 

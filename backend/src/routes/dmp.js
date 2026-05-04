@@ -516,8 +516,30 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
   const { v4: uuidv4 } = require('uuid');
   const db = getDb();
   const { station_id, batch_id, report_date, model, groups, special_type, raw_remark, notes } = req.body || {};
-  if (!station_id || !batch_id || !report_date || !model) {
-    return res.status(400).json({ error: 'station_id, batch_id, report_date, and model are required' });
+  if (!station_id || !model) {
+    return res.status(400).json({ error: 'station_id and model are required' });
+  }
+  // Derive batch_id and report_date from raw_remark when not supplied by the client.
+  // Expected format: "DDMMYY <battery> <group>…" where the first token is a 6-digit date.
+  let effectiveBatchId = batch_id;
+  let effectiveDate = report_date;
+  if (!effectiveBatchId || !effectiveDate) {
+    const firstToken = (raw_remark || '').trim().split(/\s+/)[0] || '';
+    if (/^\d{6}$/.test(firstToken)) {
+      const day = parseInt(firstToken.substring(0, 2), 10);
+      const month = parseInt(firstToken.substring(2, 4), 10);
+      const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
+      const candidate = new Date(year, month - 1, day);
+      const isValid = candidate.getFullYear() === year
+        && candidate.getMonth() === month - 1
+        && candidate.getDate() === day;
+      if (isValid) {
+        if (!effectiveBatchId) effectiveBatchId = firstToken;
+        if (!effectiveDate) effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+    }
+    if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 8).replace(/-/g, '');
+    if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
   }
   try {
     const id = uuidv4();
@@ -528,8 +550,8 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
     `).run(
       id,
       station_id,
-      batch_id,
-      report_date,
+      effectiveBatchId,
+      effectiveDate,
       model,
       JSON.stringify(groups || []),
       special_type || 'normal',

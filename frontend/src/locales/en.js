@@ -712,6 +712,7 @@ export default {
   dmpPerfGroupLoai: 'Grade (Loại)',
   dmpPerfGroupChuyen: 'Line (Chuyền)',
   dmpPerfGroupTrays: 'Trays (auto)',
+  dmpPerfSheetLabel: 'Sheet',
   dmpPerfAddGroup: 'Add Group',
   dmpPerfRemoveGroup: 'Remove',
   dmpPerfSaveEntry: 'Save',

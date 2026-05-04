@@ -712,6 +712,7 @@ export default {
   dmpPerfGroupLoai: 'Loại (UD/HP/UD+)',
   dmpPerfGroupChuyen: 'Chuyền (vd: 501)',
   dmpPerfGroupTrays: 'Khay (tự động)',
+  dmpPerfSheetLabel: 'Sheet',
   dmpPerfAddGroup: 'Thêm chuyền',
   dmpPerfRemoveGroup: 'Xóa',
   dmpPerfSaveEntry: 'Lưu',

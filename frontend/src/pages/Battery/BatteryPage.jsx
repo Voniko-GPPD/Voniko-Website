@@ -848,7 +848,7 @@ export default function BatteryPage() {
     if (!isNaN(inputId) && inputId >= (recordsRef.current[0]?.id ?? 1) && inputId <= (recordsRef.current[recordsRef.current.length - 1]?.id ?? 1)) {
       const idx = recordsRef.current.findIndex(r => r.id === inputId);
       if (idx >= 0) {
-        caliperIndexRef.current = idx; // Update ref immediately so caliper HW events see the new index
+        caliperIndexRef.current = idx; // Update ref immediately so caliper hardware events see the new index
         setCaliperIndex(idx);
         setCaliperDia('');
         setCaliperHei('');
@@ -2755,7 +2755,7 @@ export default function BatteryPage() {
                     placeholder={t('batteryType')}
                     onChange={(v) => {
                       const preset = presets[makePresetKey(v, setupForm.productLine)];
-                      setSetupForm(f => preset ? { ...preset } : { ...f, batteryType: v });
+                      setSetupForm(f => preset ? { ...f, ...preset } : { ...f, batteryType: v });
                     }}
                     style={{ width: '100%' }}
                   >
@@ -2770,7 +2770,7 @@ export default function BatteryPage() {
                     placeholder={t('batteryProductLine')}
                     onChange={(v) => {
                       const preset = presets[makePresetKey(setupForm.batteryType, v)];
-                      setSetupForm(f => preset ? { ...preset } : { ...f, productLine: v });
+                      setSetupForm(f => preset ? { ...f, ...preset } : { ...f, productLine: v });
                     }}
                     style={{ width: '100%' }}
                   >

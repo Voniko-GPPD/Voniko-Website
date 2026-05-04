@@ -9,6 +9,14 @@ const { runCleanup } = require('../utils/cleanup');
 const { broadcast } = require('../utils/notifications');
 const { notifyFileSubscribers } = require('./subscriptionController');
 
+// If newName has no extension but originalName does, append the original extension.
+// path.extname handles hidden files (e.g. '.gitignore') correctly — it returns ''.
+function preserveExtension(newName, originalName) {
+  const oldExt = path.extname(originalName);
+  const newExt = path.extname(newName);
+  return (!newExt && oldExt) ? newName + oldExt : newName;
+}
+
 async function listFiles(req, res) {
   const db = getDb();
   const { search, page = 1, limit = 50, folderId } = req.query;
@@ -93,9 +101,10 @@ async function uploadFile(req, res) {
 
   const db = getDb();
   const { commitMessage, description, filePath = '/', folderId, fileId, customFileName } = req.body;
+  const decodedOriginalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
   const originalName = customFileName
-    ? customFileName.trim()
-    : Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    ? preserveExtension(customFileName.trim(), decodedOriginalName)
+    : decodedOriginalName;
 
   // Compute normalizedPath: derive from folder if folderId given
   let normalizedPath = filePath.startsWith('/') ? filePath : '/' + filePath;
@@ -644,8 +653,11 @@ async function renameFile(req, res) {
     return res.status(403).json({ message: 'Not authorized to rename this file' });
   }
 
-  const newName = name.trim();
+  const trimmedName = name.trim();
   const oldName = file.name;
+  const oldExt = path.extname(oldName);
+  const newExt = path.extname(trimmedName);
+  const newName = (!newExt && oldExt) ? trimmedName + oldExt : trimmedName;
   db.prepare(`UPDATE files SET name = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
     .run(newName, file.id);
 

@@ -172,7 +172,16 @@ export default function FilesPage() {
     try {
       const formData = new FormData();
       formData.append('file', fileList[0].originFileObj);
-      if (values.customFileName && values.customFileName.trim()) formData.append('customFileName', values.customFileName.trim());
+      if (values.customFileName && values.customFileName.trim()) {
+        const custom = values.customFileName.trim();
+        const origName = fileList[0].name;
+        const origDotIdx = origName.lastIndexOf('.');
+        const originalExt = origDotIdx > 0 ? origName.slice(origDotIdx) : '';
+        const customDotIdx = custom.lastIndexOf('.');
+        const customExt = customDotIdx > 0 ? custom.slice(customDotIdx) : '';
+        const finalCustomName = (!customExt && originalExt) ? custom + originalExt : custom;
+        formData.append('customFileName', finalCustomName);
+      }
       if (values.commitMessage) formData.append('commitMessage', values.commitMessage);
       if (values.description) formData.append('description', values.description);
       // When uploading a new version for a specific file, send fileId for stable identification
@@ -219,7 +228,13 @@ export default function FilesPage() {
   const handleRename = async (values) => {
     setRenameLoading(true);
     try {
-      await api.patch(`/files/${renameTarget.id}`, { name: values.name });
+      const trimmedName = values.name.trim();
+      const oldDotIdx = renameTarget.name.lastIndexOf('.');
+      const oldExt = oldDotIdx > 0 ? renameTarget.name.slice(oldDotIdx) : '';
+      const newDotIdx = trimmedName.lastIndexOf('.');
+      const newExt = newDotIdx > 0 ? trimmedName.slice(newDotIdx) : '';
+      const finalName = (!newExt && oldExt) ? trimmedName + oldExt : trimmedName;
+      await api.patch(`/files/${renameTarget.id}`, { name: finalName });
       message.success(t('renameSuccess'));
       setRenameModal(false);
       renameForm.resetFields();

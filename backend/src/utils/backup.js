@@ -264,7 +264,9 @@ function listZipBackups() {
     try {
       const stat = fs.statSync(fullPath);
       zips.push({ name: entry.name, path: fullPath, size: stat.size, createdAt: stat.birthtime.toISOString() });
-    } catch {}
+    } catch (err) {
+      logger.warn('listZipBackups: cannot stat file', { path: fullPath, error: err.message });
+    }
   }
   zips.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return zips;

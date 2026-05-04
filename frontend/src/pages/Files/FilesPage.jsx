@@ -255,6 +255,25 @@ export default function FilesPage() {
     }
   };
 
+  const closeMoveModal = () => {
+    setMoveModal(false);
+    setMoveTarget(null);
+    setMoveWorkshopId(null);
+    setMoveLineId(null);
+    setMoveMachineId(null);
+  };
+
+  const handleMoveWorkshopChange = (val) => {
+    setMoveWorkshopId(val || null);
+    setMoveLineId(null);
+    setMoveMachineId(null);
+  };
+
+  const handleMoveLineChange = (val) => {
+    setMoveLineId(val || null);
+    setMoveMachineId(null);
+  };
+
   const openMove = (record) => {
     setMoveTarget(record);
     // Pre-select current folder by finding workshop/line/machine from folderId
@@ -266,14 +285,23 @@ export default function FilesPage() {
       for (const ws of (folders.workshops || [])) {
         for (const line of (ws.lines || [])) {
           const machine = (line.machines || []).find(m => m.id === currentFolderId);
-          if (machine) { foundWorkshop = ws; foundLine = line; foundMachine = machine; break; }
+          if (machine) {
+              foundWorkshop = ws;
+              foundLine = line;
+              foundMachine = machine;
+              break;
+            }
         }
         if (foundMachine) break;
       }
       if (!foundMachine) {
         for (const line of (folders.lines || [])) {
           const machine = (line.machines || []).find(m => m.id === currentFolderId);
-          if (machine) { foundLine = line; foundMachine = machine; break; }
+          if (machine) {
+            foundLine = line;
+            foundMachine = machine;
+            break;
+          }
         }
       }
     }
@@ -288,11 +316,7 @@ export default function FilesPage() {
     try {
       await api.patch(`/files/${moveTarget.id}`, { folderId: moveMachineId || null });
       message.success(t('moveSuccess'));
-      setMoveModal(false);
-      setMoveTarget(null);
-      setMoveWorkshopId(null);
-      setMoveLineId(null);
-      setMoveMachineId(null);
+      closeMoveModal();
       fetchFiles();
     } catch (err) {
       message.error(err.response?.data?.message || t('error'));
@@ -911,7 +935,7 @@ export default function FilesPage() {
       <Modal
         title={t('moveFileTitle')}
         open={moveModal}
-        onCancel={() => { setMoveModal(false); setMoveTarget(null); setMoveWorkshopId(null); setMoveLineId(null); setMoveMachineId(null); }}
+        onCancel={closeMoveModal}
         footer={null}
         width={440}
       >
@@ -928,7 +952,7 @@ export default function FilesPage() {
                   placeholder={t('selectWorkshop')}
                   style={{ width: '100%' }}
                   value={moveWorkshopId}
-                  onChange={(val) => { setMoveWorkshopId(val || null); setMoveLineId(null); setMoveMachineId(null); }}
+                  onChange={handleMoveWorkshopChange}
                 >
                   {(folders.workshops || []).map(w => <Option key={w.id} value={w.id}>{w.name}</Option>)}
                 </Select>
@@ -941,7 +965,7 @@ export default function FilesPage() {
                 placeholder={t('selectLine')}
                 style={{ width: '100%' }}
                 value={moveLineId}
-                onChange={(val) => { setMoveLineId(val || null); setMoveMachineId(null); }}
+                onChange={handleMoveLineChange}
               >
                 {(moveWorkshopId
                   ? ((folders.workshops || []).find(w => w.id === moveWorkshopId)?.lines || [])
@@ -966,7 +990,7 @@ export default function FilesPage() {
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button onClick={() => { setMoveModal(false); setMoveTarget(null); setMoveWorkshopId(null); setMoveLineId(null); setMoveMachineId(null); }}>{t('cancel')}</Button>
+              <Button onClick={closeMoveModal}>{t('cancel')}</Button>
               <Button type="primary" loading={moveLoading} onClick={handleMove}>{t('save')}</Button>
             </div>
           </>

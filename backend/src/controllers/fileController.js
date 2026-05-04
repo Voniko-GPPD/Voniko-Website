@@ -673,11 +673,12 @@ async function renameFile(req, res) {
     }
   }
 
-  db.prepare(`UPDATE files SET name = ?, folder_id = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
-    .run(newName, resolvedFolderId, file.id);
-
+  // Capture originals before the update
   const oldName = file.name;
   const oldFolderId = file.folder_id;
+
+  db.prepare(`UPDATE files SET name = ?, folder_id = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
+    .run(newName, resolvedFolderId, file.id);
 
   if (name && name.trim() && newName !== oldName) {
     db.prepare(`

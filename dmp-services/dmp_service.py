@@ -4349,26 +4349,59 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
         if not entry.batch_id.strip():
             continue
 
-        # Fetch batch metadata from DMPDATA.mdb
-        try:
-            batch_rows = _read_dmpdata(
-                "SELECT * FROM para_pub WHERE id = ?", (entry.batch_id,)
-            )
-        except pyodbc.Error:
+        # Fetch batch metadata from DMPDATA.mdb.
+        # batch_id may be a 6-digit DDMMYY date (the agreed convention for column-A
+        # queries) rather than a literal para_pub.id.  When it matches that pattern,
+        # convert it to a proper date and query by fdrq first; fall back to an id
+        # lookup so that actual para_pub.id values still work.
+        batch_rows = []
+        _ddmmyy_match = re.fullmatch(r"\d{6}", entry.batch_id.strip())
+        if _ddmmyy_match:
+            _s = entry.batch_id.strip()
+            try:
+                _qdate = date(2000 + int(_s[4:6]), int(_s[2:4]), int(_s[0:2]))
+                try:
+                    batch_rows = _read_dmpdata(
+                        "SELECT * FROM para_pub WHERE fdrq = ?", (_qdate,)
+                    )
+                except pyodbc.Error:
+                    try:
+                        batch_rows = _read_dmpdata(
+                            "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE fdrq = ?",
+                            (_qdate,),
+                        )
+                    except pyodbc.Error as exc:
+                        logger.warning(
+                            "generate_dmp_perf_report: fdrq date query failed %s: %s",
+                            entry.batch_id, exc,
+                        )
+            except (ValueError, TypeError):
+                pass  # invalid DDMMYY — fall through to id lookup below
+
+        if not batch_rows:
+            # Direct id lookup (also handles non-DDMMYY batch_id values)
             try:
                 batch_rows = _read_dmpdata(
-                    "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE id = ?",
-                    (entry.batch_id,),
+                    "SELECT * FROM para_pub WHERE id = ?", (entry.batch_id,)
                 )
-            except pyodbc.Error as exc:
-                logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
-                continue
+            except pyodbc.Error:
+                try:
+                    batch_rows = _read_dmpdata(
+                        "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE id = ?",
+                        (entry.batch_id,),
+                    )
+                except pyodbc.Error as exc:
+                    logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
+                    continue
 
         if not batch_rows:
             logger.warning("generate_dmp_perf_report: batch not found: %s", entry.batch_id)
             continue
 
         batch = batch_rows[0]
+        # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
+        # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
+        actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
         # Extract metadata
         def _to_date(v) -> str:
@@ -4405,8 +4438,9 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
             if not trays:
                 continue
 
-            # Compute performance values for this group's trays
-            perf = _dmp_compute_group_perf(entry.batch_id, trays, ep_v)
+            # Compute performance values for this group's trays using the resolved
+            # para_pub.id (actual_batch_id) so that the para_singl lookup succeeds.
+            perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
 
             # Determine sheet name
             model_upper = entry.model.strip().upper()

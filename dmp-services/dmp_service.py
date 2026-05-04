@@ -33,6 +33,7 @@ DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
 DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
 DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
 DM2000_PERF_TEMPLATES_DIR: str = os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates")
+DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
 # Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
 # every request reads from the cached copy instead of making a new shadow copy.
 DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "../backend/data/dm2000_cache")
@@ -683,6 +684,24 @@ class PerfReportRequest(BaseModel):
     template_name: Optional[str] = None
 
 
+class DmpPerfGroup(BaseModel):
+    loai: str  # e.g. "UD", "HP", "UD+"
+    chuyen: str  # production-line number, e.g. "501"
+    trays: list[int] = Field(default=[])  # channel numbers (1-9); empty = auto-assigned
+
+
+class DmpPerfEntry(BaseModel):
+    batch_id: str  # para_pub.id
+    model: str  # e.g. "LR6", "LR03", "LR61", "9V"
+    groups: list[DmpPerfGroup]
+    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
+
+
+class DmpPerfReportRequest(BaseModel):
+    entries: list[DmpPerfEntry]
+    template_name: Optional[str] = None
+
+
 def render_excel_template(template_path: str, context: dict) -> bytes:
     wb = load_workbook(template_path)
     for ws in wb.worksheets:
@@ -1120,20 +1139,33 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                         header = _perf_col_header(ws, r_col, tag_row_idx) if r_col else ""
                         fdfs_col_map[fdfs_lbl] = (r_col, ur_col, header)
 
-                # Step 3: build date → row index map from column A
+                # Step 3: build date/label → row index map from column A.
+                # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".
+                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THANG", "3 THANG",
+                                   "3 THÁNG", "6 THÁNG"}
                 date_row_map: dict[str, int] = {}
                 for drow in ws.iter_rows(min_col=1, max_col=1):
                     for dcell in drow:
                         ds = _perf_normalize_date(dcell.value)
                         if ds:
                             date_row_map[ds] = dcell.row
+                        elif dcell.value is not None:
+                            # Capture special row labels (case-insensitive strip)
+                            raw_label = str(dcell.value).strip()
+                            up_label = raw_label.upper()
+                            if up_label in {s.upper() for s in _SPECIAL_LABELS}:
+                                date_row_map[up_label] = dcell.row
+                            elif raw_label:
+                                # Store any non-date text label as-is (upper) for lookup
+                                date_row_map[up_label] = dcell.row
 
                 # Step 4: write data to the matching date rows
                 for row_key in sorted_keys:
                     date_str, btype = row_key
                     row_data = date_type_map[row_key]
                     norm_date = _perf_normalize_date(date_str) or date_str.replace("/", "-")
-                    target_row = date_row_map.get(norm_date)
+                    # Try date first, then fall back to upper-cased label lookup
+                    target_row = date_row_map.get(norm_date) or date_row_map.get(date_str.upper())
                     if target_row is None:
                         continue
 
@@ -4047,6 +4079,294 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
     else:
         workbook_bytes = _build_perf_workbook(groups)
         filename = "perf_report.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── DMP Performance Report (Bảng theo dõi hiệu suất pin) ────────────────────
+
+
+def _resolve_dmp_perf_template_path(template_name: str) -> str:
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template name")
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if templates_dir.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail=f"Template not found: {template_name}")
+    result = (templates_dir / template_name).resolve()
+    if not str(result).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    return str(result)
+
+
+# Tray assignment by group count (fixed convention)
+_DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
+    1: [list(range(1, 10))],              # 9 trays
+    2: [list(range(1, 5)), list(range(6, 10))],   # 4 + 4, skip tray 5
+    3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
+}
+
+# Map special_type → row label for column-A matching in Excel template
+_SPECIAL_TYPE_LABEL: dict[str, str] = {
+    "6020": "6020",
+    "3thang": "3 THÁNG",
+    "6thang": "6 THÁNG",
+}
+
+
+def _dmp_compute_group_perf(
+    batch_id: str,
+    trays: list[int],
+    endpoint_voltage: Optional[float],
+) -> dict:
+    """Compute avg discharge hours and uniformity rate for a set of DMP trays.
+
+    Reads vidata for each tray from the cached DMPDATA.mdb (via para_singl to
+    resolve the correct per-batch MDB path), then interpolates the discharge
+    duration to *endpoint_voltage* for each tray.
+
+    Returns a dict with keys ``avg_hours``, ``avg_minutes``, ``uniform_rate``.
+    """
+    if not trays:
+        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+
+    # Look up cdmc (MDB path) for each tray from para_singl
+    try:
+        singl_rows = _read_dmpdata(
+            "SELECT baty, cdmc FROM para_singl WHERE sid = ?", (batch_id,)
+        )
+    except pyodbc.Error as exc:
+        logger.warning("_dmp_compute_group_perf: para_singl read failed: %s", exc)
+        singl_rows = []
+
+    cdmc_by_baty: dict[int, str] = {}
+    for row in singl_rows:
+        baty = _dm2000_get_value(row, "baty")
+        cdmc = _dm2000_get_value(row, "cdmc")
+        if baty is not None and cdmc:
+            cdmc_by_baty[int(baty)] = str(cdmc).strip()
+
+    # Compute time-at-endpoint for each tray
+    hours_list: list[float] = []
+    for tray in trays:
+        cdmc = cdmc_by_baty.get(tray)
+        if not cdmc:
+            logger.debug("_dmp_compute_group_perf: no cdmc for tray %d in batch %s", tray, batch_id)
+            continue
+        try:
+            telemetry = _read_telemetry(cdmc, tray)  # TIM already in hours after this call
+        except HTTPException as exc:
+            logger.warning("_dmp_compute_group_perf: telemetry read failed tray=%d: %s", tray, exc)
+            continue
+
+        if not telemetry:
+            continue
+
+        # Determine effective endpoint voltage
+        ep = endpoint_voltage
+        if ep is None:
+            # Fall back to minimum voltage in this curve
+            volt_vals = [
+                float(r.get("VOLT") or r.get("volt") or 0)
+                for r in telemetry
+                if r.get("VOLT") not in (None, "", "--")
+            ]
+            ep = min(volt_vals) if volt_vals else None
+        if ep is None:
+            continue
+
+        # Interpolate time when VOLT first crosses ep from above
+        points = sorted(
+            [
+                (float(r["TIM"]), float(r.get("VOLT") or r.get("volt") or 0))
+                for r in telemetry
+                if r.get("TIM") not in (None, "", "--")
+                and r.get("VOLT") not in (None, "", "--")
+            ],
+            key=lambda p: p[0],
+        )
+        crossed_h: Optional[float] = None
+        for i in range(1, len(points)):
+            t1, v1 = points[i - 1]
+            t2, v2 = points[i]
+            if v1 >= ep and v2 <= ep:
+                if v1 == v2:
+                    crossed_h = t1
+                else:
+                    crossed_h = t1 + (t2 - t1) * (v1 - ep) / (v1 - v2)
+                break
+        if crossed_h is not None:
+            hours_list.append(crossed_h)
+
+    if not hours_list:
+        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+
+    avg_h = sum(hours_list) / len(hours_list)
+    avg_m = avg_h * 60.0
+    uniform_rate: Optional[float] = None
+    if len(hours_list) >= 2 and avg_h > 0:
+        uniform_rate = round((1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2)
+
+    return {
+        "avg_hours": round(avg_h, 3),
+        "avg_minutes": round(avg_m, 3),
+        "uniform_rate": uniform_rate,
+    }
+
+
+@app.get("/dmp-perf-templates")
+def get_dmp_perf_templates():
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.post("/dmp-perf-template/upload")
+async def upload_dmp_perf_template(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
+    raw_name = Path(file.filename).name
+    stem = raw_name[:-5]
+    sanitized_stem = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)
+    sanitized_stem = re.sub(r'_+', '_', sanitized_stem).strip('_')
+    if not sanitized_stem:
+        sanitized_stem = "template"
+    safe_name = sanitized_stem + ".xlsx"
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    dest = templates_dir / safe_name
+    if not str(dest).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    contents = await file.read()
+    dest.write_bytes(contents)
+    return {"ok": True, "name": safe_name}
+
+
+@app.post("/dmp-perf-report/generate")
+def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
+    """Generate a DMP battery performance report (Bảng theo dõi hiệu suất pin).
+
+    Each entry maps a DMP batch (batch_id) to one or more production-line groups.
+    The result is written into the appropriate sheet/row/column of the Excel template.
+
+    Sheet name: ``{model} {chuyen}`` (e.g. "LR6 501"), or just ``{model}`` for
+    battery types that don't need a production-line filter (LR61, 9V).
+
+    Row key: date from para_pub.fdrq for normal entries, or a special label
+    ("6020", "3 THÁNG", "6 THÁNG") for special test rows.
+
+    Column: determined by matching para_pub.fdfs against the column headers in
+    the template (same logic as DM2000 perf report).
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    # groups[sheet_key][(row_label, loai)][fdfs_label] = {avg_hours, avg_minutes, uniform_rate}
+    groups: dict[str, dict] = {}
+
+    for entry in payload.entries:
+        if not entry.batch_id.strip():
+            continue
+
+        # Fetch batch metadata from DMPDATA.mdb
+        try:
+            batch_rows = _read_dmpdata(
+                "SELECT * FROM para_pub WHERE id = ?", (entry.batch_id,)
+            )
+        except pyodbc.Error:
+            try:
+                batch_rows = _read_dmpdata(
+                    "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE id = ?",
+                    (entry.batch_id,),
+                )
+            except pyodbc.Error as exc:
+                logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
+                continue
+
+        if not batch_rows:
+            logger.warning("generate_dmp_perf_report: batch not found: %s", entry.batch_id)
+            continue
+
+        batch = batch_rows[0]
+
+        # Extract metadata
+        def _to_date(v) -> str:
+            if v and hasattr(v, "strftime"):
+                return v.strftime("%Y-%m-%d")
+            s = str(v or "").strip()[:10].replace("/", "-")
+            return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
+
+        fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
+        fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
+        zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
+
+        # Parse endpoint voltage
+        ep_v: Optional[float] = None
+        if zzdy_raw:
+            tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
+            try:
+                ep_v = float(tok)
+            except (TypeError, ValueError):
+                ep_v = None
+
+        # Determine row label (date or special)
+        if entry.special_type in _SPECIAL_TYPE_LABEL:
+            row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+        else:
+            row_label = fdrq or entry.batch_id
+
+        # Auto-assign trays if not specified
+        n_groups = len(entry.groups)
+        auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+
+        for g_idx, grp in enumerate(entry.groups):
+            trays = grp.trays if grp.trays else (auto_trays[g_idx] if g_idx < len(auto_trays) else [])
+            if not trays:
+                continue
+
+            # Compute performance values for this group's trays
+            perf = _dmp_compute_group_perf(entry.batch_id, trays, ep_v)
+
+            # Determine sheet name
+            model_upper = entry.model.strip().upper()
+            # Models without production-line requirement use only the model name
+            no_chuyen_models = {"LR61", "9V", "6LR61"}
+            if model_upper in no_chuyen_models:
+                sheet_key = entry.model.strip()
+            else:
+                sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
+
+            # fdfs label for column matching
+            fdfs_label = fdfs if fdfs else grp.loai
+
+            row_key = (row_label, grp.loai)
+            groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+
+    if not groups:
+        raise HTTPException(
+            status_code=422, detail="No data could be extracted for any entry"
+        )
+
+    if not payload.template_name:
+        raise HTTPException(
+            status_code=400,
+            detail="template_name is required for DMP perf report generation"
+        )
+
+    template_path = _resolve_dmp_perf_template_path(payload.template_name)
+    workbook_bytes = _render_perf_template(template_path, groups)
+    filename = payload.template_name
     return StreamingResponse(
         BytesIO(workbook_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

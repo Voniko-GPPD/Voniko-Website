@@ -7,7 +7,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { ExperimentOutlined, DatabaseOutlined } from '@ant-design/icons';
+import { ExperimentOutlined, DatabaseOutlined, FileExcelOutlined } from '@ant-design/icons';
 import { fetchStations } from '../../api/dmpApi';
 import { useLang } from '../../contexts/LangContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -16,6 +16,7 @@ import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
 import DMPExportTab from './components/DMPExportTab';
 import DM2000Page from '../DM2000/DM2000Page';
+import DMPPerfReportTab from './components/DMPPerfReportTab';
 
 const SEARCH_TAB_KEY = 'search';
 const CURVE_TAB_KEY = 'chart';
@@ -202,6 +203,16 @@ export default function BatteryDMPPage() {
               </span>
             ),
             children: <DM2000Page />,
+          },
+          {
+            key: 'perf-report',
+            label: (
+              <span>
+                <FileExcelOutlined style={{ marginRight: 6 }} />
+                {t('dmpPerfReportTab')}
+              </span>
+            ),
+            children: <DMPPerfReportTab />,
           },
         ]}
       />

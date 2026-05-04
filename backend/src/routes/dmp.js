@@ -485,4 +485,160 @@ router.delete('/dm2000/options/:id', authenticateToken, requireAdmin, (req, res)
   }
 });
 
+// ─── DMP Performance Report Entries (stored in local SQLite) ─────────────────
+
+// GET /api/dmp/perf-entries?stationId=&dateFrom=&dateTo=
+router.get('/perf-entries', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  const { stationId, dateFrom, dateTo } = req.query;
+  try {
+    let sql = 'SELECT * FROM dmp_perf_entries WHERE 1=1';
+    const params = [];
+    if (stationId) { sql += ' AND station_id = ?'; params.push(stationId); }
+    if (dateFrom) { sql += ' AND report_date >= ?'; params.push(dateFrom); }
+    if (dateTo) { sql += ' AND report_date <= ?'; params.push(dateTo); }
+    sql += ' ORDER BY report_date DESC, created_at DESC';
+    const rows = db.prepare(sql).all(...params);
+    const entries = rows.map((r) => ({
+      ...r,
+      groups: JSON.parse(r.groups_json || '[]'),
+    }));
+    res.json({ entries });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/perf-entries — create a new entry
+router.post('/perf-entries', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const db = getDb();
+  const { station_id, batch_id, report_date, model, groups, special_type, raw_remark, notes } = req.body || {};
+  if (!station_id || !batch_id || !report_date || !model) {
+    return res.status(400).json({ error: 'station_id, batch_id, report_date, and model are required' });
+  }
+  try {
+    const id = uuidv4();
+    db.prepare(`
+      INSERT INTO dmp_perf_entries
+        (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      station_id,
+      batch_id,
+      report_date,
+      model,
+      JSON.stringify(groups || []),
+      special_type || 'normal',
+      raw_remark || null,
+      notes || null,
+      req.user.id,
+    );
+    res.json({ ok: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/perf-entries/:id — update an entry
+router.put('/perf-entries/:id', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  const { batch_id, report_date, model, groups, special_type, raw_remark, notes } = req.body || {};
+  try {
+    const result = db.prepare(`
+      UPDATE dmp_perf_entries SET
+        batch_id = COALESCE(?, batch_id),
+        report_date = COALESCE(?, report_date),
+        model = COALESCE(?, model),
+        groups_json = COALESCE(?, groups_json),
+        special_type = COALESCE(?, special_type),
+        raw_remark = ?,
+        notes = ?,
+        updated_at = datetime('now') || 'Z'
+      WHERE id = ?
+    `).run(
+      batch_id || null,
+      report_date || null,
+      model || null,
+      groups !== undefined ? JSON.stringify(groups) : null,
+      special_type || null,
+      raw_remark || null,
+      notes || null,
+      req.params.id,
+    );
+    if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dmp/perf-entries/:id — delete an entry
+router.delete('/perf-entries/:id', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const result = db.prepare('DELETE FROM dmp_perf_entries WHERE id = ?').run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dmp/dmp-perf-templates?stationId=
+router.get('/dmp-perf-templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dmp-perf-templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dmp/dmp-perf-template/upload?stationId=
+router.post('/dmp-perf-template/upload', authenticateToken, upload.single('file'), async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const form = new FormData();
+    form.append('file', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype,
+    });
+    const r = await axios.post(`${stationUrl}/dmp-perf-template/upload`, form, {
+      headers: form.getHeaders(),
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dmp/dmp-perf-report/generate?stationId= — generate DMP perf report
+router.post('/dmp-perf-report/generate', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dmp-perf-report/generate`, req.body, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_perf_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

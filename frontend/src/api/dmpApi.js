@@ -157,3 +157,89 @@ export async function downloadReport({ stationId, batchId, cdmc, channel, templa
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+// ─── DMP Performance Report API ───────────────────────────────────────────────
+
+export async function fetchPerfEntries(stationId, { dateFrom, dateTo } = {}) {
+  const params = new URLSearchParams({ stationId });
+  if (dateFrom) params.set('dateFrom', dateFrom);
+  if (dateTo) params.set('dateTo', dateTo);
+  const res = await apiFetch(`${BASE}/perf-entries?${params.toString()}`);
+  const data = await res.json();
+  return data.entries || [];
+}
+
+export async function createPerfEntry(entry) {
+  const res = await apiFetch(`${BASE}/perf-entries`, {
+    method: 'POST',
+    body: JSON.stringify(entry),
+  });
+  return res.json();
+}
+
+export async function updatePerfEntry(id, entry) {
+  const res = await apiFetch(`${BASE}/perf-entries/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(entry),
+  });
+  return res.json();
+}
+
+export async function deletePerfEntry(id) {
+  const res = await apiFetch(`${BASE}/perf-entries/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  return res.json();
+}
+
+export async function fetchDmpPerfTemplates(stationId) {
+  const res = await apiFetch(`${BASE}/dmp-perf-templates?stationId=${encodeURIComponent(stationId)}`);
+  const data = await res.json();
+  return data.templates || [];
+}
+
+export async function uploadDmpPerfTemplate(stationId, file) {
+  const token = localStorage.getItem('accessToken');
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/dmp-perf-template/upload?stationId=${encodeURIComponent(stationId)}`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Upload failed');
+  }
+  return res.json();
+}
+
+export async function downloadDmpPerfReport({ stationId, entries, templateName }) {
+  const token = localStorage.getItem('accessToken');
+  const res = await fetch(`${BASE}/dmp-perf-report/generate?stationId=${encodeURIComponent(stationId)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ entries, template_name: templateName }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Report generation failed');
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const nameMatch = disposition.match(/filename="([^"]+)"/);
+  const filename = nameMatch ? nameMatch[1] : 'dmp_perf_report.xlsx';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

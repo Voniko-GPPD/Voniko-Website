@@ -355,15 +355,45 @@ export default function BatteryPage() {
             const heiVal = val.toFixed(2);
             const idx = caliperIndexRef.current;
             const diaVal = caliperDiaRef.current;
+            const savedDia = diaVal !== '' ? parseFloat(diaVal) : null;
+            const savedHei = parseFloat(heiVal);
             setRecords(prev => {
               if (idx >= prev.length) return prev;
               const updated = [...prev];
               const rec = { ...updated[idx] };
-              if (diaVal !== '') rec.dia = parseFloat(diaVal);
-              rec.hei = parseFloat(heiVal);
+              if (savedDia !== null) rec.dia = savedDia;
+              rec.hei = savedHei;
               updated[idx] = rec;
               return updated;
             });
+
+            // Dim out-of-spec check
+            const spec_dia = diaSpecRef.current;
+            const spec_hei = heiSpecRef.current;
+            const diaBad = spec_dia && savedDia !== null && (savedDia < spec_dia.min || savedDia > spec_dia.max);
+            const heiBad = spec_hei && (savedHei < spec_hei.min || savedHei > spec_hei.max);
+            if (diaBad || heiBad) {
+              const parts = [];
+              if (diaBad) parts.push(`Đường kính ${savedDia.toFixed(2)} mm (chuẩn: ${spec_dia.min} – ${spec_dia.max})`);
+              if (heiBad) parts.push(`Chiều cao ${savedHei.toFixed(2)} mm (chuẩn: ${spec_hei.min} – ${spec_hei.max})`);
+              const currentRecord = recordsRef.current[idx];
+              setCaliperBuffer('');
+              setCaliperDia('');
+              setCaliperHei('');
+              setCaliperMode('dia');
+              setCaliperPhase(false);
+              setOutOfSpecModal({
+                record: currentRecord,
+                parts,
+                retryCount: 0,
+                type: 'dim',
+                batIdx: idx,
+                wasInSingleMode: caliperSingleModeRef.current,
+              });
+              setCaliperSingleMode(false);
+              return;
+            }
+
             if (caliperSingleModeRef.current) {
               // Single mode — stop after measuring one battery
               setCaliperPhase(false);
@@ -387,6 +417,10 @@ export default function BatteryPage() {
           }
         }
         setCaliperBuffer('');
+      } else if (e.key === 'Escape') {
+        setCaliperBuffer('');
+      } else if (e.key === 'Backspace' || e.key === 'Delete') {
+        setCaliperBuffer((prev) => prev.slice(0, -1));
       } else if (/^[\d]$/.test(e.key)) {
         setCaliperBuffer((prev) => prev + e.key);
       } else if ((e.key === '.' || e.key === ',') && !/[.,]/.test(caliperBuffer)) {
@@ -1155,8 +1189,20 @@ export default function BatteryPage() {
       },
     },
     { title: t('batteryTime'), dataIndex: 'time', key: 'time', width: 80, render: (v) => v != null ? String(v) : '-' },
-    { title: t('batteryCaliperDia'), dataIndex: 'dia', key: 'dia', width: 80, render: (v) => v != null ? parseFloat(v).toFixed(2) : '-' },
-    { title: t('batteryCaliperHei'), dataIndex: 'hei', key: 'hei', width: 80, render: (v) => v != null ? parseFloat(v).toFixed(2) : '-' },
+    {
+      title: t('batteryCaliperDia'), dataIndex: 'dia', key: 'dia', width: 80,
+      render: (v) => {
+        const bad = diaSpec && v != null && (v < diaSpec.min || v > diaSpec.max);
+        return <span style={{ color: bad ? '#ff4d4f' : undefined, fontWeight: bad ? 700 : undefined }}>{v != null ? parseFloat(v).toFixed(2) : '-'}</span>;
+      },
+    },
+    {
+      title: t('batteryCaliperHei'), dataIndex: 'hei', key: 'hei', width: 80,
+      render: (v) => {
+        const bad = heiSpec && v != null && (v < heiSpec.min || v > heiSpec.max);
+        return <span style={{ color: bad ? '#ff4d4f' : undefined, fontWeight: bad ? 700 : undefined }}>{v != null ? parseFloat(v).toFixed(2) : '-'}</span>;
+      },
+    },
     {
       title: t('actions'),
       key: 'actions',
@@ -1320,6 +1366,21 @@ export default function BatteryPage() {
   useEffect(() => { ocvSpecRef.current = ocvSpec; }, [ocvSpec]);
   const ccvSpecRef = useRef(ccvSpec);
   useEffect(() => { ccvSpecRef.current = ccvSpec; }, [ccvSpec]);
+
+  const diaSpec = React.useMemo(() => {
+    const min = parseFloat(diaMin);
+    const max = parseFloat(diaMax);
+    return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
+  }, [diaMin, diaMax]);
+  const heiSpec = React.useMemo(() => {
+    const min = parseFloat(heiMin);
+    const max = parseFloat(heiMax);
+    return (!isNaN(min) && !isNaN(max)) ? { min, max } : null;
+  }, [heiMin, heiMax]);
+  const diaSpecRef = useRef(diaSpec);
+  useEffect(() => { diaSpecRef.current = diaSpec; }, [diaSpec]);
+  const heiSpecRef = useRef(heiSpec);
+  useEffect(() => { heiSpecRef.current = heiSpec; }, [heiSpec]);
 
   const recordsMap = React.useMemo(() => {
     const map = {};
@@ -1886,8 +1947,13 @@ export default function BatteryPage() {
                             setOrderIdChangeModalVisible(true);
                           } else {
                             setOrderId(newVal);
-                            // Check immediately if the new value is a duplicate in history
-                            const normalized = normalizeOrderId(newVal);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          // Only show the duplicate modal when the user finishes typing (on blur)
+                          // so that entering "121" doesn't falsely trigger a warning for "12"
+                          if (records.length === 0) {
+                            const normalized = normalizeOrderId(e.target.value);
                             if (normalized !== '') {
                               const match = orderHistory.find(h =>
                                 normalizeOrderId(h.orderId) === normalized &&
@@ -2475,7 +2541,9 @@ export default function BatteryPage() {
                   rowClassName={(record) => {
                     const ocvBad = ocvSpec && record.ocv != null && (record.ocv < ocvSpec.min || record.ocv > ocvSpec.max);
                     const ccvBad = ccvSpec && record.ccv != null && (record.ccv < ccvSpec.min || record.ccv > ccvSpec.max);
-                    return (ocvBad || ccvBad) ? 'battery-row-bad' : '';
+                    const diaBad = diaSpec && record.dia != null && (record.dia < diaSpec.min || record.dia > diaSpec.max);
+                    const heiBad = heiSpec && record.hei != null && (record.hei < heiSpec.min || record.hei > heiSpec.max);
+                    return (ocvBad || ccvBad || diaBad || heiBad) ? 'battery-row-bad' : '';
                   }}
                   components={{
                     body: {
@@ -3149,7 +3217,9 @@ export default function BatteryPage() {
           rowClassName={(record) => {
             const ocvBad = ocvSpec && record.ocv != null && (record.ocv < ocvSpec.min || record.ocv > ocvSpec.max);
             const ccvBad = ccvSpec && record.ccv != null && (record.ccv < ccvSpec.min || record.ccv > ccvSpec.max);
-            return (ocvBad || ccvBad) ? 'battery-row-bad' : '';
+            const diaBad = diaSpec && record.dia != null && (record.dia < diaSpec.min || record.dia > diaSpec.max);
+            const heiBad = heiSpec && record.hei != null && (record.hei < heiSpec.min || record.hei > heiSpec.max);
+            return (ocvBad || ccvBad || diaBad || heiBad) ? 'battery-row-bad' : '';
           }}
         />
       </Modal>
@@ -3160,7 +3230,47 @@ export default function BatteryPage() {
         closable={false}
         maskClosable={false}
         keyboard={false}
-        footer={[
+        footer={outOfSpecModal?.type === 'dim' ? [
+          <Button
+            key="retest-now"
+            type="primary"
+            danger
+            onClick={() => {
+              const idx = outOfSpecModal.batIdx ?? 0;
+              caliperIndexRef.current = idx;
+              setCaliperIndex(idx);
+              setCaliperSingleMode(true);
+              setCaliperPhase(true);
+              setCaliperMode('dia');
+              setCaliperDia('');
+              setCaliperHei('');
+              setOutOfSpecModal(null);
+            }}
+          >
+            {t('batteryRetestNow')}
+          </Button>,
+          <Button
+            key="save-temp"
+            onClick={() => {
+              const idx = outOfSpecModal.batIdx ?? 0;
+              const wasSingle = outOfSpecModal.wasInSingleMode;
+              setOutOfSpecModal(null);
+              if (!wasSingle) {
+                const nextIdx = idx + 1;
+                caliperIndexRef.current = nextIdx;
+                setCaliperIndex(nextIdx);
+                setCaliperDia('');
+                setCaliperHei('');
+                setCaliperMode('dia');
+                if (nextIdx < recordsLengthRef.current) {
+                  setCaliperPhase(true);
+                }
+              }
+            }}
+          >
+            {t('batterySaveTemp')}
+          </Button>,
+        ] : [
           <Button
             key="retest-now"
             type="primary"

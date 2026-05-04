@@ -14,7 +14,8 @@ module.exports = {
     expiresIn: process.env.JWT_EXPIRES_IN || '8h',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
-  uploadDir: process.env.UPLOAD_DIR || './uploads',
+  // Uploads are stored inside dataDir so everything lives under backend/data
+  uploadDir: process.env.UPLOAD_DIR || './data/uploads',
   dataDir: process.env.DATA_DIR || './data',
   maxVersionsPerFile: parseInt(process.env.MAX_VERSIONS_PER_FILE) || 10,
   maxRetentionDays: parseInt(process.env.MAX_RETENTION_DAYS) || 365,
@@ -29,4 +30,13 @@ module.exports = {
   backupDir: process.env.BACKUP_DIR || './data/backups',
   backupSchedule: process.env.BACKUP_SCHEDULE || '0 3 * * *',
   backupRetention: parseInt(process.env.BACKUP_RETENTION) || 7,
+  // Weekly ZIP export: every 7 days a ZIP of the entire data directory is
+  // created and stored at zipBackupDir. Useful for protecting data before
+  // project updates. Defaults to ./data/zip_backups; override to an absolute
+  // path outside the project for maximum safety.
+  zipBackupDir: process.env.ZIP_BACKUP_DIR || './data/zip_backups',
+  zipBackupSchedule: process.env.ZIP_BACKUP_SCHEDULE || '0 4 * * 0', // Sunday 04:00
+  zipBackupRetention: parseInt(process.env.ZIP_BACKUP_RETENTION) || 4,
+  // How long (days) cache files (MDB copies) are kept without being refreshed
+  cacheRetentionDays: parseInt(process.env.CACHE_RETENTION_DAYS) || 365,
 };

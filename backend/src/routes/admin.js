@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
-const { runBackup, listBackups, deleteBackup, getDirSize } = require('../utils/backup');
+const { runBackup, listBackups, deleteBackup, getDirSize, createZipBackup, listZipBackups } = require('../utils/backup');
 const { getDb } = require('../models/database');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -374,6 +374,39 @@ router.post('/backups/:name/download-file', authenticateToken, requireAdmin, (re
     if (err.status === 404) return res.status(404).json({ message: err.message });
     logger.error('Failed to download file from backup', { error: err.message });
     res.status(500).json({ message: 'Failed to download file from backup', error: err.message });
+  }
+});
+
+// POST /api/admin/zip-backup — trigger a manual ZIP backup of the data directory
+router.post('/zip-backup', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await createZipBackup();
+    logger.info('Manual ZIP backup triggered', { user: req.user.id, zip: result.name });
+    res.json({
+      message: 'ZIP backup created successfully',
+      backup: {
+        name: result.name,
+        size: result.size,
+        createdAt: result.createdAt,
+        path: result.path,
+      },
+    });
+  } catch (err) {
+    logger.error('Manual ZIP backup failed', { error: err.message });
+    res.status(500).json({ message: 'ZIP backup failed', error: err.message });
+  }
+});
+
+// GET /api/admin/zip-backups — list available ZIP backups
+router.get('/zip-backups', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const zips = listZipBackups();
+    res.json({
+      data: zips.map((z) => ({ name: z.name, size: z.size, createdAt: z.createdAt, path: z.path })),
+    });
+  } catch (err) {
+    logger.error('Failed to list ZIP backups', { error: err.message });
+    res.status(500).json({ message: 'Failed to list ZIP backups', error: err.message });
   }
 });
 

@@ -92,8 +92,10 @@ async function uploadFile(req, res) {
   }
 
   const db = getDb();
-  const { commitMessage, description, filePath = '/', folderId, fileId } = req.body;
-  const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+  const { commitMessage, description, filePath = '/', folderId, fileId, customFileName } = req.body;
+  const originalName = customFileName
+    ? customFileName.trim()
+    : Buffer.from(req.file.originalname, 'latin1').toString('utf8');
 
   // Compute normalizedPath: derive from folder if folderId given
   let normalizedPath = filePath.startsWith('/') ? filePath : '/' + filePath;
@@ -626,4 +628,43 @@ async function unlockFile(req, res) {
   res.json({ message: 'File unlocked successfully' });
 }
 
-module.exports = { listFiles, uploadFile, getFile, deleteFile, getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog };
+async function renameFile(req, res) {
+  const db = getDb();
+  const { name } = req.body;
+  if (!name || !name.trim()) {
+    return res.status(400).json({ message: 'File name is required' });
+  }
+
+  const file = db.prepare('SELECT * FROM files WHERE id = ? AND is_deleted = 0').get(req.params.id);
+  if (!file) return res.status(404).json({ message: 'File not found' });
+
+  const canRename = req.user.role === 'admin' ||
+    ['engineer', 'user'].includes(req.user.role);
+  if (!canRename) {
+    return res.status(403).json({ message: 'Not authorized to rename this file' });
+  }
+
+  const newName = name.trim();
+  db.prepare(`UPDATE files SET name = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
+    .run(newName, file.id);
+
+  db.prepare(`
+    INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name, details)
+    VALUES (?, ?, 'rename_file', 'file', ?, ?, ?)
+  `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldName: file.name, newName }));
+
+  logger.info('File renamed', { fileId: file.id, oldName: file.name, newName, userId: req.user.id });
+
+  broadcast({
+    type: 'file_renamed',
+    fileId: file.id,
+    oldName: file.name,
+    newName,
+    userName: req.user.display_name,
+    timestamp: new Date().toISOString(),
+  });
+
+  res.json({ message: 'File renamed successfully', file: { id: file.id, name: newName } });
+}
+
+module.exports = { listFiles, uploadFile, getFile, deleteFile, getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog, renameFile };

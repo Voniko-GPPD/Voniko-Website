@@ -6,7 +6,7 @@ const os = require('os');
 const { authenticateToken } = require('../middleware/auth');
 const {
   listFiles, uploadFile, getFile, deleteFile,
-  getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog,
+  getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog, renameFile,
 } = require('../controllers/fileController');
 const { addFileTags, removeFileTag } = require('../controllers/tagController');
 const { subscribeFile, unsubscribeFile, getSubscribeStatus } = require('../controllers/subscriptionController');
@@ -23,6 +23,7 @@ router.get('/activity/export', authenticateToken, exportActivityLog);
 router.get('/', authenticateToken, listFiles);
 router.post('/', authenticateToken, upload.single('file'), uploadFile);
 router.get('/:id', authenticateToken, getFile);
+router.patch('/:id', authenticateToken, renameFile);
 router.delete('/:id', authenticateToken, deleteFile);
 router.post('/:id/lock', authenticateToken, lockFile);
 router.post('/:id/unlock', authenticateToken, unlockFile);

@@ -83,6 +83,11 @@ export default {
   selectFile: 'Chọn file',
   fileUploaded: 'Tải file lên thành công',
   fileDeleted: 'Đã xóa file',
+  renameFile: 'Đổi tên file',
+  renameFileTitle: 'Đổi tên file',
+  renameSuccess: 'Đổi tên file thành công',
+  newFileName: 'Tên file mới',
+  customFileName: 'Tên file (đổi tên tùy chọn)',
   filePathPlaceholder: 'VD: /chuyền-1/máy-A',
   descriptionPlaceholder: 'Mô tả file này...',
 

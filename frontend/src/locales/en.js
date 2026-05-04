@@ -83,6 +83,11 @@ export default {
   selectFile: 'Select File',
   fileUploaded: 'File uploaded successfully',
   fileDeleted: 'File deleted',
+  renameFile: 'Rename File',
+  renameFileTitle: 'Rename File',
+  renameSuccess: 'File renamed successfully',
+  newFileName: 'New File Name',
+  customFileName: 'File Name (optional rename)',
   filePathPlaceholder: 'e.g. /line-1/machine-A',
   descriptionPlaceholder: 'Describe this file...',
 

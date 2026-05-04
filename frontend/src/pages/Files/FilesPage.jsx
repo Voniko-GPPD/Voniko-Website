@@ -57,6 +57,14 @@ export default function FilesPage() {
   const [renameLoading, setRenameLoading] = useState(false);
   const [renameForm] = Form.useForm();
 
+  // Move state
+  const [moveModal, setMoveModal] = useState(false);
+  const [moveTarget, setMoveTarget] = useState(null);
+  const [moveLoading, setMoveLoading] = useState(false);
+  const [moveWorkshopId, setMoveWorkshopId] = useState(null);
+  const [moveLineId, setMoveLineId] = useState(null);
+  const [moveMachineId, setMoveMachineId] = useState(null);
+
   // Folder management state
   const [fmWorkshops, setFmWorkshops] = useState([]);
   const [fmLines, setFmLines] = useState([]);
@@ -247,6 +255,76 @@ export default function FilesPage() {
     }
   };
 
+  const closeMoveModal = () => {
+    setMoveModal(false);
+    setMoveTarget(null);
+    setMoveWorkshopId(null);
+    setMoveLineId(null);
+    setMoveMachineId(null);
+  };
+
+  const handleMoveWorkshopChange = (val) => {
+    setMoveWorkshopId(val || null);
+    setMoveLineId(null);
+    setMoveMachineId(null);
+  };
+
+  const handleMoveLineChange = (val) => {
+    setMoveLineId(val || null);
+    setMoveMachineId(null);
+  };
+
+  const openMove = (record) => {
+    setMoveTarget(record);
+    // Pre-select current folder by finding workshop/line/machine from folderId
+    const currentFolderId = record.folderId;
+    let foundWorkshop = null;
+    let foundLine = null;
+    let foundMachine = null;
+    if (currentFolderId) {
+      for (const ws of (folders.workshops || [])) {
+        for (const line of (ws.lines || [])) {
+          const machine = (line.machines || []).find(m => m.id === currentFolderId);
+          if (machine) {
+              foundWorkshop = ws;
+              foundLine = line;
+              foundMachine = machine;
+              break;
+            }
+        }
+        if (foundMachine) break;
+      }
+      if (!foundMachine) {
+        for (const line of (folders.lines || [])) {
+          const machine = (line.machines || []).find(m => m.id === currentFolderId);
+          if (machine) {
+            foundLine = line;
+            foundMachine = machine;
+            break;
+          }
+        }
+      }
+    }
+    setMoveWorkshopId(foundWorkshop?.id || null);
+    setMoveLineId(foundLine?.id || null);
+    setMoveMachineId(foundMachine?.id || null);
+    setMoveModal(true);
+  };
+
+  const handleMove = async () => {
+    setMoveLoading(true);
+    try {
+      await api.patch(`/files/${moveTarget.id}`, { folderId: moveMachineId || null });
+      message.success(t('moveSuccess'));
+      closeMoveModal();
+      fetchFiles();
+    } catch (err) {
+      message.error(err.response?.data?.message || t('error'));
+    } finally {
+      setMoveLoading(false);
+    }
+  };
+
   const allFilterLines = filterWorkshopId
     ? ((folders.workshops || []).find(w => w.id === filterWorkshopId)?.lines || [])
     : [
@@ -357,6 +435,11 @@ export default function FilesPage() {
           {(canEdit || isAdmin) && (
             <Tooltip title={t('renameFile')}>
               <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openRename(record)} />
+            </Tooltip>
+          )}
+          {(canEdit || isAdmin) && (
+            <Tooltip title={t('moveFile')}>
+              <Button type="text" size="small" icon={<FolderOutlined />} onClick={() => openMove(record)} />
             </Tooltip>
           )}
           {(canEdit || isAdmin) && (
@@ -846,6 +929,72 @@ export default function FilesPage() {
             <Button type="primary" htmlType="submit" loading={renameLoading}>{t('save')}</Button>
           </div>
         </Form>
+      </Modal>
+
+      {/* Move file modal */}
+      <Modal
+        title={t('moveFileTitle')}
+        open={moveModal}
+        onCancel={closeMoveModal}
+        footer={null}
+        width={440}
+      >
+        {moveTarget && (
+          <>
+            <div style={{ marginBottom: 12 }}>
+              <Text type="secondary">{moveTarget.name}</Text>
+            </div>
+            {(folders.workshops || []).length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 4 }}><Text>{t('selectWorkshop')}</Text></div>
+                <Select
+                  allowClear
+                  placeholder={t('selectWorkshop')}
+                  style={{ width: '100%' }}
+                  value={moveWorkshopId}
+                  onChange={handleMoveWorkshopChange}
+                >
+                  {(folders.workshops || []).map(w => <Option key={w.id} value={w.id}>{w.name}</Option>)}
+                </Select>
+              </div>
+            )}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ marginBottom: 4 }}><Text>{t('selectLine')}</Text></div>
+              <Select
+                allowClear
+                placeholder={t('selectLine')}
+                style={{ width: '100%' }}
+                value={moveLineId}
+                onChange={handleMoveLineChange}
+              >
+                {(moveWorkshopId
+                  ? ((folders.workshops || []).find(w => w.id === moveWorkshopId)?.lines || [])
+                  : [...(folders.workshops || []).flatMap(w => w.lines || []), ...(folders.lines || [])]
+                ).map(l => <Option key={l.id} value={l.id}>{l.name}</Option>)}
+              </Select>
+            </div>
+            {moveLineId && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ marginBottom: 4 }}><Text>{t('selectMachine')}</Text></div>
+                <Select
+                  allowClear
+                  placeholder={t('selectMachine')}
+                  style={{ width: '100%' }}
+                  value={moveMachineId}
+                  onChange={(val) => setMoveMachineId(val || null)}
+                >
+                  {([...(folders.workshops || []).flatMap(w => w.lines || []), ...(folders.lines || [])]
+                    .find(l => l.id === moveLineId)?.machines || []
+                  ).map(m => <Option key={m.id} value={m.id}>{m.name}</Option>)}
+                </Select>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <Button onClick={closeMoveModal}>{t('cancel')}</Button>
+              <Button type="primary" loading={moveLoading} onClick={handleMove}>{t('save')}</Button>
+            </div>
+          </>
+        )}
       </Modal>
     </div>
   );

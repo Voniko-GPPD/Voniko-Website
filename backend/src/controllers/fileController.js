@@ -639,45 +639,85 @@ async function unlockFile(req, res) {
 
 async function renameFile(req, res) {
   const db = getDb();
-  const { name } = req.body;
-  if (!name || !name.trim()) {
-    return res.status(400).json({ message: 'File name is required' });
+  const { name, folderId } = req.body;
+  if (!name && folderId === undefined) {
+    return res.status(400).json({ message: 'File name or folderId is required' });
   }
 
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND is_deleted = 0').get(req.params.id);
   if (!file) return res.status(404).json({ message: 'File not found' });
 
-  const canRename = req.user.role === 'admin' ||
+  const canEdit = req.user.role === 'admin' ||
     ['engineer', 'user'].includes(req.user.role);
-  if (!canRename) {
-    return res.status(403).json({ message: 'Not authorized to rename this file' });
+  if (!canEdit) {
+    return res.status(403).json({ message: 'Not authorized to edit this file' });
   }
 
-  const trimmedName = name.trim();
+  let newName = file.name;
+  if (name && name.trim()) {
+    const trimmedName = name.trim();
+    const oldExt = path.extname(file.name);
+    const newExt = path.extname(trimmedName);
+    newName = (!newExt && oldExt) ? trimmedName + oldExt : trimmedName;
+  }
+
+  // Validate folderId when provided (null means removing folder assignment)
+  let resolvedFolderId = file.folder_id;
+  if (folderId !== undefined) {
+    if (folderId === null || folderId === '') {
+      resolvedFolderId = null;
+    } else {
+      const folder = db.prepare('SELECT id FROM folders WHERE id = ? AND is_deleted = 0').get(folderId);
+      if (!folder) return res.status(400).json({ message: 'Folder not found' });
+      resolvedFolderId = folderId;
+    }
+  }
+
+  // Capture originals before the update
   const oldName = file.name;
-  const oldExt = path.extname(oldName);
-  const newExt = path.extname(trimmedName);
-  const newName = (!newExt && oldExt) ? trimmedName + oldExt : trimmedName;
-  db.prepare(`UPDATE files SET name = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
-    .run(newName, file.id);
+  const oldFolderId = file.folder_id;
 
-  db.prepare(`
-    INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name, details)
-    VALUES (?, ?, 'rename_file', 'file', ?, ?, ?)
-  `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldName, newName }));
+  db.prepare(`UPDATE files SET name = ?, folder_id = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
+    .run(newName, resolvedFolderId, file.id);
 
-  logger.info('File renamed', { fileId: file.id, oldName, newName, userId: req.user.id });
+  if (name && name.trim() && newName !== oldName) {
+    db.prepare(`
+      INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name, details)
+      VALUES (?, ?, 'rename_file', 'file', ?, ?, ?)
+    `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldName, newName }));
 
-  broadcast({
-    type: 'file_renamed',
-    fileId: file.id,
-    oldName,
-    newName,
-    userName: req.user.display_name,
-    timestamp: new Date().toISOString(),
-  });
+    logger.info('File renamed', { fileId: file.id, oldName, newName, userId: req.user.id });
 
-  res.json({ message: 'File renamed successfully', file: { id: file.id, name: newName } });
+    broadcast({
+      type: 'file_renamed',
+      fileId: file.id,
+      oldName,
+      newName,
+      userName: req.user.display_name,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  if (folderId !== undefined && resolvedFolderId !== oldFolderId) {
+    db.prepare(`
+      INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name, details)
+      VALUES (?, ?, 'move_file', 'file', ?, ?, ?)
+    `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldFolderId, newFolderId: resolvedFolderId }));
+
+    logger.info('File moved', { fileId: file.id, oldFolderId, newFolderId: resolvedFolderId, userId: req.user.id });
+
+    broadcast({
+      type: 'file_moved',
+      fileId: file.id,
+      fileName: newName,
+      oldFolderId,
+      newFolderId: resolvedFolderId,
+      userName: req.user.display_name,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  res.json({ message: 'File updated successfully', file: { id: file.id, name: newName, folderId: resolvedFolderId } });
 }
 
 module.exports = { listFiles, uploadFile, getFile, deleteFile, getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog, renameFile };

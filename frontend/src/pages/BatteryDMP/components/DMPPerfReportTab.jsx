@@ -53,18 +53,93 @@ function autoTrays(groupCount, groupIndex) {
   return [];
 }
 
+// Trays assigned by loai type (UD→1-4, UD+→6-9, HP→auto)
+function traysByLoai(loai) {
+  if (loai === 'UD') return [1, 2, 3, 4];
+  if (loai === 'UD+') return [6, 7, 8, 9];
+  return [];
+}
+
+/** Matches exactly 6 digits — used to identify the DDMMYY date token in a remark. */
+const SIX_DIGIT_RE = /^\d{6}$/;
+
+/**
+ * Parses a remark string such as "160226 LR6 UD501 UDP504" into:
+ *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}] }
+ *
+ * Rules:
+ *   - First token that is exactly 6 digits → DDMMYY date
+ *   - Token matching battery family (LR6, LR03, 9V, …) → model
+ *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [6,7,8,9] }
+ *   - "HP<n>"  → { loai: 'HP',  chuyen: '<n>', trays: [] }
+ *   - "UD<n>"  → { loai: 'UD',  chuyen: '<n>', trays: [1,2,3,4] }
+ */
+function parseRemark(raw) {
+  if (!raw || !raw.trim()) return { date: null, model: null, groups: [] };
+
+  const tokens = raw.trim().toUpperCase().split(/\s+/);
+  let date = null;
+  let model = null;
+  const groups = [];
+  let start = 0;
+
+  // Optional 6-digit date prefix (DDMMYY)
+  if (SIX_DIGIT_RE.test(tokens[0])) {
+    const s = tokens[0];
+    const day = parseInt(s.substring(0, 2), 10);
+    const month = parseInt(s.substring(2, 4), 10);
+    const year = 2000 + parseInt(s.substring(4, 6), 10);
+    // Validate by round-tripping through Date to catch impossible dates (e.g. Feb 30)
+    const candidate = new Date(year, month - 1, day);
+    if (
+      candidate.getFullYear() === year
+      && candidate.getMonth() === month - 1
+      && candidate.getDate() === day
+    ) {
+      date = candidate;
+    }
+    start = 1;
+  }
+
+  // LR\d{1,2} already covers LR6, LR03, LR61, etc.
+  const batteryRe = /^(LR\d{1,2}|9V)$/;
+  for (let i = start; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (batteryRe.test(tok)) {
+      model = tok;
+    } else if (/^UDP\d+$/.test(tok)) {
+      groups.push({ loai: 'UD+', chuyen: tok.substring(3), trays: [6, 7, 8, 9] });
+    } else if (/^HP\d+$/.test(tok)) {
+      groups.push({ loai: 'HP', chuyen: tok.substring(2), trays: [] });
+    } else if (/^UD\d+$/.test(tok)) {
+      groups.push({ loai: 'UD', chuyen: tok.substring(2), trays: [1, 2, 3, 4] });
+    }
+  }
+
+  return { date, model, groups };
+}
+
 // ─── Group editor ─────────────────────────────────────────────────────────────
 
-function GroupEditor({ groups, onChange }) {
+function GroupEditor({ groups, onChange, model }) {
   const { t } = useLang();
 
   const handleGroupChange = (idx, field, value) => {
-    const next = groups.map((g, i) => (i === idx ? { ...g, [field]: value } : g));
+    const next = groups.map((g, i) => {
+      if (i !== idx) return g;
+      const updated = { ...g, [field]: value };
+      // When loai changes, update trays automatically
+      if (field === 'loai') {
+        const derived = traysByLoai(value);
+        if (derived.length > 0) updated.trays = derived;
+      }
+      return updated;
+    });
     onChange(next);
   };
 
   const handleAddGroup = () => {
-    onChange([...groups, { loai: 'UD', chuyen: '', trays: [] }]);
+    onChange([...groups, { loai: 'UD', chuyen: '', trays: [1, 2, 3, 4] }]);
   };
 
   const handleRemoveGroup = (idx) => {
@@ -99,6 +174,9 @@ function GroupEditor({ groups, onChange }) {
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {t('dmpPerfGroupTrays')}: {(grp.trays?.length ? grp.trays : autoTrays(groups.length, idx)).join(',')}
             </Typography.Text>
+            {model && grp.chuyen && (
+              <Tag color="blue">{t('dmpPerfSheetLabel')}: {model} {grp.chuyen}</Tag>
+            )}
             <Button
               size="small"
               danger
@@ -120,17 +198,46 @@ function GroupEditor({ groups, onChange }) {
 function EntryForm({ initial, stationId, onSave, onCancel }) {
   const { t } = useLang();
   const [form] = Form.useForm();
-  const [groups, setGroups] = useState(initial?.groups || [{ loai: 'UD', chuyen: '', trays: [] }]);
+  const [groups, setGroups] = useState(initial?.groups || []);
   const [saving, setSaving] = useState(false);
+  const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
+
+  // Auto-parse remark on change and fill model + groups
+  const handleRemarkChange = (e) => {
+    const raw = e.target.value;
+    const parsed = parseRemark(raw);
+    if (parsed.model) {
+      form.setFieldValue('model', parsed.model);
+      setCurrentModel(parsed.model);
+    }
+    if (parsed.groups.length > 0) {
+      setGroups(parsed.groups);
+    }
+  };
+
+  const handleModelChange = (val) => {
+    setCurrentModel(val);
+  };
 
   const handleSave = async () => {
     try {
       const values = await form.validateFields();
       setSaving(true);
+
+      // Derive batch_id and report_date from the remark's date prefix
+      const parsed = parseRemark(values.raw_remark);
+      const reportDate = parsed.date
+        ? dayjs(parsed.date).format('YYYY-MM-DD')
+        : dayjs().format('YYYY-MM-DD');
+      const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
+      const batchId = SIX_DIGIT_RE.test(remarkTokens[0])
+        ? remarkTokens[0]
+        : dayjs().format('DDMMYY');
+
       const payload = {
         station_id: stationId,
-        batch_id: values.batch_id,
-        report_date: values.report_date ? values.report_date.format('YYYY-MM-DD') : '',
+        batch_id: batchId,
+        report_date: reportDate,
         model: values.model,
         groups,
         special_type: values.special_type || 'normal',
@@ -158,22 +265,23 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       size="small"
       layout="vertical"
       initialValues={{
-        batch_id: initial?.batch_id || '',
-        report_date: initial?.report_date ? dayjs(initial.report_date) : null,
         model: initial?.model || 'LR6',
         special_type: initial?.special_type || 'normal',
         raw_remark: initial?.raw_remark || '',
         notes: initial?.notes || '',
       }}
     >
-      <Form.Item name="batch_id" label={t('dmpPerfEntryBatchId')} rules={[{ required: true }]}>
-        <Input placeholder="e.g. 2026041814130402" />
-      </Form.Item>
-      <Form.Item name="report_date" label={t('dmpPerfEntryDate')} rules={[{ required: true }]}>
-        <DatePicker style={{ width: '100%' }} />
+      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
+        <Input
+          placeholder="e.g. 160226 LR6 UD501 UDP504"
+          onChange={handleRemarkChange}
+        />
       </Form.Item>
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>
-        <Select options={['LR6', 'LR03', 'LR61', '9V'].map((v) => ({ value: v, label: v }))} />
+        <Select
+          options={['LR6', 'LR03', 'LR61', '9V'].map((v) => ({ value: v, label: v }))}
+          onChange={handleModelChange}
+        />
       </Form.Item>
       <Form.Item name="special_type" label={t('dmpPerfEntrySpecialType')}>
         <Select
@@ -184,10 +292,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         />
       </Form.Item>
       <Form.Item label={t('dmpPerfEntryGroups')}>
-        <GroupEditor groups={groups} onChange={setGroups} />
-      </Form.Item>
-      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')}>
-        <Input placeholder="e.g. 150326 LR6 UD501 HP504" />
+        <GroupEditor groups={groups} onChange={setGroups} model={currentModel} />
       </Form.Item>
       <Form.Item name="notes" label={t('dmpPerfEntryNotes')}>
         <Input.TextArea rows={2} />
@@ -270,13 +375,6 @@ function RemarkRegistryTab({ stationId, selection }) {
       render: (v) => specialTag(v),
     },
     {
-      title: t('dmpPerfEntryBatchId'),
-      dataIndex: 'batch_id',
-      key: 'batch_id',
-      ellipsis: true,
-      width: 180,
-    },
-    {
       title: t('dmpPerfEntryRemark'),
       dataIndex: 'raw_remark',
       key: 'raw_remark',
@@ -308,10 +406,7 @@ function RemarkRegistryTab({ stationId, selection }) {
 
   if (editingId !== null) {
     const editing = editingId === 'new' ? null : entries.find((e) => e.id === editingId);
-    const prefill = editingId === 'new' && selection
-      ? { batch_id: selection.id || '', report_date: selection.fdrq || '' }
-      : null;
-    const initial = editing || prefill;
+    const initial = editing || null;
     return (
       <Card size="small" title={editingId === 'new' ? t('dmpPerfAddEntry') : t('dmpPerfEditEntry')}>
         <EntryForm

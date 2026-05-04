@@ -3192,9 +3192,10 @@ export default function BatteryPage() {
             danger
             onClick={() => {
               const idx = outOfSpecModal.batIdx ?? 0;
+              const wasSingle = outOfSpecModal.wasInSingleMode;
               caliperIndexRef.current = idx;
               setCaliperIndex(idx);
-              setCaliperSingleMode(true);
+              setCaliperSingleMode(wasSingle);
               setCaliperPhase(true);
               setCaliperMode('dia');
               setCaliperDia('');

@@ -86,6 +86,10 @@ function mapPresetsResponse(presets) {
       ocvMax: p.ocv_max,
       ccvMin: p.ccv_min,
       ccvMax: p.ccv_max,
+      diaMin: p.dia_min ?? null,
+      diaMax: p.dia_max ?? null,
+      heiMin: p.hei_min ?? null,
+      heiMax: p.hei_max ?? null,
     };
   }
   return presetsMap;
@@ -177,6 +181,10 @@ export default function BatteryPage() {
   const [ocvMax, setOcvMax] = useState(() => getInitialSession().ocvMax ?? null);
   const [ccvMin, setCcvMin] = useState(() => getInitialSession().ccvMin ?? null);
   const [ccvMax, setCcvMax] = useState(() => getInitialSession().ccvMax ?? null);
+  const [diaMin, setDiaMin] = useState(() => getInitialSession().diaMin ?? null);
+  const [diaMax, setDiaMax] = useState(() => getInitialSession().diaMax ?? null);
+  const [heiMin, setHeiMin] = useState(() => getInitialSession().heiMin ?? null);
+  const [heiMax, setHeiMax] = useState(() => getInitialSession().heiMax ?? null);
   const [presets, setPresets] = useState({});
   const [batteryTypes, setBatteryTypes] = useState([]);
   const [productLines, setProductLines] = useState([]);
@@ -184,6 +192,7 @@ export default function BatteryPage() {
     batteryType: '', productLine: '',
     resistance: 3.9, ocvTime: 1.0, loadTime: 0.3, kCoeff: 1.0,
     ocvMin: null, ocvMax: null, ccvMin: null, ccvMax: null,
+    diaMin: null, diaMax: null, heiMin: null, heiMax: null,
   });
   const [newTypeName, setNewTypeName] = useState('');
   const [newLineName, setNewLineName] = useState('');
@@ -1174,6 +1183,10 @@ export default function BatteryPage() {
         ocvMax: setupForm.ocvMax,
         ccvMin: setupForm.ccvMin,
         ccvMax: setupForm.ccvMax,
+        diaMin: setupForm.diaMin,
+        diaMax: setupForm.diaMax,
+        heiMin: setupForm.heiMin,
+        heiMax: setupForm.heiMax,
       });
       const res = await getBatteryPresets();
       setPresets(mapPresetsResponse(res.data.presets));
@@ -1496,11 +1509,13 @@ export default function BatteryPage() {
         sendMsg({ action: 'stop' });
       }
     }
-    // Auto-scroll the results table to the latest record
-    if (resultsTableRef.current) {
-      const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
-      if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
-    }
+    // Auto-scroll the results table to the latest record (defer to after DOM paint)
+    requestAnimationFrame(() => {
+      if (resultsTableRef.current) {
+        const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
+        if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
+      }
+    });
   }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
   // Auto-scroll results table to the currently measured caliper row
@@ -1540,12 +1555,16 @@ export default function BatteryPage() {
         ocvMax,
         ccvMin,
         ccvMax,
+        diaMin,
+        diaMax,
+        heiMin,
+        heiMax,
         chartSeriesByBattery,
         readingsByBattery,
       };
       localStorage.setItem('battery_session', JSON.stringify(sessionData));
     } catch { }
-  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax, chartSeriesByBattery, readingsByBattery]);
+  }, [records, chartData, chartDataOCV, chartDataCCV, orderId, testDate, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax, diaMin, diaMax, heiMin, heiMax, chartSeriesByBattery, readingsByBattery]);
 
   useEffect(() => {
     try {
@@ -1610,6 +1629,10 @@ export default function BatteryPage() {
       setOcvMax(preset.ocvMax);
       setCcvMin(preset.ccvMin);
       setCcvMax(preset.ccvMax);
+      setDiaMin(preset.diaMin ?? null);
+      setDiaMax(preset.diaMax ?? null);
+      setHeiMin(preset.heiMin ?? null);
+      setHeiMax(preset.heiMax ?? null);
     }
   }, [batteryType, productLine, presets]);
 
@@ -1809,7 +1832,18 @@ export default function BatteryPage() {
                 )}
                 <Row gutter={[8, 8]}>
                   <Col xs={24} sm={12}>
-                    <Form.Item label={t('batteryOrderId')} style={{ marginBottom: 0 }}>
+                    <Form.Item
+                      label={t('batteryOrderId')}
+                      style={{ marginBottom: 0 }}
+                      validateStatus={
+                        orderId.trim() && orderHistory.some(h => normalizeOrderId(h.orderId) === normalizeOrderId(orderId)) ? 'warning' : ''
+                      }
+                      help={
+                        orderId.trim() && orderHistory.some(h => normalizeOrderId(h.orderId) === normalizeOrderId(orderId))
+                          ? t('batteryOrderIdDuplicate')
+                          : undefined
+                      }
+                    >
                       <Input
                         value={orderId}
                         onChange={(e) => {
@@ -2007,6 +2041,54 @@ export default function BatteryPage() {
                       </Space.Compact>
                     </Form.Item>
                   </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t('batteryDiaStandard')} style={{ marginBottom: 0 }}>
+                      <Space.Compact style={{ width: '100%' }}>
+                        <InputNumber
+                          value={diaMin}
+                          onChange={setDiaMin}
+                          disabled={paramsDisabled}
+                          placeholder={t('from')}
+                          min={0}
+                          step={0.01}
+                          style={{ width: '50%' }}
+                        />
+                        <InputNumber
+                          value={diaMax}
+                          onChange={setDiaMax}
+                          disabled={paramsDisabled}
+                          placeholder={t('to')}
+                          min={0}
+                          step={0.01}
+                          style={{ width: '50%' }}
+                        />
+                      </Space.Compact>
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t('batteryHeiStandard')} style={{ marginBottom: 0 }}>
+                      <Space.Compact style={{ width: '100%' }}>
+                        <InputNumber
+                          value={heiMin}
+                          onChange={setHeiMin}
+                          disabled={paramsDisabled}
+                          placeholder={t('from')}
+                          min={0}
+                          step={0.01}
+                          style={{ width: '50%' }}
+                        />
+                        <InputNumber
+                          value={heiMax}
+                          onChange={setHeiMax}
+                          disabled={paramsDisabled}
+                          placeholder={t('to')}
+                          min={0}
+                          step={0.01}
+                          style={{ width: '50%' }}
+                        />
+                      </Space.Compact>
+                    </Form.Item>
+                  </Col>
                 </Row>
               </Card>
             </Col>
@@ -2191,6 +2273,32 @@ export default function BatteryPage() {
                   </Button>
                 </Col>
               </Row>
+
+              {/* Standards row — shown only when dia/hei standards are configured */}
+              {(diaMin != null || diaMax != null || heiMin != null || heiMax != null) && (
+                <Row gutter={[16, 8]} style={{ marginTop: 8 }} align="middle">
+                  <Col xs="auto">
+                    <Space direction="vertical" size={2}>
+                      <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                        {t('batteryDiaStandard')}
+                      </span>
+                      <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                        {diaMin != null && diaMax != null ? `${diaMin} – ${diaMax} mm` : diaMin != null ? `≥ ${diaMin} mm` : diaMax != null ? `≤ ${diaMax} mm` : '—'}
+                      </div>
+                    </Space>
+                  </Col>
+                  <Col xs="auto">
+                    <Space direction="vertical" size={2}>
+                      <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                        {t('batteryHeiStandard')}
+                      </span>
+                      <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#595959', padding: '2px 8px', background: '#fafafa', border: '1px solid #d9d9d9', borderRadius: 6, userSelect: 'none' }}>
+                        {heiMin != null && heiMax != null ? `${heiMin} – ${heiMax} mm` : heiMin != null ? `≥ ${heiMin} mm` : heiMax != null ? `≤ ${heiMax} mm` : '—'}
+                      </div>
+                    </Space>
+                  </Col>
+                </Row>
+              )}
             </Card>
           )}
 
@@ -2706,6 +2814,38 @@ export default function BatteryPage() {
                   </Space.Compact>
                 </Form.Item>
               </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label={t('batteryDiaStandard')} style={{ marginBottom: 0 }}>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <InputNumber
+                      value={setupForm.diaMin}
+                      onChange={(v) => setSetupForm(f => ({ ...f, diaMin: v }))}
+                      placeholder={t('from')} min={0} step={0.01} style={{ width: '50%' }}
+                    />
+                    <InputNumber
+                      value={setupForm.diaMax}
+                      onChange={(v) => setSetupForm(f => ({ ...f, diaMax: v }))}
+                      placeholder={t('to')} min={0} step={0.01} style={{ width: '50%' }}
+                    />
+                  </Space.Compact>
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label={t('batteryHeiStandard')} style={{ marginBottom: 0 }}>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <InputNumber
+                      value={setupForm.heiMin}
+                      onChange={(v) => setSetupForm(f => ({ ...f, heiMin: v }))}
+                      placeholder={t('from')} min={0} step={0.01} style={{ width: '50%' }}
+                    />
+                    <InputNumber
+                      value={setupForm.heiMax}
+                      onChange={(v) => setSetupForm(f => ({ ...f, heiMax: v }))}
+                      placeholder={t('to')} min={0} step={0.01} style={{ width: '50%' }}
+                    />
+                  </Space.Compact>
+                </Form.Item>
+              </Col>
               <Col xs={24}>
                 <Button type="primary" onClick={handleSavePreset}>
                   {t('batterySetupSave')}
@@ -2740,6 +2880,14 @@ export default function BatteryPage() {
                 {
                   title: `CCV (${t('from')}-${t('to')})`, key: 'ccv', width: 140,
                   render: (_, r) => r.ccvMin != null && r.ccvMax != null ? `${r.ccvMin} – ${r.ccvMax}` : '-',
+                },
+                {
+                  title: `${t('batteryCaliperDia')} (${t('from')}-${t('to')})`, key: 'dia', width: 140,
+                  render: (_, r) => r.diaMin != null && r.diaMax != null ? `${r.diaMin} – ${r.diaMax}` : '-',
+                },
+                {
+                  title: `${t('batteryCaliperHei')} (${t('from')}-${t('to')})`, key: 'hei', width: 140,
+                  render: (_, r) => r.heiMin != null && r.heiMax != null ? `${r.heiMin} – ${r.heiMax}` : '-',
                 },
                 {
                   title: t('actions'), key: 'actions', width: 140,

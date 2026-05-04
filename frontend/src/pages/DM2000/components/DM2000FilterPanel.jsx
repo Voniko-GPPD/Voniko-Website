@@ -73,11 +73,13 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       key: 'dis_condition',
       width: 240,
       render: (_, record) => {
-        if (record.fdfs?.trim()) return String(record.fdfs);
-        const resistance = record.load_resistance?.trim() ? `${record.load_resistance} ohm` : '';
-        const endpoint = record.endpoint_voltage?.trim() ? `to ${record.endpoint_voltage}V` : '';
-        const parts = [resistance, endpoint].filter(Boolean);
-        return parts.length > 0 ? parts.join(', ') : '-';
+        const resistance = String(record.load_resistance || '').trim();
+        const fdfs = String(record.fdfs || '').trim();
+        const endpoint = String(record.endpoint_voltage || '').trim();
+        const prefix = [resistance, fdfs].filter(Boolean).join(',');
+        const suffix = endpoint ? ` to ${endpoint}V` : '';
+        const full = prefix + suffix;
+        return full || '-';
       },
     },
     { title: t('dm2000Duration'), dataIndex: 'duration', key: 'duration', width: 120, render: (v) => (v != null && v !== '') ? String(v) : '-' },

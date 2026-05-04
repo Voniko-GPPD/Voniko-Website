@@ -30,6 +30,7 @@ import {
   createPerfEntry,
   deletePerfEntry,
   downloadDmpPerfReport,
+  fetchBatches,
   fetchDmpPerfTemplates,
   fetchPerfEntries,
   fetchStations,
@@ -194,6 +195,35 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
 
+  // Batch selector state — fetches real para_pub records from the DMP station
+  const [batches, setBatches] = useState([]);
+  const [loadingBatches, setLoadingBatches] = useState(false);
+  // explicitBatchId: the actual para_pub.id chosen from the dropdown (takes
+  // priority over the DDMMYY prefix derived from raw_remark)
+  const [explicitBatchId, setExplicitBatchId] = useState(
+    initial?.batch_id != null ? String(initial.batch_id) : null,
+  );
+
+  useEffect(() => {
+    if (!stationId) return;
+    setLoadingBatches(true);
+    fetchBatches(stationId)
+      .then(setBatches)
+      .catch(() => {})
+      .finally(() => setLoadingBatches(false));
+  }, [stationId]);
+
+  const handleBatchSelect = (value) => {
+    setExplicitBatchId(value != null ? String(value) : null);
+    if (value == null) return;
+    const batch = batches.find((b) => String(b.id) === String(value));
+    if (!batch) return;
+    // Auto-fill report_date from the batch's discharge date
+    if (batch.fdrq) {
+      form.setFieldValue('report_date_display', batch.fdrq);
+    }
+  };
+
   // Auto-parse remark on change and fill model + groups
   const handleRemarkChange = (e) => {
     const raw = e.target.value;
@@ -216,15 +246,27 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       const values = await form.validateFields();
       setSaving(true);
 
-      // Derive batch_id and report_date from the remark's date prefix
-      const parsed = parseRemark(values.raw_remark);
-      const reportDate = parsed.date
-        ? dayjs(parsed.date).format('YYYY-MM-DD')
-        : dayjs().format('YYYY-MM-DD');
-      const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
-      const batchId = SIX_DIGIT_RE.test(remarkTokens[0])
-        ? remarkTokens[0]
-        : dayjs().format('DDMMYY');
+      // Prefer the explicitly selected batch ID (real para_pub.id).
+      // Fall back to deriving batch_id from the DDMMYY prefix in raw_remark
+      // for backward-compatibility with manually entered remarks.
+      let batchId = explicitBatchId;
+      let reportDate;
+
+      if (batchId) {
+        // Use the selected batch's discharge date as the report date if available
+        const selectedBatch = batches.find((b) => String(b.id) === batchId);
+        reportDate = selectedBatch?.fdrq || dayjs().format('YYYY-MM-DD');
+      } else {
+        // Legacy: derive from the DDMMYY remark prefix
+        const parsed = parseRemark(values.raw_remark);
+        reportDate = parsed.date
+          ? dayjs(parsed.date).format('YYYY-MM-DD')
+          : dayjs().format('YYYY-MM-DD');
+        const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
+        batchId = SIX_DIGIT_RE.test(remarkTokens[0])
+          ? remarkTokens[0]
+          : dayjs().format('DDMMYY');
+      }
 
       const payload = {
         station_id: stationId,
@@ -263,9 +305,28 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         notes: initial?.notes || '',
       }}
     >
-      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
+      <Form.Item label={t('dmpPerfEntryBatchId')} required>
+        <Select
+          showSearch
+          allowClear
+          loading={loadingBatches}
+          placeholder={t('dmpPerfSelectBatch')}
+          value={explicitBatchId}
+          onChange={handleBatchSelect}
+          filterOption={(input, opt) =>
+            (opt?.label ?? '').toLowerCase().includes(input.toLowerCase())
+          }
+          options={(batches || []).map((b) => ({
+            value: String(b.id),
+            label: `${b.id}  ${b.fdrq || ''}  ${b.dcxh || b.remarks || ''}`.trim(),
+          }))}
+          style={{ width: '100%' }}
+          notFoundContent={loadingBatches ? null : t('dmpPerfNoBatches')}
+        />
+      </Form.Item>
+      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')}>
         <Input
-          placeholder="e.g. 160226 LR6 UD501 UDP504"
+          placeholder="e.g. LR6 UD501 UDP504"
           onChange={handleRemarkChange}
         />
       </Form.Item>
@@ -290,7 +351,13 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         <Input.TextArea rows={2} />
       </Form.Item>
       <Space>
-        <Button type="primary" icon={<SaveOutlined />} loading={saving} onClick={handleSave}>
+        <Button
+          type="primary"
+          icon={<SaveOutlined />}
+          loading={saving}
+          disabled={!explicitBatchId}
+          onClick={handleSave}
+        >
           {t('dmpPerfSaveEntry')}
         </Button>
         <Button onClick={onCancel}>{t('dmpPerfCancelEntry')}</Button>
@@ -306,6 +373,7 @@ function RemarkRegistryTab({ stationId, selection }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = none, 'new' = new form
+  const [newFromBatchId, setNewFromBatchId] = useState(null); // pre-fill batch for new form
   const [dateRange, setDateRange] = useState([null, null]);
 
   const load = useCallback(async () => {
@@ -338,7 +406,8 @@ function RemarkRegistryTab({ stationId, selection }) {
   };
 
   const handleAddFromBatch = () => {
-    if (!selection?.id) return;
+    if (!selection?.batchId) return;
+    setNewFromBatchId(String(selection.batchId));
     setEditingId('new');
   };
 
@@ -398,14 +467,15 @@ function RemarkRegistryTab({ stationId, selection }) {
 
   if (editingId !== null) {
     const editing = editingId === 'new' ? null : entries.find((e) => e.id === editingId);
-    const initial = editing || null;
+    // For a new entry triggered from a selected batch, pre-populate batch_id
+    const initial = editing || (newFromBatchId ? { batch_id: newFromBatchId } : null);
     return (
       <Card size="small" title={editingId === 'new' ? t('dmpPerfAddEntry') : t('dmpPerfEditEntry')}>
         <EntryForm
           initial={initial}
           stationId={stationId}
-          onSave={() => { setEditingId(null); load(); }}
-          onCancel={() => setEditingId(null)}
+          onSave={() => { setEditingId(null); setNewFromBatchId(null); load(); }}
+          onCancel={() => { setEditingId(null); setNewFromBatchId(null); }}
         />
       </Card>
     );
@@ -424,7 +494,7 @@ function RemarkRegistryTab({ stationId, selection }) {
         <Button icon={<PlusOutlined />} onClick={() => setEditingId('new')}>
           {t('dmpPerfAddEntry')}
         </Button>
-        {selection?.id && (
+        {selection?.batchId && (
           <Button onClick={handleAddFromBatch}>
             {t('dmpPerfAddFromBatch')}
           </Button>

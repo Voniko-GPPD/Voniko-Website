@@ -68,7 +68,7 @@ async function listFiles(req, res) {
         workshopName = f.grandparent_folder_name;
         folderPath = f.parent_folder_name
           ? `${f.parent_folder_name} / ${f.folder_name}`
-          : f.folder_name || null;
+          : f.folder_name;
       } else if (f.folder_name) {
         // No workshop ancestor found; fall back to original behaviour
         folderPath = f.parent_folder_name

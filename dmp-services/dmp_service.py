@@ -1830,9 +1830,20 @@ def get_batches(year: Optional[int] = None):
             logger.error("get_batches: fallback query also failed: %s", exc)
             raise HTTPException(status_code=500, detail="Database query failed") from exc
 
+    # DMP databases use a single dash "-" as a null/empty placeholder for string
+    # fields (distinct from the DM2000 double-dash "--").  This helper returns True
+    # when a value should be treated as absent so that fallback logic can run.
+    def _dmp_is_empty(v) -> bool:
+        if v is None:
+            return True
+        return str(v).strip() in ("", "-", "--")
+
     # Build a channel-count map from para_singl in a single query so every batch
     # row can be annotated without an N+1 per-batch lookup.
     # COUNT(*) is used so the query never depends on a specific column name.
+    # Some Access ODBC versions do not honour the alias and return the aggregate
+    # column under a generated name (e.g. "Expr1000").  When the alias lookup
+    # fails we fall back to the second column by ordinal position.
     # _dm2000_get_value is used for all column lookups on pyodbc result rows so
     # that Access databases that return column names in uppercase are handled
     # identically to lowercase schemas.
@@ -1843,10 +1854,16 @@ def get_batches(year: Optional[int] = None):
         for cc in cc_rows:
             sid = _dm2000_get_value(cc, "sid")
             cnt = _dm2000_get_value(cc, "channel_count")
+            # Fallback: some Access ODBC versions ignore the alias and return the
+            # aggregate under a generated name; get it by ordinal position instead.
+            if cnt is None:
+                vals = list(cc.values())
+                if len(vals) >= 2:
+                    cnt = vals[1]
             if sid is not None and cnt is not None:
                 channel_counts[str(sid)] = int(cnt)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("get_batches: could not load channel counts from para_singl: %s", exc)
+        logger.warning("get_batches: could not load channel counts from para_singl: %s", exc)
 
     # Build a first-cdmc lookup from para_singl so the database path can be
     # derived for batches where para_pub.cdmc is NULL.
@@ -1861,24 +1878,35 @@ def get_batches(year: Optional[int] = None):
         for cr in cdmc_rows:
             sid = _dm2000_get_value(cr, "sid")
             cdmc = _dm2000_get_value(cr, "cdmc")
-            if sid is not None and cdmc:
+            # Skip dash-placeholder values used by DMP software for empty fields.
+            if sid is not None and cdmc and not _dmp_is_empty(cdmc):
                 sid_str = str(sid)
                 if sid_str not in singl_cdmc_by_sid:  # keep first occurrence per sid
                     singl_cdmc_by_sid[sid_str] = str(cdmc).strip()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("get_batches: could not load para_singl cdmc: %s", exc)
+        logger.warning("get_batches: could not load para_singl cdmc: %s", exc)
 
     # Load per-channel extras from para_singl.
-    # scdw = manufacturer, dcph = serial/battery id, dcmc = battery model name,
-    # scrq = sample/start date.  para_singl stores one row per channel.
-    # Uses a plain SELECT (no GROUP BY / MIN aggregate) to avoid the Access ODBC
-    # aggregate-alias quirk; the first non-null value per sid is chosen in Python.
+    # cdmc  = session archive file name (often equals para_pub.id in many schemas)
+    # scdw  = manufacturer, dcph = serial/battery id, dcmc = battery model name,
+    # scrq  = sample/start date, smark = per-channel remark.
+    # para_singl stores one row per channel; the first non-null value per sid is
+    # chosen in Python to avoid the Access ODBC aggregate-alias quirk.
     # Note: jstj is a para_pub column (not para_singl) and is already present
     # in each batch row from the SELECT * above.
+    #
+    # Two lookup dicts are built from the same rows:
+    #   singl_extras_by_sid  — keyed by str(para_singl.sid)
+    #   singl_extras_by_cdmc — keyed by para_singl.cdmc (archive name).
+    # Many DMP installations use a sequential integer for para_singl.sid that
+    # does NOT match para_pub.id.  In those schemas cdmc (the session archive
+    # filename) is the same value as para_pub.id, so the secondary lookup by
+    # cdmc can resolve the extras even when the sid lookup fails.
     singl_extras_by_sid: dict[str, dict] = {}
+    singl_extras_by_cdmc: dict[str, dict] = {}
     try:
         extras_rows = _read_dmpdata(
-            "SELECT sid, scdw, dcph, dcmc, scrq"
+            "SELECT sid, cdmc, scdw, dcph, dcmc, scrq, smark"
             " FROM para_singl WHERE sid IS NOT NULL",
         )
         for er in extras_rows:
@@ -1886,16 +1914,44 @@ def get_batches(year: Optional[int] = None):
             if sid is None:
                 continue
             sid_str = str(sid)
+
+            # Session archive name — used to key the secondary lookup.
+            cdmc_er = _dm2000_get_value(er, "cdmc")
+
+            # --- primary lookup: keyed by para_singl.sid ---
             if sid_str not in singl_extras_by_sid:
                 singl_extras_by_sid[sid_str] = {}
             entry = singl_extras_by_sid[sid_str]
-            for field_name in ("scdw", "dcph", "dcmc", "scrq"):
+            for field_name in ("scdw", "dcph", "dcmc", "scrq", "smark"):
                 if not entry.get(field_name):
                     field_value = _dm2000_get_value(er, field_name)
-                    if field_value is not None:
+                    # Ignore dash-placeholder values; treat them as absent so that
+                    # a later channel with a real value can fill the slot.
+                    if field_value is not None and not _dmp_is_empty(field_value):
                         entry[field_name] = field_value
+
+            # --- secondary lookup: keyed by para_singl.cdmc (archive name) ---
+            if cdmc_er and not _dmp_is_empty(cdmc_er):
+                cdmc_key = str(cdmc_er).strip()
+                if cdmc_key not in singl_extras_by_cdmc:
+                    singl_extras_by_cdmc[cdmc_key] = {}
+                entry_c = singl_extras_by_cdmc[cdmc_key]
+                for field_name in ("scdw", "dcph", "dcmc", "scrq", "smark"):
+                    if not entry_c.get(field_name):
+                        field_value = _dm2000_get_value(er, field_name)
+                        if field_value is not None and not _dmp_is_empty(field_value):
+                            entry_c[field_name] = field_value
     except Exception as exc:  # noqa: BLE001
-        logger.debug("get_batches: could not load para_singl extras: %s", exc)
+        logger.warning("get_batches: could not load para_singl extras: %s", exc)
+
+    # Derive channel_counts_by_cdmc from the already-built dicts without an
+    # extra query.  This allows the channel count to be found via the archive
+    # name when para_singl.sid does not match para_pub.id.
+    channel_counts_by_cdmc: dict[str, int] = {
+        cdmc_v: channel_counts[sid_k]
+        for sid_k, cdmc_v in singl_cdmc_by_sid.items()
+        if sid_k in channel_counts
+    }
 
     # Date fields in para_pub that need serialisation to string
     _DATE_FIELDS = ("fdrq", "madedate", "scrq")
@@ -1937,47 +1993,59 @@ def get_batches(year: Optional[int] = None):
         # battery model name, and sample date.
         batch_id = _dm2000_get_value(row, "id")
         singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
-        # Fallback: some schemas store para_singl.sid as the cdmc session filename,
+        # Fallback 1: some schemas store para_singl.sid as the cdmc session filename,
         # not the numeric batch id — try a cdmc-keyed lookup when the id lookup fails.
         if singl_ext is None:
             _cdmc_key = str(_dm2000_get_value(row, "cdmc") or "").strip()
             if _cdmc_key:
                 singl_ext = singl_extras_by_sid.get(_cdmc_key)
+        # Fallback 2: try the secondary cdmc-keyed extras dict.  In schemas where
+        # para_singl.cdmc (archive name) equals para_pub.id this resolves extras
+        # even when para_singl.sid is a different sequential number.
+        if singl_ext is None and batch_id is not None:
+            singl_ext = singl_extras_by_cdmc.get(str(batch_id))
         if singl_ext:
             scdw_val = _dm2000_get_value(singl_ext, "scdw")
-            if scdw_val is not None:
+            if scdw_val is not None and not _dmp_is_empty(scdw_val):
                 row["manufacturer"] = str(scdw_val).strip()
             # dcmc is the battery model name stored per-channel; use it as the
             # batch name when no name has been set yet.
             dcmc_val_singl = _dm2000_get_value(singl_ext, "dcmc")
-            if dcmc_val_singl is not None and not row.get("name"):
+            if dcmc_val_singl is not None and not _dmp_is_empty(dcmc_val_singl) and _dmp_is_empty(row.get("name")):
                 row["name"] = str(dcmc_val_singl).strip()
             # scrq is the sample/start date from para_singl; use it as madedate.
             scrq_val = _dm2000_get_value(singl_ext, "scrq")
-            if scrq_val is not None and not row.get("madedate"):
+            if scrq_val is not None and _dmp_is_empty(row.get("madedate")):
                 row["madedate"] = _to_date_str(scrq_val)
 
         # Serial No comes from para_singl.dcph.
         if singl_ext:
             dcph_val = _dm2000_get_value(singl_ext, "dcph")
-            if dcph_val is not None and not row.get("serialno"):
+            if dcph_val is not None and not _dmp_is_empty(dcph_val) and _dmp_is_empty(row.get("serialno")):
                 row["serialno"] = str(dcph_val).strip()
 
-        # Remark comes from para_pub.bz.
+        # Remark: prefer para_pub.bz (batch-level remark); fall back to
+        # para_singl.smark (per-channel remark used by many DMP installations).
         bz_pub = _dm2000_get_value(row, "bz")
-        if bz_pub not in (None, ""):
+        if not _dmp_is_empty(bz_pub):
             row["remarks"] = str(bz_pub).strip()
+        elif singl_ext:
+            smark_val = _dm2000_get_value(singl_ext, "smark")
+            if not _dmp_is_empty(smark_val):
+                row["remarks"] = str(smark_val).strip()
 
         # para_pub does not have a cdmc column.  The session .mdb file name is
         # stored in para_singl.cdmc and was pre-fetched into singl_cdmc_by_sid.
         # Use that as the session identifier; fall back to the batch id itself.
         cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "") if batch_id is not None else ""
-        if not cdmc_val and batch_id is not None:
+        # Treat a dash placeholder from the database as absent so the batch-id
+        # fallback below can provide a meaningful session identifier.
+        if _dmp_is_empty(cdmc_val) and batch_id is not None:
             cdmc_val = str(batch_id)
         if cdmc_val:
-            if not row.get("name"):
+            if _dmp_is_empty(row.get("name")):
                 row["name"] = cdmc_val
-            if not row.get("database"):
+            if _dmp_is_empty(row.get("database")):
                 row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb")
 
         # Expose archname (= batch id) so the frontend keyword search can use it.
@@ -1986,10 +2054,13 @@ def get_batches(year: Optional[int] = None):
 
         # Attach the pre-computed channel count for this batch.
         # Try by numeric batch id first; fall back to cdmc key for schemas where
-        # para_singl.sid stores the session filename rather than the numeric id.
+        # para_singl.sid stores the session filename rather than the numeric id;
+        # finally try channel_counts_by_cdmc when cdmc (archive name) == batch_id.
         _cc = channel_counts.get(str(batch_id)) if batch_id is not None else None
         if _cc is None and cdmc_val:
             _cc = channel_counts.get(cdmc_val)
+        if _cc is None and batch_id is not None:
+            _cc = channel_counts_by_cdmc.get(str(batch_id))
         row["channel_count"] = _cc
 
         if year is not None and row_year != year:

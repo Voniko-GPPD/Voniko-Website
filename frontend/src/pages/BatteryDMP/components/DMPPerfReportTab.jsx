@@ -209,7 +209,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
     setLoadingBatches(true);
     fetchBatches(stationId)
       .then(setBatches)
-      .catch(() => {})
+      .catch((err) => notification.warning({ message: t('dmpPerfNoBatches'), description: err.message }))
       .finally(() => setLoadingBatches(false));
   }, [stationId]);
 
@@ -316,10 +316,10 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
           filterOption={(input, opt) =>
             (opt?.label ?? '').toLowerCase().includes(input.toLowerCase())
           }
-          options={(batches || []).map((b) => ({
-            value: String(b.id),
-            label: `${b.id}  ${b.fdrq || ''}  ${b.dcxh || b.remarks || ''}`.trim(),
-          }))}
+          options={(batches || []).map((b) => {
+            const parts = [String(b.id), b.fdrq, b.dcxh || b.remarks].filter(Boolean);
+            return { value: String(b.id), label: parts.join(' – ') };
+          })}
           style={{ width: '100%' }}
           notFoundContent={loadingBatches ? null : t('dmpPerfNoBatches')}
         />

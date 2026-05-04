@@ -1502,6 +1502,11 @@ export default function BatteryPage() {
 
   // Out-of-spec detection — only fires when a new record is added
   useEffect(() => {
+    if (records.length < prevRecordsLenRef.current) {
+      // Records were cleared/reset — sync the ref so the next new record is detected correctly
+      prevRecordsLenRef.current = records.length;
+      return;
+    }
     if (records.length <= prevRecordsLenRef.current) return;
     prevRecordsLenRef.current = records.length;
     const latest = records[records.length - 1];

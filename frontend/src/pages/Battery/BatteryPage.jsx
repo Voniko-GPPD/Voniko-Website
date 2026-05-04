@@ -1490,7 +1490,10 @@ export default function BatteryPage() {
   }, [readingsByBattery]);
 
   const prevRecordsLenRef = useRef(records.length);
+  const prevRecordsForScrollRef = useRef(records);
   const resultsTableRef = useRef(null);
+
+  // Out-of-spec detection — only fires when a new record is added
   useEffect(() => {
     if (records.length <= prevRecordsLenRef.current) return;
     prevRecordsLenRef.current = records.length;
@@ -1509,25 +1512,41 @@ export default function BatteryPage() {
         sendMsg({ action: 'stop' });
       }
     }
-    // Auto-scroll the results table to the latest record (defer to after DOM paint)
-    requestAnimationFrame(() => {
-      if (resultsTableRef.current) {
-        const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
-        if (tableBody) tableBody.scrollTop = tableBody.scrollHeight;
-      }
-    });
   }, [records, ocvSpec, ccvSpec, t, sendMsg]);
 
-  // Auto-scroll results table to the currently measured caliper row
+  // Unified auto-scroll: scroll to whichever row was most recently added or modified.
+  // Covers: new OCV/CCV record, caliper filling dia/hei, and retest/edit of existing rows.
   useEffect(() => {
-    if (!caliperPhase || !resultsTableRef.current) return;
-    const tableBody = resultsTableRef.current.querySelector('.ant-table-body');
-    if (!tableBody) return;
-    const currentRecord = records[caliperIndex];
-    if (!currentRecord) return;
-    const row = tableBody.querySelector(`tr[data-row-key="${currentRecord.id}"]`);
-    if (row) row.scrollIntoView({ block: 'nearest' });
-  }, [caliperIndex, caliperPhase, records]);
+    const prev = prevRecordsForScrollRef.current;
+    prevRecordsForScrollRef.current = records;
+    if (!resultsTableRef.current || records.length === 0) return;
+
+    let targetId = null;
+    if (caliperPhase && records[caliperIndex]) {
+      // Caliper phase: always track the row currently being measured
+      targetId = records[caliperIndex].id;
+    } else if (records.length > prev.length) {
+      // New record appended (OCV/CCV phase)
+      targetId = records[records.length - 1].id;
+    } else {
+      // Existing record modified (edit, retest, caliper write-back, etc.)
+      // Scan from end to find the first changed row by reference
+      for (let i = records.length - 1; i >= 0; i--) {
+        if (records[i] !== prev[i]) {
+          targetId = records[i].id;
+          break;
+        }
+      }
+    }
+
+    if (!targetId) return;
+    requestAnimationFrame(() => {
+      const tableBody = resultsTableRef.current?.querySelector('.ant-table-body');
+      if (!tableBody) return;
+      const row = tableBody.querySelector(`tr[data-row-key="${targetId}"]`);
+      if (row) row.scrollIntoView({ block: 'nearest' });
+    });
+  }, [records, caliperPhase, caliperIndex]);
 
   // Auto-scroll voltage chart to show the latest data when autoScroll is enabled
   useEffect(() => {

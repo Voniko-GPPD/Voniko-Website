@@ -256,6 +256,26 @@ function createTables() {
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_order_id ON battery_order_history(order_id);
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_saved_at ON battery_order_history(saved_at);
     CREATE INDEX IF NOT EXISTS idx_battery_order_history_created_by ON battery_order_history(created_by);
+
+    -- DMP performance report entries (Bảng theo dõi hiệu suất pin)
+    CREATE TABLE IF NOT EXISTS dmp_perf_entries (
+      id TEXT PRIMARY KEY,
+      station_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      model TEXT NOT NULL,
+      groups_json TEXT NOT NULL DEFAULT '[]',
+      special_type TEXT NOT NULL DEFAULT 'normal',
+      raw_remark TEXT,
+      notes TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dmp_perf_entries_station ON dmp_perf_entries(station_id);
+    CREATE INDEX IF NOT EXISTS idx_dmp_perf_entries_date ON dmp_perf_entries(report_date);
   `);
 
   // Safe migration: add folder_id column to files if not present

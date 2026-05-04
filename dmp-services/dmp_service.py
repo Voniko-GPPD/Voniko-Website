@@ -4355,11 +4355,17 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
         # convert it to a proper date and query by fdrq first; fall back to an id
         # lookup so that actual para_pub.id values still work.
         batch_rows = []
-        _ddmmyy_match = re.fullmatch(r"\d{6}", entry.batch_id.strip())
+        _bid = entry.batch_id.strip()
+        _ddmmyy_match = re.fullmatch(r"\d{6}", _bid)
         if _ddmmyy_match:
-            _s = entry.batch_id.strip()
+            _s = _bid
             try:
-                _qdate = date(2000 + int(_s[4:6]), int(_s[2:4]), int(_s[0:2]))
+                _yy = int(_s[4:6])
+                # Sliding-window century: treat YY within 50 years of today as 2000s,
+                # anything older as 1900s (covers the practical 2000-2099 range of DMP data).
+                _cur_yy = date.today().year % 100
+                _century = 2000 if (_yy - _cur_yy) % 100 <= 50 else 1900
+                _qdate = date(_century + _yy, int(_s[2:4]), int(_s[0:2]))
                 try:
                     batch_rows = _read_dmpdata(
                         "SELECT * FROM para_pub WHERE fdrq = ?", (_qdate,)

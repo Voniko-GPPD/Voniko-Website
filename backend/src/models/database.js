@@ -229,6 +229,10 @@ function createTables() {
       ocv_max REAL,
       ccv_min REAL,
       ccv_max REAL,
+      dia_min REAL,
+      dia_max REAL,
+      hei_min REAL,
+      hei_max REAL,
       created_by TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
       updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
@@ -291,6 +295,16 @@ function createTables() {
     db.exec('ALTER TABLE files ADD COLUMN locked_by TEXT DEFAULT NULL');
     db.exec('ALTER TABLE files ADD COLUMN locked_at TEXT DEFAULT NULL');
     db.exec('ALTER TABLE files ADD COLUMN lock_reason TEXT DEFAULT NULL');
+  }
+
+  // Safe migration: add dia/hei standard columns to battery_presets if not present
+  const presetColumns = db.prepare("PRAGMA table_info(battery_presets)").all();
+  const presetColNames = presetColumns.map(c => c.name);
+  if (!presetColNames.includes('dia_min')) {
+    db.exec('ALTER TABLE battery_presets ADD COLUMN dia_min REAL');
+    db.exec('ALTER TABLE battery_presets ADD COLUMN dia_max REAL');
+    db.exec('ALTER TABLE battery_presets ADD COLUMN hei_min REAL');
+    db.exec('ALTER TABLE battery_presets ADD COLUMN hei_max REAL');
   }
 
 }

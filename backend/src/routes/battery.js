@@ -441,7 +441,7 @@ router.get('/presets', (req, res) => {
 
 // PUT /api/battery/presets — upsert a preset
 router.put('/presets', (req, res) => {
-  const { batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax } = req.body || {};
+  const { batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, diaMin, diaMax, heiMin, heiMax } = req.body || {};
   if (!batteryType || !productLine) {
     return res.status(400).json({ error: 'batteryType and productLine are required' });
   }
@@ -454,16 +454,16 @@ router.put('/presets', (req, res) => {
     if (existing) {
       db.prepare(`
         UPDATE battery_presets SET resistance=?, ocv_time=?, load_time=?, k_coeff=?, ocv_min=?, ocv_max=?, ccv_min=?, ccv_max=?,
-          updated_at=datetime('now')||'Z'
+          dia_min=?, dia_max=?, hei_min=?, hei_max=?, updated_at=datetime('now')||'Z'
         WHERE battery_type=? AND product_line=?
-      `).run(resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, batteryType, productLine);
+      `).run(resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, diaMin ?? null, diaMax ?? null, heiMin ?? null, heiMax ?? null, batteryType, productLine);
       res.json({ ok: true, id: existing.id });
     } else {
       const id = uuidv4();
       db.prepare(`
-        INSERT INTO battery_presets (id, battery_type, product_line, resistance, ocv_time, load_time, k_coeff, ocv_min, ocv_max, ccv_min, ccv_max, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, req.user.id);
+        INSERT INTO battery_presets (id, battery_type, product_line, resistance, ocv_time, load_time, k_coeff, ocv_min, ocv_max, ccv_min, ccv_max, dia_min, dia_max, hei_min, hei_max, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, batteryType, productLine, resistance, ocvTime, loadTime, kCoeff, ocvMin, ocvMax, ccvMin, ccvMax, diaMin ?? null, diaMax ?? null, heiMin ?? null, heiMax ?? null, req.user.id);
       res.json({ ok: true, id });
     }
   } catch (e) {

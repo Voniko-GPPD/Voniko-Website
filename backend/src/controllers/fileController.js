@@ -645,20 +645,21 @@ async function renameFile(req, res) {
   }
 
   const newName = name.trim();
+  const oldName = file.name;
   db.prepare(`UPDATE files SET name = ?, updated_at = datetime('now') || 'Z' WHERE id = ?`)
     .run(newName, file.id);
 
   db.prepare(`
     INSERT INTO activity_log (id, user_id, action, entity_type, entity_id, entity_name, details)
     VALUES (?, ?, 'rename_file', 'file', ?, ?, ?)
-  `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldName: file.name, newName }));
+  `).run(uuidv4(), req.user.id, file.id, newName, JSON.stringify({ oldName, newName }));
 
-  logger.info('File renamed', { fileId: file.id, oldName: file.name, newName, userId: req.user.id });
+  logger.info('File renamed', { fileId: file.id, oldName, newName, userId: req.user.id });
 
   broadcast({
     type: 'file_renamed',
     fileId: file.id,
-    oldName: file.name,
+    oldName,
     newName,
     userName: req.user.display_name,
     timestamp: new Date().toISOString(),

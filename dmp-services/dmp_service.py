@@ -1111,7 +1111,7 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
             # cycle-count columns ("(t)") are populated with ``avg_count`` rather
             # than ``avg_hours``.
             rate_is_pct: dict[int, bool] = {}  # j → True if RATE_j cell is pct-formatted
-            result_unit: dict[int, str] = {}   # j → "h" | "m" | "t" (lowercased suffix)
+            result_unit: dict[int, str] = {}   # j → "h" | "m" | "t" | "" (lowercased suffix; "" = no explicit unit)
             for rate_tmpl_cell in template_row:
                 if isinstance(rate_tmpl_cell.value, str):
                     rate_match = re.fullmatch(r"\{\{RATE_(\d+)\}\}", rate_tmpl_cell.value.strip())
@@ -1127,8 +1127,11 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                             result_unit[int(result_match.group(1))] = "t"
                         elif h_lower.endswith("(m)"):
                             result_unit[int(result_match.group(1))] = "m"
-                        else:
+                        elif h_lower.endswith("(h)"):
                             result_unit[int(result_match.group(1))] = "h"
+                        else:
+                            # No explicit unit suffix — resolved per data source at write time
+                            result_unit[int(result_match.group(1))] = ""
 
             # Insert extra rows so there is one row per data point
             if len(sorted_keys) > 1:
@@ -1148,14 +1151,17 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                     ur = entry.get("uniform_rate")
                     is_dmp = bool(entry.get("is_dmp"))
 
-                    unit = result_unit.get(j, "h")
+                    unit = result_unit.get(j, "")
                     if unit == "t":
                         # DMP "(t)" → cycle count; DM2000 "(t)" → minutes (legacy)
                         val = avg_c if is_dmp else avg_m
                     elif unit == "m":
                         val = avg_m
-                    else:
+                    elif unit == "h":
                         val = avg_h
+                    else:
+                        # No explicit unit suffix: DMP → cycle count, DM2000 → hours
+                        val = avg_c if is_dmp else avg_h
                     ctx[f"RESULT_{j}"] = val if val is not None else ""
 
                     ur_val = ur if ur is not None else ""
@@ -1287,13 +1293,17 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                             #   (m)            → minutes  (DM2000 only)
                             #   (t) for DMP    → cycle count ("số lần phóng điện")
                             #   (t) for DM2000 → minutes (legacy alias of (m))
+                            #   no suffix      → DMP → cycle count, DM2000 → hours
                             h_lower = header.lower()
                             if h_lower.endswith("(t)"):
                                 val = avg_c if is_dmp else avg_m
                             elif h_lower.endswith("(m)"):
                                 val = avg_m
-                            else:
+                            elif h_lower.endswith("(h)"):
                                 val = avg_h
+                            else:
+                                # No explicit unit suffix: DMP → cycle count, DM2000 → hours
+                                val = avg_c if is_dmp else avg_h
                             ws.cell(row=target_row, column=r_col).value = (
                                 val if val is not None else ""
                             )

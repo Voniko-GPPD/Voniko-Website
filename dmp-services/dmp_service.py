@@ -1212,24 +1212,34 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                     matched_fdfs, header = _perf_find_fdfs_for_col(ws, r_col, tag_row_idx, all_fdfs)
                     if matched_fdfs and matched_fdfs not in fdfs_col_map:
                         fdfs_col_map[matched_fdfs] = (r_col, ur_col, header)
-                # NOTE: Position-based fallback for unmatched fdfs labels has been
-                # intentionally removed.  Writing a value into a column whose
-                # header does not match the data's discharge condition produces
-                # incorrect reports (e.g. cycle counts landing in the "10ohm"
-                # column).  When the source DB leaves ``fdfs``/``jstj`` empty,
-                # the corresponding cells are now left blank instead of being
-                # written into the wrong column.  Log unmatched labels so the
-                # user can correct the template headers (or fill in the source
-                # ``fdfs``) if needed.
+                # Position-based fallback for unmatched fdfs labels.
+                # DMP batches commonly leave para_pub.fdfs and para_pub.jstj
+                # empty, so the fdfs_label falls back to grp.loai (e.g. "UD").
+                # That value never matches a column header, so without this
+                # fallback the entire data row would be skipped and only the
+                # {{TYPE}} cell would be written.  Header-matched columns keep
+                # priority; position-based entries only fill the remaining gaps.
                 _unmatched = [
                     lbl for lbl in all_fdfs if lbl not in fdfs_col_map
                 ]
                 if _unmatched:
-                    logger.info(
-                        "_render_perf_template[%s]: no header match for fdfs labels %r;"
-                        " those values will be skipped (check template column headers)",
-                        sheet_name, _unmatched,
+                    claimed_cols = {v[0] for v in fdfs_col_map.values()}
+                    free_result_cols = sorted(
+                        [
+                            (n, r_col, rate_cols.get(n))
+                            for n, r_col in result_cols.items()
+                            if r_col not in claimed_cols
+                        ],
+                        key=lambda t: t[1],
                     )
+                    for lbl, (n, r_col, ur_col) in zip(sorted(_unmatched), free_result_cols):
+                        hdr = _perf_col_header(ws, r_col, tag_row_idx)
+                        fdfs_col_map[lbl] = (r_col, ur_col, hdr or "")
+                        logger.info(
+                            "_render_perf_template[%s]: positional fallback assigned"
+                            " fdfs label %r → col %d (header: %r)",
+                            sheet_name, lbl, r_col, hdr,
+                        )
 
                 # Step 3: build date/label → row index map from column A.
                 # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".

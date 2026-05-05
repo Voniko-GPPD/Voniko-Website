@@ -492,11 +492,12 @@ router.delete('/presets/:batteryType/:productLine', (req, res) => {
 router.get('/order-history', (req, res) => {
   try {
     const rows = getDb().prepare(
-      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at FROM battery_order_history ORDER BY saved_at DESC LIMIT 200'
+      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, status FROM battery_order_history ORDER BY saved_at DESC LIMIT 200'
     ).all();
     const items = rows.map((row) => ({
       _snapshotId: row.id,
       _savedAt: row.saved_at,
+      _status: row.status || 'new',
       orderId: row.order_id,
       testDate: row.test_date,
       batteryType: row.battery_type,
@@ -521,14 +522,21 @@ router.post('/order-history', (req, res) => {
   try {
     const db = getDb();
     const normalizedOrderId = String(orderId).trim().toLowerCase();
-    // Check for existing snapshot with same order_id for this user
-    const existing = _snapshotId
+    // Check for existing snapshot: first by _snapshotId, then fall back to orderId to prevent duplicates
+    let existing = _snapshotId
       ? db.prepare('SELECT id FROM battery_order_history WHERE id = ? AND created_by = ?').get(_snapshotId, req.user.id)
       : db.prepare('SELECT id FROM battery_order_history WHERE lower(order_id) = ? AND created_by = ?').get(normalizedOrderId, req.user.id);
+
+    // If _snapshotId was provided but not found (e.g. stale/cross-user ID), fall back to orderId lookup
+    // so we UPDATE instead of INSERT and avoid duplicate order_id entries.
+    if (!existing && _snapshotId) {
+      existing = db.prepare('SELECT id FROM battery_order_history WHERE lower(order_id) = ? AND created_by = ?').get(normalizedOrderId, req.user.id);
+    }
+
     const savedAt = new Date().toISOString();
     if (existing) {
       db.prepare(
-        'UPDATE battery_order_history SET order_id=?, test_date=?, battery_type=?, product_line=?, records_json=?, chart_series_json=?, readings_json=?, saved_at=? WHERE id=?'
+        "UPDATE battery_order_history SET order_id=?, test_date=?, battery_type=?, product_line=?, records_json=?, chart_series_json=?, readings_json=?, saved_at=?, status='updated' WHERE id=?"
       ).run(
         String(orderId).trim(),
         testDate || null,
@@ -540,11 +548,11 @@ router.post('/order-history', (req, res) => {
         savedAt,
         existing.id,
       );
-      res.json({ ok: true, id: existing.id, savedAt });
+      res.json({ ok: true, id: existing.id, savedAt, updated: true });
     } else {
       const id = _snapshotId || uuidv4();
       db.prepare(
-        'INSERT INTO battery_order_history (id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        "INSERT INTO battery_order_history (id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, created_by, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')"
       ).run(
         id,
         String(orderId).trim(),
@@ -557,7 +565,7 @@ router.post('/order-history', (req, res) => {
         savedAt,
         req.user.id,
       );
-      res.json({ ok: true, id, savedAt });
+      res.json({ ok: true, id, savedAt, updated: false });
     }
   } catch (e) {
     logger.error('POST /battery/order-history error', { error: e.message });

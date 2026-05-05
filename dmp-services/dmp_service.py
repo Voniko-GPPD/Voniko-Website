@@ -1022,9 +1022,44 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
         the number of conditions exported in one call.
       * ``{{RATE_0}}`` …    — uniform rate for the matching fdfs condition.
 
-      The unit written for ``{{RESULT_N}}`` is chosen from the column header:
-      a header ending with ``(h)`` receives hours; one ending with ``(m)`` or
-      ``(t)`` receives minutes.
+      The unit written for ``{{RESULT_N}}`` is chosen from the column header
+      suffix.  **Convention by data source:**
+
+      * **DM2000** reports time-based metrics:
+
+        * header ending with ``(h)``  → average discharge time in **hours**
+        * header ending with ``(m)``  → average discharge time in **minutes**
+        * header ending with ``(t)``  → also minutes (legacy alias for ``(m)``)
+
+      * **DMP** reports cycle-count metrics for ``(t)`` columns:
+
+        * header ending with ``(h)``  → average discharge time in **hours**
+        * header ending with ``(t)``  → average **number of discharge cycles**
+          ("số lần phóng điện") — an integer count, *not* a time value
+        * header ending with ``(m)`` is **not used** for DMP and will fall back
+          to hours; if a DMP column is meant to track cycles, mark it with
+          ``(t)`` in the header.
+
+      **Rate cells:** Any cell whose ``{{RATE_N}}`` tag (or destination cell
+      in date-lookup mode) is formatted as a percentage (``0.00%``) receives
+      the uniform rate as a 0-1 fraction; otherwise it receives the value in
+      0-100 form.  The percentage format is detected from the destination
+      cell, so the data row that actually holds the value must be formatted
+      as ``0.00%``.
+
+      **Column-header naming guide** (so values land in the correct column):
+
+      * The text **before** the ``(h)``/``(m)``/``(t)`` suffix must contain
+        the discharge-condition (fdfs) label exactly as stored in the source
+        DB (``para_pub.fdfs`` for DMP, ``ls_jb_cs.fdfs`` for DM2000), or
+        contain the leading token (e.g. ``10ohm``, ``1000mA``,
+        ``(1500mW2s,650mW28s)10T/h,24h/d``).  Matching is case-insensitive and
+        uses whole-word boundaries to avoid false hits like ``10ohm`` matching
+        ``100ohm``.
+      * If a header text cannot be matched to any condition exported in the
+        request, **no value is written** to that column (the cell is left as
+        defined in the template).  This prevents wrong-column writes when the
+        source DB has empty ``fdfs``/``jstj`` fields.
 
     Sheet matching: the key in *groups* may contain ``|``-separated candidate
     names (e.g. ``"LR6 Voniko|LR6 501|LR6"``).  The engine tries each candidate
@@ -1071,13 +1106,29 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
             # A percentage-formatted cell (number_format containing "%") expects a 0-1
             # decimal fraction; the uniform_rate values are in the 0-100 range, so they
             # must be divided by 100 before being placed in such cells.
+            #
+            # Also detect the unit suffix of each RESULT_j column header so DMP
+            # cycle-count columns ("(t)") are populated with ``avg_count`` rather
+            # than ``avg_hours``.
             rate_is_pct: dict[int, bool] = {}  # j → True if RATE_j cell is pct-formatted
+            result_unit: dict[int, str] = {}   # j → "h" | "m" | "t" (lowercased suffix)
             for rate_tmpl_cell in template_row:
                 if isinstance(rate_tmpl_cell.value, str):
                     rate_match = re.fullmatch(r"\{\{RATE_(\d+)\}\}", rate_tmpl_cell.value.strip())
                     if rate_match:
                         rate_fmt = rate_tmpl_cell.number_format or ""
                         rate_is_pct[int(rate_match.group(1))] = "%" in rate_fmt
+                    result_match = re.fullmatch(r"\{\{RESULT_(\d+)\}\}", rate_tmpl_cell.value.strip())
+                    if result_match:
+                        # Inspect column header above this RESULT_j cell to pick the unit
+                        hdr = _perf_col_header(ws, rate_tmpl_cell.column, perf_row_idx)
+                        h_lower = (hdr or "").lower()
+                        if h_lower.endswith("(t)"):
+                            result_unit[int(result_match.group(1))] = "t"
+                        elif h_lower.endswith("(m)"):
+                            result_unit[int(result_match.group(1))] = "m"
+                        else:
+                            result_unit[int(result_match.group(1))] = "h"
 
             # Insert extra rows so there is one row per data point
             if len(sorted_keys) > 1:
@@ -1092,8 +1143,21 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                 for j, fdfs_lbl in enumerate(all_fdfs):
                     entry = row_data.get(fdfs_lbl, {})
                     avg_h = entry.get("avg_hours")
+                    avg_m = entry.get("avg_minutes")
+                    avg_c = entry.get("avg_count")
                     ur = entry.get("uniform_rate")
-                    ctx[f"RESULT_{j}"] = avg_h if avg_h is not None else ""
+                    is_dmp = bool(entry.get("is_dmp"))
+
+                    unit = result_unit.get(j, "h")
+                    if unit == "t":
+                        # DMP "(t)" → cycle count; DM2000 "(t)" → minutes (legacy)
+                        val = avg_c if is_dmp else avg_m
+                    elif unit == "m":
+                        val = avg_m
+                    else:
+                        val = avg_h
+                    ctx[f"RESULT_{j}"] = val if val is not None else ""
+
                     ur_val = ur if ur is not None else ""
                     if isinstance(ur_val, (int, float)) and rate_is_pct.get(j, False):
                         ur_val = ur_val / 100.0
@@ -1148,13 +1212,24 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                     matched_fdfs, header = _perf_find_fdfs_for_col(ws, r_col, tag_row_idx, all_fdfs)
                     if matched_fdfs and matched_fdfs not in fdfs_col_map:
                         fdfs_col_map[matched_fdfs] = (r_col, ur_col, header)
-                # Fall back to index-based mapping for any fdfs still unmatched
-                for j, fdfs_lbl in enumerate(all_fdfs):
-                    if fdfs_lbl not in fdfs_col_map:
-                        r_col = result_cols.get(j)
-                        ur_col = rate_cols.get(j)
-                        header = _perf_col_header(ws, r_col, tag_row_idx) if r_col else ""
-                        fdfs_col_map[fdfs_lbl] = (r_col, ur_col, header)
+                # NOTE: Position-based fallback for unmatched fdfs labels has been
+                # intentionally removed.  Writing a value into a column whose
+                # header does not match the data's discharge condition produces
+                # incorrect reports (e.g. cycle counts landing in the "10ohm"
+                # column).  When the source DB leaves ``fdfs``/``jstj`` empty,
+                # the corresponding cells are now left blank instead of being
+                # written into the wrong column.  Log unmatched labels so the
+                # user can correct the template headers (or fill in the source
+                # ``fdfs``) if needed.
+                _unmatched = [
+                    lbl for lbl in all_fdfs if lbl not in fdfs_col_map
+                ]
+                if _unmatched:
+                    logger.info(
+                        "_render_perf_template[%s]: no header match for fdfs labels %r;"
+                        " those values will be skipped (check template column headers)",
+                        sheet_name, _unmatched,
+                    )
 
                 # Step 3: build date/label → row index map from column A.
                 # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".
@@ -1192,26 +1267,47 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                         entry = row_data.get(fdfs_lbl, {})
                         avg_h = entry.get("avg_hours")
                         avg_m = entry.get("avg_minutes")
+                        avg_c = entry.get("avg_count")
                         ur = entry.get("uniform_rate")
+                        is_dmp = bool(entry.get("is_dmp"))
 
                         if r_col is not None:
-                            # Choose unit from the column header:
-                            #   (h)  → hours   (e.g. "10ohm 24h/d-0.9V(h)")
-                            #   (m)  → minutes (e.g. "1000mA 24h/d-0.9V(m)")
-                            #   (t)  → minutes ("thời gian" / time in minutes)
+                            # Choose unit from the column header suffix:
+                            #   (h)            → hours
+                            #   (m)            → minutes  (DM2000 only)
+                            #   (t) for DMP    → cycle count ("số lần phóng điện")
+                            #   (t) for DM2000 → minutes (legacy alias of (m))
                             h_lower = header.lower()
-                            if h_lower.endswith("(m)") or h_lower.endswith("(t)"):
-                                val = avg_m if avg_m is not None else ""
+                            if h_lower.endswith("(t)"):
+                                val = avg_c if is_dmp else avg_m
+                            elif h_lower.endswith("(m)"):
+                                val = avg_m
                             else:
-                                val = avg_h if avg_h is not None else ""
-                            ws.cell(row=target_row, column=r_col).value = val
+                                val = avg_h
+                            ws.cell(row=target_row, column=r_col).value = (
+                                val if val is not None else ""
+                            )
                         if ur_col is not None:
                             ur_write: float | str = ur if ur is not None else ""
                             if isinstance(ur_write, (int, float)):
-                                # If the template cell for this column is formatted as a
-                                # percentage (e.g. "0.00%"), Excel expects a 0-1 decimal
-                                # fraction, not a 0-100 value.  Divide by 100 accordingly.
-                                ur_fmt = ws.cell(row=tag_row_idx, column=ur_col).number_format or ""
+                                # Detect percentage formatting from the actual
+                                # destination cell — the template tag row often
+                                # uses "General" while the data rows below it
+                                # are formatted as "0.00%".  Excel expects a
+                                # 0-1 fraction in percentage-formatted cells,
+                                # so divide accordingly.
+                                ur_fmt = (
+                                    ws.cell(row=target_row, column=ur_col).number_format
+                                    or ""
+                                )
+                                if "%" not in ur_fmt:
+                                    # Fall back to the tag row's format for
+                                    # backward compatibility with templates
+                                    # that only set the format on the tag row.
+                                    ur_fmt = (
+                                        ws.cell(row=tag_row_idx, column=ur_col).number_format
+                                        or ""
+                                    )
                                 if "%" in ur_fmt:
                                     ur_write = ur_write / 100.0
                             ws.cell(row=target_row, column=ur_col).value = ur_write
@@ -3852,7 +3948,13 @@ def _compute_perf_values(
         if all_sj:
             ep = min(all_sj)
         else:
-            return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+            return {
+                "avg_hours": None,
+                "avg_minutes": None,
+                "avg_count": None,
+                "uniform_rate": None,
+                "is_dmp": False,
+            }
 
     # For each battery find the TAV row whose voltage is closest to ep.
     # A tolerance of 0.05 V is used to handle minor rounding differences
@@ -3881,7 +3983,13 @@ def _compute_perf_values(
             minutes_list.append(best_mins)
 
     if not minutes_list:
-        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": False,
+        }
 
     avg_min = sum(minutes_list) / len(minutes_list)
     avg_hours = round(avg_min / 60.0, 3)
@@ -3894,7 +4002,13 @@ def _compute_perf_values(
         if avg_min > 0:
             uniform_rate = round((1.0 - (max_t - min_t) / avg_min) * 100.0, 2)
 
-    return {"avg_hours": avg_hours, "avg_minutes": avg_minutes, "uniform_rate": uniform_rate}
+    return {
+        "avg_hours": avg_hours,
+        "avg_minutes": avg_minutes,
+        "avg_count": None,
+        "uniform_rate": uniform_rate,
+        "is_dmp": False,
+    }
 
 
 def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
@@ -3907,7 +4021,10 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
                 (date_str, battery_type): {         # e.g. ("2026-01-06", "UD")
                     fdfs_label: {
                         "avg_hours": float | None,
+                        "avg_minutes": float | None,
+                        "avg_count": int | None,        # cycle count (DMP only)
                         "uniform_rate": float | None,
+                        "is_dmp": bool,                 # True for DMP, False for DM2000
                     },
                     ...
                 },
@@ -4057,7 +4174,8 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    # groups[sheet_name][(date_str, battery_type)][fdfs_label] = {avg_hours, uniform_rate}
+    # groups[sheet_name][(date_str, battery_type)][fdfs_label] =
+    #   {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:
@@ -4226,10 +4344,27 @@ def _dmp_compute_group_perf(
     resolve the correct per-batch MDB path), then interpolates the discharge
     duration to *endpoint_voltage* for each tray.
 
-    Returns a dict with keys ``avg_hours``, ``avg_minutes``, ``uniform_rate``.
+    Returns a dict with keys ``avg_hours``, ``avg_minutes``, ``avg_count``,
+    ``uniform_rate`` and ``is_dmp`` (always ``True``).
+
+    The ``avg_count`` field is the average number of discharge cycles (1-based
+    index of the first telemetry sample whose voltage drops to/below the
+    endpoint).  This matches the on-screen DMP report (Unit: times) and is the
+    value that should be written to template columns whose header ends with
+    ``(t)`` (number of cycles).  See ``_render_perf_template`` for unit
+    selection details.
+
+    For DMP, ``uniform_rate`` is computed from the cycle counts so that the
+    figure on the report is consistent with the displayed cycle averages.
     """
     if not trays:
-        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": True,
+        }
 
     # Look up cdmc (MDB path) for each tray from para_singl
     try:
@@ -4247,8 +4382,13 @@ def _dmp_compute_group_perf(
         if baty is not None and cdmc:
             cdmc_by_baty[int(baty)] = str(cdmc).strip()
 
-    # Compute time-at-endpoint for each tray
+    # Compute time-at-endpoint and cycle-count-at-endpoint for each tray.
+    # ``hours_list`` holds the interpolated discharge time (hours) for the
+    # ``(h)``/``(m)`` columns, while ``count_list`` holds the cycle count
+    # (1-based index of the first sample whose voltage drops to/below the
+    # endpoint) used for DMP ``(t)`` columns ("số lần phóng điện").
     hours_list: list[float] = []
+    count_list: list[int] = []
     for tray in trays:
         cdmc = cdmc_by_baty.get(tray)
         if not cdmc:
@@ -4276,7 +4416,10 @@ def _dmp_compute_group_perf(
         if ep is None:
             continue
 
-        # Interpolate time when VOLT first crosses ep from above
+        # Interpolate time and capture cycle count when VOLT first crosses ep
+        # from above.  Both metrics use the same time-sorted point list so the
+        # results stay aligned with the on-screen DMP report (which uses the
+        # 1-based index of the crossing sample as its cycle count).
         points = sorted(
             [
                 (float(r["TIM"]), float(r.get("VOLT") or r.get("volt") or 0))
@@ -4287,6 +4430,7 @@ def _dmp_compute_group_perf(
             key=lambda p: p[0],
         )
         crossed_h: Optional[float] = None
+        cycle_count: Optional[int] = None
         for i in range(1, len(points)):
             t1, v1 = points[i - 1]
             t2, v2 = points[i]
@@ -4295,23 +4439,60 @@ def _dmp_compute_group_perf(
                     crossed_h = t1
                 else:
                     crossed_h = t1 + (t2 - t1) * (v1 - ep) / (v1 - v2)
+                # Match the frontend ``countAtVoltage`` convention: the cycle
+                # count is the 1-based position of the crossing sample (i + 1
+                # because ``i`` starts at 1 in this loop, indexing the second
+                # point of the pair).
+                cycle_count = i + 1
                 break
         if crossed_h is not None:
             hours_list.append(crossed_h)
+        if cycle_count is not None:
+            count_list.append(cycle_count)
 
-    if not hours_list:
-        return {"avg_hours": None, "avg_minutes": None, "uniform_rate": None}
+    if not hours_list and not count_list:
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": True,
+        }
 
-    avg_h = sum(hours_list) / len(hours_list)
-    avg_m = avg_h * 60.0
+    avg_h: Optional[float] = None
+    avg_m: Optional[float] = None
+    if hours_list:
+        avg_h = sum(hours_list) / len(hours_list)
+        avg_m = avg_h * 60.0
+
+    avg_count: Optional[int] = None
+    if count_list:
+        # Round to the nearest integer to match the frontend display
+        # (``Math.round`` of the mean cycle count).
+        avg_count = int(round(sum(count_list) / len(count_list)))
+
+    # Uniform rate for DMP is computed from the cycle counts so the figure
+    # printed in the report stays consistent with the displayed cycle
+    # averages ("số lần phóng điện").  Fall back to the time-based formula
+    # when cycle counts are unavailable.
     uniform_rate: Optional[float] = None
-    if len(hours_list) >= 2 and avg_h > 0:
-        uniform_rate = round((1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2)
+    if len(count_list) >= 2:
+        avg_c = sum(count_list) / len(count_list)
+        if avg_c > 0:
+            uniform_rate = round(
+                (1.0 - (max(count_list) - min(count_list)) / avg_c) * 100.0, 2
+            )
+    elif len(hours_list) >= 2 and avg_h and avg_h > 0:
+        uniform_rate = round(
+            (1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2
+        )
 
     return {
-        "avg_hours": round(avg_h, 3),
-        "avg_minutes": round(avg_m, 3),
+        "avg_hours": round(avg_h, 3) if avg_h is not None else None,
+        "avg_minutes": round(avg_m, 3) if avg_m is not None else None,
+        "avg_count": avg_count,
         "uniform_rate": uniform_rate,
+        "is_dmp": True,
     }
 
 
@@ -4367,7 +4548,8 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    # groups[sheet_key][(row_label, loai)][fdfs_label] = {avg_hours, avg_minutes, uniform_rate}
+    # groups[sheet_key][(row_label, loai)][fdfs_label] =
+    #   {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:

@@ -927,6 +927,9 @@ export default function BatteryPage() {
       content: t('batteryClearSessionSaveContent'),
       okText: t('batteryClearSessionSaveAndClear'),
       cancelText: t('cancel'),
+      // saveCurrentOrderSnapshot captures all data from refs synchronously before dispatching
+      // the network request, so it is safe to clear frontend state immediately after.
+      // The save continues in-flight regardless of the subsequent state reset.
       onOk: () => { saveCurrentOrderSnapshot(); handleClearSession(); },
       onCancel: () => {},
       footer: (_, { OkBtn, CancelBtn }) => (
@@ -934,6 +937,8 @@ export default function BatteryPage() {
           <CancelBtn />
           <Button
             danger
+            // modalRef.destroy() is the correct AntD API to close a static Modal.confirm
+            // when a custom footer button does not map to okButton/cancelButton.
             onClick={() => { modalRef?.destroy(); handleClearSession(); }}
           >
             {t('batteryClearSessionClearOnly')}

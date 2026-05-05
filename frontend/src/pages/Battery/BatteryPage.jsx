@@ -125,9 +125,10 @@ function dedupeOrderHistory(items) {
 }
 
 function RowWithPopover({ record, readingsByBattery, chartSeriesByBattery, buildMiniChartOption, ...rowProps }) {
+  const seriesByBattery = record && chartSeriesByBattery && chartSeriesByBattery[record.id];
   const hasReadings = record && (
     (readingsByBattery && (readingsByBattery[record.id] || []).length > 0) ||
-    (chartSeriesByBattery && ((chartSeriesByBattery[record.id]?.ocv || []).length > 0 || (chartSeriesByBattery[record.id]?.ccv || []).length > 0))
+    ((seriesByBattery?.ocv || []).length > 0 || (seriesByBattery?.ccv || []).length > 0)
   );
   if (!hasReadings) {
     return <tr {...rowProps} />;
@@ -1554,7 +1555,7 @@ export default function BatteryPage() {
 
   const buildMiniChartOption = React.useCallback((batteryId) => {
     const readings = readingsByBattery[batteryId] || [];
-    let ocvData, ccvData;
+    let ocvData = [], ccvData = [];
     if (readings.length > 0) {
       ocvData = readings.filter(r => r.phase === 'ocv').map(r => [r.t, r.v]);
       ccvData = readings.filter(r => r.phase === 'ccv').map(r => [r.t, r.v]);

@@ -260,7 +260,7 @@ export default function BatteryPage() {
   useEffect(() => {
     setOrderHistoryLoading(true);
     getOrderHistory().then((res) => {
-      setOrderHistory(res.data.items || []);
+      setOrderHistory(dedupeOrderHistory(res.data.items || []));
     }).catch((e) => {
       notification.error({ message: 'Không thể tải lịch sử đơn hàng', description: e?.message });
     }).finally(() => setOrderHistoryLoading(false));

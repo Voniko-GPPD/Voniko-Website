@@ -562,6 +562,7 @@ function ExportTab({ stationId }) {
         stationId,
         entries: entries.map((e) => ({
           batch_id: e.batch_id,
+          report_date: e.report_date || null,
           model: e.model,
           groups: e.groups,
           special_type: e.special_type || 'normal',

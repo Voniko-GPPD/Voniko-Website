@@ -695,6 +695,7 @@ class DmpPerfEntry(BaseModel):
     model: str  # e.g. "LR6", "LR03", "LR61", "9V"
     groups: list[DmpPerfGroup]
     special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
+    report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
 
 
 class DmpPerfReportRequest(BaseModel):
@@ -4398,36 +4399,54 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
                     )
                 except pyodbc.Error as exc:
                     logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
-                    continue
 
-        if not batch_rows:
-            logger.warning("generate_dmp_perf_report: batch not found: %s", entry.batch_id)
-            continue
-
-        batch = batch_rows[0]
-        # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
-        # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
-        actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
-
-        # Extract metadata
+        # Helper to convert Access date values to YYYY-MM-DD strings
         def _to_date(v) -> str:
             if v and hasattr(v, "strftime"):
                 return v.strftime("%Y-%m-%d")
             s = str(v or "").strip()[:10].replace("/", "-")
             return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
 
-        fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
-        fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
-        zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
+        if batch_rows:
+            batch = batch_rows[0]
+            # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
+            # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
+            actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
-        # Parse endpoint voltage
-        ep_v: Optional[float] = None
-        if zzdy_raw:
-            tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
-            try:
-                ep_v = float(tok)
-            except (TypeError, ValueError):
-                ep_v = None
+            fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
+            fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
+            zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
+
+            # Parse endpoint voltage
+            ep_v: Optional[float] = None
+            if zzdy_raw:
+                tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
+                try:
+                    ep_v = float(tok)
+                except (TypeError, ValueError):
+                    ep_v = None
+        else:
+            # Batch not found in DMPDATA.mdb — still include entry in report with
+            # empty performance cells so the template rows are populated.
+            logger.warning("generate_dmp_perf_report: batch not found: %s", entry.batch_id)
+            actual_batch_id = entry.batch_id
+            fdfs = ""
+            ep_v = None
+
+            # Derive a proper YYYY-MM-DD row label from the available fields.
+            # Priority: report_date (from SQLite) > DDMMYY conversion > raw batch_id.
+            if entry.report_date:
+                fdrq = _to_date(entry.report_date) or entry.batch_id
+            elif _ddmmyy_match:
+                try:
+                    _yy2 = int(_bid[4:6])
+                    _cur_yy2 = date.today().year % 100
+                    _century2 = 2000 if (_yy2 - _cur_yy2) % 100 <= 50 else 1900
+                    fdrq = date(_century2 + _yy2, int(_bid[2:4]), int(_bid[0:2])).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    fdrq = entry.batch_id
+            else:
+                fdrq = entry.batch_id
 
         # Determine row label (date or special)
         if entry.special_type in _SPECIAL_TYPE_LABEL:

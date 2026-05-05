@@ -499,6 +499,8 @@ export default {
   batteryHistoryCount: 'Số pin',
   batteryHistoryLoad: 'Tải lại',
   batteryHistoryViewing: 'Đang xem',
+  batteryHistoryStatus: 'Trạng thái',
+  batteryHistoryStatusNew: 'Mới',
   batteryHistoryStatusUpdated: 'Đã cập nhật',
   batteryHistoryDeleteAllTitle: 'Xóa toàn bộ lịch sử đơn hàng?',
   batteryHistoryDeleteAllContent: 'Hành động này không thể hoàn tác.',

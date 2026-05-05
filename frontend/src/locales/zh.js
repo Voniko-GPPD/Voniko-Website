@@ -499,6 +499,8 @@ export default {
   batteryHistoryCount: '电池数',
   batteryHistoryLoad: '加载',
   batteryHistoryViewing: '查看中',
+  batteryHistoryStatus: '状态',
+  batteryHistoryStatusNew: '新建',
   batteryHistoryStatusUpdated: '已更新',
   batteryHistoryDeleteAllTitle: '删除全部订单历史？',
   batteryHistoryDeleteAllContent: '此操作无法撤销。',

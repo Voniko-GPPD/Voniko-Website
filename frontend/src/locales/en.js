@@ -499,6 +499,8 @@ export default {
   batteryHistoryCount: 'Batteries',
   batteryHistoryLoad: 'Load',
   batteryHistoryViewing: 'Viewing',
+  batteryHistoryStatus: 'Status',
+  batteryHistoryStatusNew: 'New',
   batteryHistoryStatusUpdated: 'Updated',
   batteryHistoryDeleteAllTitle: 'Delete all order history?',
   batteryHistoryDeleteAllContent: 'This action cannot be undone.',

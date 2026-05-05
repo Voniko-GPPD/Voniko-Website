@@ -17,7 +17,7 @@ import serial.tools.list_ports
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Try to import pyvisa — if not available, only simulation mode works
 try:
@@ -120,6 +120,7 @@ class StartRequest(BaseModel):
     load_time: float    # seconds
     coeff: float        # K multiplier
     retest_id: Optional[int] = None  # if set, overwrite this battery index
+    start_id: int = Field(default=1, ge=1)  # first battery ID; set to N+1 when resuming a loaded session
 
 
 class BatteryRecord(BaseModel):
@@ -285,13 +286,14 @@ def _run_test_loop(params: dict) -> None:
         ocv_time = params["ocv_time"]
         load_time = params["load_time"]
         coeff = params["coeff"]
+        start_id = params.get("start_id", 1)
 
         while session["running"]:
             with _lock:
                 retest_id = session["retest_id"]
                 n_records = len(session["records"])
 
-            tid = retest_id if retest_id is not None else n_records + 1
+            tid = retest_id if retest_id is not None else start_id + n_records
 
             # ------------------------------------------------------------------
             # Wait for battery insertion (voltage > 0.5 V)
@@ -602,6 +604,7 @@ def start_test(req: StartRequest):
         "ocv_time": req.ocv_time,
         "load_time": req.load_time,
         "coeff": req.coeff,
+        "start_id": req.start_id,
     }
 
     _test_thread = threading.Thread(target=_run_test_loop, args=(params,), daemon=True)

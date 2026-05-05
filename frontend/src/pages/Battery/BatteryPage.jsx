@@ -722,7 +722,9 @@ export default function BatteryPage() {
     } else {
       // When starting a test, resume from the next battery after any already-loaded records.
       // This lets users load a 190-battery history and continue from battery 191.
-      startIdRef.current = records.length + 1;
+      // Use Math.max so the value set by handleLoadOrder is not accidentally overridden
+      // when records state hasn't yet updated in this render cycle.
+      startIdRef.current = Math.max(startIdRef.current, records.length + 1);
       setSessionStarted(true);
       sendMsg({ action: 'start', payload: buildParams() });
     }
@@ -830,7 +832,11 @@ export default function BatteryPage() {
 
   // Load an order snapshot back into current session
   const handleLoadOrder = useCallback((snapshot) => {
-    setRecords(snapshot.records || []);
+    const loadedRecords = snapshot.records || [];
+    setRecords(loadedRecords);
+    // Update startIdRef immediately so that when the user clicks "Bắt đầu kiểm tra"
+    // the test continues from the correct ID, even before the React state re-renders.
+    startIdRef.current = loadedRecords.length + 1;
     setChartSeriesByBattery(snapshot.chartSeriesByBattery || {});
     setReadingsByBattery(snapshot.readingsByBattery || {});
     // Rebuild flat chart data from chartSeriesByBattery for legacy chart fallback
@@ -866,9 +872,8 @@ export default function BatteryPage() {
     });
   }, [resetLoadedSnapshotTracking]);
 
-  // Clear session (save snapshot first, then clear)
+  // Clear session — pure clear without saving
   const handleClearSession = useCallback(() => {
-    saveCurrentOrderSnapshot();
     sendMsg({ action: 'clear_session' });
     localStorage.removeItem('battery_session');
     setReadingsByBattery({});
@@ -876,7 +881,68 @@ export default function BatteryPage() {
     setSessionStarted(false);
     startIdRef.current = 1;
     resetLoadedSnapshotTracking();
-  }, [saveCurrentOrderSnapshot, sendMsg, resetLoadedSnapshotTracking]);
+  }, [sendMsg, resetLoadedSnapshotTracking]);
+
+  // Called when the user clicks "Xóa phiên làm việc":
+  // - No unsaved changes → just clear (no save attempt)
+  // - Has unsaved changes → show a save-confirmation dialog
+  const handleClearSessionRequest = useCallback(() => {
+    const snap_records = recordsRef.current;
+    const hasRecords = snap_records && snap_records.length > 0;
+
+    if (!hasRecords) {
+      // Nothing to save — clear immediately
+      handleClearSession();
+      return;
+    }
+
+    const normalizedOrderId = normalizeOrderId(orderIdRef.current);
+    const currentSnapshot = {
+      orderId: orderIdRef.current?.trim() || '',
+      testDate: testDateRef.current ? testDateRef.current.format('YYYY-MM-DD') : null,
+      batteryType: batteryTypeRef.current,
+      productLine: productLineRef.current,
+      records: snap_records,
+      chartSeriesByBattery: chartSeriesByBatteryRef.current,
+      readingsByBattery: readingsByBatteryRef.current,
+    };
+    const currentSignature = buildSnapshotSignature(currentSnapshot);
+
+    const noChanges = Boolean(
+      loadedSnapshotIdRef.current
+      && loadedSnapshotSignatureRef.current === currentSignature
+      && normalizeOrderId(loadedSnapshotOrderIdRef.current) === normalizedOrderId
+    );
+
+    if (noChanges) {
+      // Nothing changed since last save — just clear, no need to re-save
+      handleClearSession();
+      return;
+    }
+
+    // Unsaved changes exist: ask the user whether to save before clearing
+    let modalRef;
+    modalRef = Modal.confirm({
+      title: t('batteryClearSessionSaveTitle'),
+      content: t('batteryClearSessionSaveContent'),
+      okText: t('batteryClearSessionSaveAndClear'),
+      cancelText: t('cancel'),
+      onOk: () => { saveCurrentOrderSnapshot(); handleClearSession(); },
+      onCancel: () => {},
+      footer: (_, { OkBtn, CancelBtn }) => (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <CancelBtn />
+          <Button
+            danger
+            onClick={() => { modalRef?.destroy(); handleClearSession(); }}
+          >
+            {t('batteryClearSessionClearOnly')}
+          </Button>
+          <OkBtn />
+        </div>
+      ),
+    });
+  }, [t, handleClearSession, saveCurrentOrderSnapshot]);
 
   // Skip current battery (advance without saving dimensions)
   const handleSaveCaliper = useCallback(() => {
@@ -2600,16 +2666,7 @@ export default function BatteryPage() {
 
             <Button
               icon={<DeleteOutlined />}
-              onClick={() => {
-                Modal.confirm({
-                  title: t('batteryClearSessionConfirmTitle'),
-                  content: t('batteryClearSessionConfirmContent'),
-                  okText: t('confirm'),
-                  cancelText: t('cancel'),
-                  okButtonProps: { danger: true },
-                  onOk: handleClearSession,
-                });
-              }}
+              onClick={handleClearSessionRequest}
               disabled={!connected || records.length === 0}
             >
               {t('batteryClearSession')}

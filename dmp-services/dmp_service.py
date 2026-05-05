@@ -983,9 +983,9 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # while the Excel template header omits it (e.g. "(1500mW2s,650mW28s) 10T/h,24h/d").
     # Only one side is stripped at a time so two labels with *different* voltages
     # (e.g. "-1.05V" vs "-0.9V") are never incorrectly considered equal.
-    _v_sfx = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
-    f_no_v = re.sub(r'\s+', '', _v_sfx.sub('', f))
-    h_no_v = re.sub(r'\s+', '', _v_sfx.sub('', h))
+    _voltage_suffix_pattern = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
+    f_no_v = re.sub(r'\s+', '', _voltage_suffix_pattern.sub('', f))
+    h_no_v = re.sub(r'\s+', '', _voltage_suffix_pattern.sub('', h))
     if f_no_v and h_no_ws and f_no_v == h_no_ws:
         return True
     if f_no_ws and h_no_v and f_no_ws == h_no_v:

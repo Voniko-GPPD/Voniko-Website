@@ -151,8 +151,8 @@ export default function DMPExportTab({ stationId, selection }) {
       // computed and the Dis-condition field to display the voltage correctly.
       let epVoltage = selection.zzdy || '';
       if (!epVoltage && disCondRaw) {
-        const vm = disCondRaw.match(/-\s*(\d+\.?\d*)\s*[Vv]\s*$/);
-        if (vm) epVoltage = vm[1];
+        const voltageMatch = disCondRaw.match(/-\s*(\d+\.?\d*)\s*[Vv]\s*$/);
+        if (voltageMatch) epVoltage = voltageMatch[1];
       }
       setArchiveFields({
         archname: selection.id || '',

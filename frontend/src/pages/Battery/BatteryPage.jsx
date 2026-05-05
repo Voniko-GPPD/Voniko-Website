@@ -1520,6 +1520,7 @@ export default function BatteryPage() {
           <Button
             size="small"
             type={loadedSnapshotId === snapshot._snapshotId ? 'primary' : 'default'}
+            disabled={!selectedStation || !connected}
             onClick={() => handleLoadOrder(snapshot)}
           >
             {loadedSnapshotId === snapshot._snapshotId ? t('batteryHistoryViewing') : t('batteryHistoryLoad')}
@@ -1547,7 +1548,7 @@ export default function BatteryPage() {
         </Space>
       ),
     },
-  ]), [t, loadedSnapshotId, handleLoadOrder, handleDeleteOrderSnapshot, handleExportOrderSnapshot]);
+  ]), [t, loadedSnapshotId, selectedStation, connected, handleLoadOrder, handleDeleteOrderSnapshot, handleExportOrderSnapshot]);
 
   const buildMiniChartOption = React.useCallback((batteryId) => {
     const readings = readingsByBattery[batteryId] || [];

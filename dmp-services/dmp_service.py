@@ -970,6 +970,13 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # Exact match after normalisation
     if f == h:
         return True
+    # Whitespace-normalized match: ignore internal spacing differences.
+    # e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V" (DB) vs
+    #      "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V" (template header with space)
+    f_no_ws = re.sub(r'\s+', '', f)
+    h_no_ws = re.sub(r'\s+', '', h)
+    if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
+        return True
     # Whole-word boundary check — prevents "10ohm" from matching "100ohm".
     # A word boundary here means the match is not immediately preceded or
     # followed by an alphanumeric character or a forward-slash.

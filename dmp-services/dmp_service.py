@@ -1006,7 +1006,7 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # Restricting to single-token cases prevents false positives between two
     # fully-specified conditions that merely share a leading token, such as
     # "3.9ohm 1h/d-0.8V" (h) and "3.9ohm 4m/h 8h/d-0.9V" (m), or
-    # "1000mA 24h/d-0.9V" and "1000mA 10s/m 1h/d-0.9V" (t).
+    # "1000mA 24h/d-0.9V" and "1000mA 10s/m 1h/d-0.9V(t)".
     f_parts = f.split()
     h_parts = h.split()
     f_tok = f_parts[0] if f_parts else ""

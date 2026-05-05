@@ -44,6 +44,48 @@ import { useLang } from '../../../contexts/LangContext';
 const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
 
+/** Derive model/loai/chuyen filter option lists and a filtered subset from entries. */
+function useEntryFilters(entries, filterModel, filterLoai, filterChuyen) {
+  const modelOptions = useMemo(() => {
+    const models = [...new Set((entries || []).map((e) => e.model).filter(Boolean))].sort();
+    return models.map((m) => ({ value: m, label: m }));
+  }, [entries]);
+
+  const loaiOptions = useMemo(() => {
+    const loais = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.loai)).filter(Boolean),
+    )].sort();
+    return loais.map((l) => ({ value: l, label: l }));
+  }, [entries]);
+
+  const chuyenOptions = useMemo(() => {
+    const chuyens = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.chuyen)).filter(Boolean),
+    )].sort();
+    return chuyens.map((c) => ({ value: c, label: c }));
+  }, [entries]);
+
+  const filteredEntries = useMemo(() => {
+    let result = entries;
+    if (filterModel) result = result.filter((e) => e.model === filterModel);
+    if (filterLoai || filterChuyen) {
+      result = result
+        .map((e) => ({
+          ...e,
+          groups: (e.groups || []).filter((g) => {
+            if (filterLoai && g.loai !== filterLoai) return false;
+            if (filterChuyen && g.chuyen !== filterChuyen) return false;
+            return true;
+          }),
+        }))
+        .filter((e) => e.groups.length > 0);
+    }
+    return result;
+  }, [entries, filterModel, filterLoai, filterChuyen]);
+
+  return { modelOptions, loaiOptions, chuyenOptions, filteredEntries };
+}
+
 // Derives default tray assignment from group count (fixed convention)
 function autoTrays(groupCount, groupIndex) {
   if (groupCount === 1) return [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -582,44 +624,9 @@ function PerfViewTab({ stationId }) {
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
-  // Available filter options derived from loaded entries
-  const modelOptions = useMemo(() => {
-    const models = [...new Set((entries || []).map((e) => e.model).filter(Boolean))].sort();
-    return models.map((m) => ({ value: m, label: m }));
-  }, [entries]);
-
-  const loaiOptions = useMemo(() => {
-    const loais = [...new Set(
-      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.loai)).filter(Boolean),
-    )].sort();
-    return loais.map((l) => ({ value: l, label: l }));
-  }, [entries]);
-
-  const chuyenOptions = useMemo(() => {
-    const chuyens = [...new Set(
-      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.chuyen)).filter(Boolean),
-    )].sort();
-    return chuyens.map((c) => ({ value: c, label: c }));
-  }, [entries]);
-
-  // Build filtered entries for preview
-  const filteredEntries = useMemo(() => {
-    let result = entries;
-    if (filterModel) result = result.filter((e) => e.model === filterModel);
-    if (filterLoai || filterChuyen) {
-      result = result
-        .map((e) => ({
-          ...e,
-          groups: (e.groups || []).filter((g) => {
-            if (filterLoai && g.loai !== filterLoai) return false;
-            if (filterChuyen && g.chuyen !== filterChuyen) return false;
-            return true;
-          }),
-        }))
-        .filter((e) => e.groups.length > 0);
-    }
-    return result;
-  }, [entries, filterModel, filterLoai, filterChuyen]);
+  const { modelOptions, loaiOptions, chuyenOptions, filteredEntries } = useEntryFilters(
+    entries, filterModel, filterLoai, filterChuyen,
+  );
 
   const handlePreview = async () => {
     if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
@@ -853,44 +860,9 @@ function ExportTab({ stationId }) {
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
-  // Derive filter option lists from loaded entries
-  const modelOptions = useMemo(() => {
-    const models = [...new Set((entries || []).map((e) => e.model).filter(Boolean))].sort();
-    return models.map((m) => ({ value: m, label: m }));
-  }, [entries]);
-
-  const loaiOptions = useMemo(() => {
-    const loais = [...new Set(
-      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.loai)).filter(Boolean),
-    )].sort();
-    return loais.map((l) => ({ value: l, label: l }));
-  }, [entries]);
-
-  const chuyenOptions = useMemo(() => {
-    const chuyens = [...new Set(
-      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.chuyen)).filter(Boolean),
-    )].sort();
-    return chuyens.map((c) => ({ value: c, label: c }));
-  }, [entries]);
-
-  // Apply client-side filters
-  const filteredEntries = useMemo(() => {
-    let result = entries;
-    if (filterModel) result = result.filter((e) => e.model === filterModel);
-    if (filterLoai || filterChuyen) {
-      result = result
-        .map((e) => ({
-          ...e,
-          groups: (e.groups || []).filter((g) => {
-            if (filterLoai && g.loai !== filterLoai) return false;
-            if (filterChuyen && g.chuyen !== filterChuyen) return false;
-            return true;
-          }),
-        }))
-        .filter((e) => e.groups.length > 0);
-    }
-    return result;
-  }, [entries, filterModel, filterLoai, filterChuyen]);
+  const { modelOptions, loaiOptions, chuyenOptions, filteredEntries } = useEntryFilters(
+    entries, filterModel, filterLoai, filterChuyen,
+  );
 
   const specialTag = (type) => {
     const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };

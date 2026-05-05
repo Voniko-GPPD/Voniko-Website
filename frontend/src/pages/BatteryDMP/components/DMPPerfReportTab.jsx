@@ -535,6 +535,26 @@ function ExportTab({ stationId }) {
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [dateRange, setDateRange] = useState([null, null]);
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+
+  const loadEntries = useCallback(async () => {
+    if (!stationId) return;
+    setLoadingEntries(true);
+    try {
+      const [from, to] = dateRange;
+      const data = await fetchPerfEntries(stationId, {
+        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
+        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
+      });
+      setEntries(data);
+      setSelectedRowKeys(data.map((e) => e.id));
+    } catch (err) {
+      notification.error({ message: err.message });
+    } finally {
+      setLoadingEntries(false);
+    }
+  }, [stationId, dateRange]);
 
   useEffect(() => {
     if (!stationId) return;
@@ -543,24 +563,30 @@ function ExportTab({ stationId }) {
       .then(setTemplates)
       .catch((err) => notification.error({ message: err.message }))
       .finally(() => setLoadingTemplates(false));
-
-    setLoadingEntries(true);
-    fetchPerfEntries(stationId)
-      .then(setEntries)
-      .catch((err) => notification.error({ message: err.message }))
-      .finally(() => setLoadingEntries(false));
   }, [stationId]);
+
+  useEffect(() => { loadEntries(); }, [loadEntries]);
+
+  const specialTag = (type) => {
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
+    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal' };
+    const label = labelKeys[type] ? t(labelKeys[type]) : type;
+    return <Tag color={colors[type] || 'default'}>{label}</Tag>;
+  };
 
   const handleGenerate = async () => {
     if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
     if (!selectedTemplate) { notification.warning({ message: t('dmpPerfNoTemplate') }); return; }
-    if (entries.length === 0) { notification.warning({ message: t('dmpPerfNoEntriesToExport') }); return; }
+    const toExport = selectedRowKeys.length > 0
+      ? entries.filter((e) => selectedRowKeys.includes(e.id))
+      : entries;
+    if (toExport.length === 0) { notification.warning({ message: t('dmpPerfNoEntriesToExport') }); return; }
 
     setGenerating(true);
     try {
       await downloadDmpPerfReport({
         stationId,
-        entries: entries.map((e) => ({
+        entries: toExport.map((e) => ({
           batch_id: e.batch_id,
           report_date: e.report_date || null,
           model: e.model,
@@ -577,6 +603,34 @@ function ExportTab({ stationId }) {
       setGenerating(false);
     }
   };
+
+  const exportCount = selectedRowKeys.length > 0 ? selectedRowKeys.length : entries.length;
+
+  const columns = [
+    { title: '#', key: 'idx', width: 44, render: (_, __, i) => i + 1 },
+    { title: t('dmpPerfEntryDate'), dataIndex: 'report_date', key: 'report_date', width: 110 },
+    { title: t('dmpPerfEntryModel'), dataIndex: 'model', key: 'model', width: 80 },
+    {
+      title: t('dmpPerfEntryGroups'),
+      key: 'groups',
+      render: (_, row) => (row.groups || []).map((g, i) => (
+        <Tag key={`${g.loai}-${g.chuyen}-${i}`}>{g.loai} {g.chuyen}</Tag>
+      )),
+    },
+    {
+      title: t('dmpPerfEntrySpecialType'),
+      dataIndex: 'special_type',
+      key: 'special_type',
+      width: 120,
+      render: (v) => specialTag(v),
+    },
+    {
+      title: t('dmpPerfEntryRemark'),
+      dataIndex: 'raw_remark',
+      key: 'raw_remark',
+      ellipsis: true,
+    },
+  ];
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -595,10 +649,51 @@ function ExportTab({ stationId }) {
       </Card>
 
       <Card size="small">
-        <Space direction="vertical" size={4} style={{ width: '100%' }}>
-          <Typography.Text>
-            {loadingEntries ? <Spin size="small" /> : t('dmpPerfEntriesCount', { count: entries.length })}
-          </Typography.Text>
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space wrap>
+            <DatePicker.RangePicker
+              value={dateRange}
+              onChange={setDateRange}
+              allowClear
+            />
+            <Button onClick={loadEntries} loading={loadingEntries}>{t('dm2000Search')}</Button>
+            <Button
+              size="small"
+              onClick={() => setSelectedRowKeys(entries.map((e) => e.id))}
+              disabled={entries.length === 0}
+            >
+              {t('dmpPerfExportSelectAll')}
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setSelectedRowKeys([])}
+              disabled={selectedRowKeys.length === 0}
+            >
+              {t('dmpPerfExportDeselectAll')}
+            </Button>
+          </Space>
+
+          {loadingEntries ? <Spin /> : entries.length === 0 ? (
+            <Empty description={t('dmpPerfNoEntries')} />
+          ) : (
+            <Table
+              size="small"
+              rowKey="id"
+              columns={columns}
+              dataSource={entries}
+              pagination={{ pageSize: 50, showSizeChanger: true }}
+              scroll={{ x: 700 }}
+              rowSelection={{
+                selectedRowKeys,
+                onChange: setSelectedRowKeys,
+              }}
+            />
+          )}
+        </Space>
+      </Card>
+
+      <Card size="small">
+        <Space size={12} align="center">
           <Button
             type="primary"
             icon={<DownloadOutlined />}
@@ -608,6 +703,11 @@ function ExportTab({ stationId }) {
           >
             {generating ? t('dmpPerfGenerating') : t('dmpPerfGenerate')}
           </Button>
+          {!loadingEntries && entries.length > 0 && (
+            <Typography.Text type="secondary">
+              {t('dmpPerfExportSelectedCount', { selected: exportCount, total: entries.length })}
+            </Typography.Text>
+          )}
         </Space>
       </Card>
     </Space>

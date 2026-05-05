@@ -746,4 +746,7 @@ export default {
   dmpPerfHint: 'Đăng ký các mục lô DMP tại đây. Mỗi mục ánh xạ một bài kiểm tra phóng điện vào một hàng trong mẫu báo cáo Excel.',
   dmpPerfAutoTraysHint: 'Để trống khay để tự động gán (1 chuyền→tất cả 9, 2 chuyền→1-4/6-9, 3 chuyền→1-3/4-6/7-9)',
   dmpPerfEntriesCount: '{count} mục đã đăng ký',
+  dmpPerfExportSelectAll: 'Chọn tất cả',
+  dmpPerfExportDeselectAll: 'Bỏ chọn tất cả',
+  dmpPerfExportSelectedCount: 'Sẽ xuất {selected}/{total} mục',
 };

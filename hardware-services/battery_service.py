@@ -120,6 +120,7 @@ class StartRequest(BaseModel):
     load_time: float    # seconds
     coeff: float        # K multiplier
     retest_id: Optional[int] = None  # if set, overwrite this battery index
+    start_id: int = 1   # first battery ID; set to N+1 when resuming a loaded session
 
 
 class BatteryRecord(BaseModel):
@@ -285,13 +286,14 @@ def _run_test_loop(params: dict) -> None:
         ocv_time = params["ocv_time"]
         load_time = params["load_time"]
         coeff = params["coeff"]
+        start_id = params.get("start_id", 1)
 
         while session["running"]:
             with _lock:
                 retest_id = session["retest_id"]
                 n_records = len(session["records"])
 
-            tid = retest_id if retest_id is not None else n_records + 1
+            tid = retest_id if retest_id is not None else start_id + n_records
 
             # ------------------------------------------------------------------
             # Wait for battery insertion (voltage > 0.5 V)
@@ -602,6 +604,7 @@ def start_test(req: StartRequest):
         "ocv_time": req.ocv_time,
         "load_time": req.load_time,
         "coeff": req.coeff,
+        "start_id": max(1, req.start_id),
     }
 
     _test_thread = threading.Thread(target=_run_test_loop, args=(params,), daemon=True)

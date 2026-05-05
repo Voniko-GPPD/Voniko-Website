@@ -317,6 +317,8 @@ export default function BatteryPage() {
   const autoRestartAfterRetestRef = useRef(false);
   // Maps batteryId -> number of retests done (for "đo X lần không đạt" display)
   const retestCountMapRef = useRef({});
+  // Starting battery ID for the current test run (1 for fresh, N+1 when resuming loaded history)
+  const startIdRef = useRef(1);
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -449,6 +451,7 @@ export default function BatteryPage() {
     ocv_standard_max: ocvMax,
     ccv_standard_min: ccvMin,
     ccv_standard_max: ccvMax,
+    start_id: startIdRef.current,
   }), [orderId, testDate, resistance, ocvTime, loadTime, kCoeff, batteryType, productLine, ocvMin, ocvMax, ccvMin, ccvMax]);
 
   const sendMsg = useCallback((msg) => {
@@ -717,6 +720,9 @@ export default function BatteryPage() {
     if (running) {
       sendMsg({ action: 'stop' });
     } else {
+      // When starting a test, resume from the next battery after any already-loaded records.
+      // This lets users load a 190-battery history and continue from battery 191.
+      startIdRef.current = records.length + 1;
       setSessionStarted(true);
       sendMsg({ action: 'start', payload: buildParams() });
     }
@@ -868,6 +874,7 @@ export default function BatteryPage() {
     setReadingsByBattery({});
     setChartSeriesByBattery({});
     setSessionStarted(false);
+    startIdRef.current = 1;
     resetLoadedSnapshotTracking();
   }, [saveCurrentOrderSnapshot, sendMsg, resetLoadedSnapshotTracking]);
 
@@ -1480,12 +1487,20 @@ export default function BatteryPage() {
       dataIndex: 'orderId',
       key: 'orderId',
       width: 160,
-      render: (value, snapshot) => (
-        <Space size={4} direction="vertical">
-          <strong>{value || '-'}</strong>
-          {snapshot._status === 'updated' && <Tag color="orange" style={{ fontSize: 11 }}>{t('batteryHistoryStatusUpdated')}</Tag>}
-        </Space>
-      ),
+      render: (value) => <strong>{value || '-'}</strong>,
+    },
+    {
+      title: t('batteryHistoryStatus'),
+      key: '_status',
+      width: 160,
+      render: (_, snapshot) => snapshot._status === 'updated'
+        ? (
+          <Space size={4} direction="vertical" style={{ lineHeight: 1.3 }}>
+            <Tag color="orange" style={{ fontSize: 11 }}>{t('batteryHistoryStatusUpdated')}</Tag>
+            <span style={{ fontSize: 11, color: '#8c8c8c' }}>{snapshot._savedAt ? dayjs(snapshot._savedAt).format('DD/MM/YYYY HH:mm') : ''}</span>
+          </Space>
+        )
+        : <Tag color="green" style={{ fontSize: 11 }}>{t('batteryHistoryStatusNew')}</Tag>,
     },
     {
       title: t('batteryTestMonth'),

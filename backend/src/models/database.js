@@ -307,6 +307,12 @@ function createTables() {
     db.exec('ALTER TABLE battery_presets ADD COLUMN hei_max REAL');
   }
 
+  // Safe migration: add status column to battery_order_history if not present
+  const historyColumns = db.prepare("PRAGMA table_info(battery_order_history)").all();
+  if (!historyColumns.some(c => c.name === 'status')) {
+    db.exec("ALTER TABLE battery_order_history ADD COLUMN status TEXT DEFAULT 'new'");
+  }
+
 }
 
 function seedDefaults() {

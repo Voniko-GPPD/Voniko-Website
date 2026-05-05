@@ -434,7 +434,7 @@ export default function BatteryPage() {
 
   const buildParams = useCallback(() => ({
     order_id: orderId,
-    date: testDate ? testDate.format('YYYY-MM') : dayjs().format('YYYY-MM'),
+    date: testDate ? testDate.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
     resistance: parseFloat(resistance),
     ocv_time: parseFloat(ocvTime),
     load_time: parseFloat(loadTime),
@@ -773,7 +773,7 @@ export default function BatteryPage() {
     if (!normalizedOrderId) return;
     const snapshot = {
       orderId: orderIdRef.current?.trim() || '',
-      testDate: testDateRef.current ? testDateRef.current.format('YYYY-MM') : null,
+      testDate: testDateRef.current ? testDateRef.current.format('YYYY-MM-DD') : null,
       batteryType: batteryTypeRef.current,
       productLine: productLineRef.current,
       records: snap_records,
@@ -796,10 +796,12 @@ export default function BatteryPage() {
     saveOrderHistorySnapshot(payload).then((res) => {
       const savedId = res.data.id;
       const savedAt = res.data.savedAt;
+      const isUpdated = res.data.updated === true;
       setOrderHistory(prev => {
         const entry = {
           _snapshotId: savedId,
           _savedAt: savedAt,
+          _status: isUpdated ? 'updated' : 'new',
           ...snapshot,
         };
         const next = dedupeOrderHistory([
@@ -953,7 +955,7 @@ export default function BatteryPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      const date = testDate ? testDate.format('YYYY-MM') : dayjs().format('YYYY-MM');
+      const date = testDate ? testDate.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD');
       link.download = `battery_report_${orderId}_${date}.xlsx`;
       document.body.appendChild(link);
       link.click();
@@ -991,7 +993,7 @@ export default function BatteryPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      const date = testDate ? testDate.format('YYYY-MM') : dayjs().format('YYYY-MM');
+      const date = testDate ? testDate.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD');
       link.download = `battery_archive_${orderId}_${date}.xlsx`;
       document.body.appendChild(link);
       link.click();
@@ -1020,10 +1022,14 @@ export default function BatteryPage() {
 
   // ECharts option — show only the latest battery being measured (OCV + CCV connected)
   const allBatteryIds = Object.keys(chartSeriesByBattery).map(Number).sort((a, b) => a - b);
-  // During a retest, show only that battery's (fresh) chart data
-  const latestBatteryIds = retestingBatteryId !== null
-    ? [retestingBatteryId]
-    : (allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : []);
+  // During a live session: show only the battery currently being tested (or retested).
+  // When viewing a loaded snapshot (session not started): show all batteries so the user
+  // can see the full OCV/CCV data for the entire order.
+  const latestBatteryIds = sessionStarted
+    ? (retestingBatteryId !== null
+        ? [retestingBatteryId]
+        : (allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : []))
+    : allBatteryIds;
   const chartSeries = [];
   latestBatteryIds.forEach((bid, idx) => {
     const { ocv = [], ccv = [] } = chartSeriesByBattery[bid];
@@ -1454,7 +1460,6 @@ export default function BatteryPage() {
     { title: t('batteryTime'), dataIndex: 'time', key: 'time', width: 80, render: (value) => value != null ? String(value) : '-' },
     { title: t('batteryCaliperDia'), dataIndex: 'dia', key: 'dia', width: 90, render: (value) => value != null ? parseFloat(value).toFixed(2) : '-' },
     { title: t('batteryCaliperHei'), dataIndex: 'hei', key: 'hei', width: 90, render: (value) => value != null ? parseFloat(value).toFixed(2) : '-' },
-    { title: t('status'), dataIndex: 'status', key: 'status', width: 100, render: (value) => value ? <Tag color="blue">{value}</Tag> : '-' },
   ]), [t]);
 
   const historySummaryColumns = React.useMemo(() => ([
@@ -1471,15 +1476,20 @@ export default function BatteryPage() {
       title: t('batteryOrderId'),
       dataIndex: 'orderId',
       key: 'orderId',
-      width: 140,
-      render: (value) => <strong>{value || '-'}</strong>,
+      width: 160,
+      render: (value, snapshot) => (
+        <Space size={4} direction="vertical">
+          <strong>{value || '-'}</strong>
+          {snapshot._status === 'updated' && <Tag color="orange" style={{ fontSize: 11 }}>{t('batteryHistoryStatusUpdated')}</Tag>}
+        </Space>
+      ),
     },
     {
       title: t('batteryTestMonth'),
       dataIndex: 'testDate',
       key: 'testDate',
-      width: 110,
-      render: (value) => value || '-',
+      width: 120,
+      render: (value) => value ? dayjs(value).format('DD/MM/YYYY') : '-',
     },
     {
       title: t('batteryType'),
@@ -1628,7 +1638,7 @@ export default function BatteryPage() {
         chartDataOCV,
         chartDataCCV,
         orderId,
-        testDate: testDate ? testDate.format('YYYY-MM') : null,
+        testDate: testDate ? testDate.format('YYYY-MM-DD') : null,
         batteryType,
         productLine,
         ocvMin,
@@ -1959,10 +1969,10 @@ export default function BatteryPage() {
                   <Col xs={24} sm={12}>
                     <Form.Item label={t('batteryTestMonth')} style={{ marginBottom: 0 }}>
                       <DatePicker
-                        picker="month"
                         value={testDate}
                         onChange={setTestDate}
                         disabled={inputsDisabled}
+                        format="DD/MM/YYYY"
                         style={{ width: '100%' }}
                       />
                     </Form.Item>

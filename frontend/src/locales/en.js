@@ -499,6 +499,7 @@ export default {
   batteryHistoryCount: 'Batteries',
   batteryHistoryLoad: 'Load',
   batteryHistoryViewing: 'Viewing',
+  batteryHistoryStatusUpdated: 'Updated',
   batteryHistoryDeleteAllTitle: 'Delete all order history?',
   batteryHistoryDeleteAllContent: 'This action cannot be undone.',
   batteryOrderHistoryEmpty: 'No saved orders yet. When you clear a session, the order will be stored here automatically.',

@@ -499,6 +499,7 @@ export default {
   batteryHistoryCount: 'Số pin',
   batteryHistoryLoad: 'Tải lại',
   batteryHistoryViewing: 'Đang xem',
+  batteryHistoryStatusUpdated: 'Đã cập nhật',
   batteryHistoryDeleteAllTitle: 'Xóa toàn bộ lịch sử đơn hàng?',
   batteryHistoryDeleteAllContent: 'Hành động này không thể hoàn tác.',
   batteryOrderHistoryEmpty: 'Chưa có đơn hàng nào được lưu. Khi bạn xóa một phiên làm việc, đơn hàng sẽ tự động lưu vào đây.',

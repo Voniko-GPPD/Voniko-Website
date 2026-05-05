@@ -977,6 +977,19 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     h_no_ws = re.sub(r'\s+', '', h)
     if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
         return True
+    # Match when one side carries a trailing endpoint-voltage suffix ("-X.XXV")
+    # and the other does not.  The most common case is the fdfs label coming from
+    # para_pub.jstj which embeds the voltage (e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V")
+    # while the Excel template header omits it (e.g. "(1500mW2s,650mW28s) 10T/h,24h/d").
+    # Only one side is stripped at a time so two labels with *different* voltages
+    # (e.g. "-1.05V" vs "-0.9V") are never incorrectly considered equal.
+    _v_sfx = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
+    f_no_v = re.sub(r'\s+', '', _v_sfx.sub('', f))
+    h_no_v = re.sub(r'\s+', '', _v_sfx.sub('', h))
+    if f_no_v and h_no_ws and f_no_v == h_no_ws:
+        return True
+    if f_no_ws and h_no_v and f_no_ws == h_no_v:
+        return True
     # Whole-word boundary check — prevents "10ohm" from matching "100ohm".
     # A word boundary here means the match is not immediately preceded or
     # followed by an alphanumeric character or a forward-slash.

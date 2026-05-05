@@ -144,6 +144,16 @@ export default function DMPExportTab({ stationId, selection }) {
     setReportEndpoint(null);
     requestedBatysRef.current = new Set();
     if (selection) {
+      const disCondRaw = selection.jstj || selection.hjwd || selection.wd || '';
+      // When zzdy (endpoint voltage) is not stored separately in the DB, try to
+      // extract it from the jstj condition string (e.g. "-1.05V" at the end of
+      // "(1500mW2s,650mW28s)10T/h,24h/d-1.05V"). This allows Uniformity to be
+      // computed and the Dis-condition field to display the voltage correctly.
+      let epVoltage = selection.zzdy || '';
+      if (!epVoltage && disCondRaw) {
+        const vm = disCondRaw.match(/-\s*(\d+\.?\d*)\s*[Vv]\s*$/);
+        if (vm) epVoltage = vm[1];
+      }
       setArchiveFields({
         archname: selection.id || '',
         name: selection.name || selection.dcmc || '',
@@ -158,8 +168,8 @@ export default function DMPExportTab({ stationId, selection }) {
         voltage_type: selection.dylx || selection.fdlx || '',
         trademark: selection.sbmc || selection.trademark || '',
         load_resistance: selection.fzdz || selection.fz2 || '',
-        endpoint_voltage: selection.zzdy || '',
-        dis_condition: selection.jstj || selection.hjwd || selection.wd || '',
+        endpoint_voltage: epVoltage,
+        dis_condition: disCondRaw,
         min_duration: selection.fdts || '',
       });
     } else {
@@ -510,11 +520,15 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
               <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.dcxh || '-'}</td>
               <td style={labelStyle}>{t('dm2000DisCondition')}</td>
               <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>
-                {archiveFields.fdfs
-                  ? (archiveFields.endpoint_voltage
-                    ? `${archiveFields.fdfs} to ${appendUnit(archiveFields.endpoint_voltage, 'V')}`
-                    : archiveFields.fdfs)
-                  : '-'}
+                {(() => {
+                  const base = archiveFields.fdfs || archiveFields.dis_condition;
+                  if (!base) return '-';
+                  // If the condition string already contains a trailing voltage
+                  // (e.g. "-1.05V" from jstj), display it as-is to avoid duplication.
+                  if (/[-]\s*\d+\.?\d*\s*[Vv]\s*$/.test(base)) return base;
+                  const ep = archiveFields.endpoint_voltage;
+                  return ep ? `${base} to ${appendUnit(ep, 'V')}` : base;
+                })()}
               </td>
             </tr>
             <tr>

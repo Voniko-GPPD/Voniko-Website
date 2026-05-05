@@ -488,12 +488,12 @@ router.delete('/presets/:batteryType/:productLine', (req, res) => {
 // Battery Order History (lịch sử đơn hàng)
 // ---------------------------------------------------------------------------
 
-// GET /api/battery/order-history — list history for current user
+// GET /api/battery/order-history — list all history (visible to all authenticated users)
 router.get('/order-history', (req, res) => {
   try {
     const rows = getDb().prepare(
-      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at FROM battery_order_history WHERE created_by = ? ORDER BY saved_at DESC LIMIT 200'
-    ).all(req.user.id);
+      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at FROM battery_order_history ORDER BY saved_at DESC LIMIT 200'
+    ).all();
     const items = rows.map((row) => ({
       _snapshotId: row.id,
       _savedAt: row.saved_at,

@@ -488,12 +488,12 @@ router.delete('/presets/:batteryType/:productLine', (req, res) => {
 // Battery Order History (lịch sử đơn hàng)
 // ---------------------------------------------------------------------------
 
-// GET /api/battery/order-history — list history for the current user
+// GET /api/battery/order-history — list history for all users
 router.get('/order-history', (req, res) => {
   try {
     const rows = getDb().prepare(
-      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, status FROM battery_order_history WHERE created_by = ? ORDER BY saved_at DESC LIMIT 200'
-    ).all(req.user.id);
+      'SELECT id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, status FROM battery_order_history ORDER BY saved_at DESC LIMIT 200'
+    ).all();
     const items = rows.map((row) => ({
       _snapshotId: row.id,
       _savedAt: row.saved_at,
@@ -573,10 +573,10 @@ router.post('/order-history', (req, res) => {
   }
 });
 
-// DELETE /api/battery/order-history — clear all history for current user
+// DELETE /api/battery/order-history — clear all history
 router.delete('/order-history', (req, res) => {
   try {
-    getDb().prepare('DELETE FROM battery_order_history WHERE created_by = ?').run(req.user.id);
+    getDb().prepare('DELETE FROM battery_order_history').run();
     res.json({ ok: true });
   } catch (e) {
     logger.error('DELETE /battery/order-history error', { error: e.message });
@@ -587,7 +587,7 @@ router.delete('/order-history', (req, res) => {
 // DELETE /api/battery/order-history/:id — delete one snapshot
 router.delete('/order-history/:id', (req, res) => {
   try {
-    const info = getDb().prepare('DELETE FROM battery_order_history WHERE id = ? AND created_by = ?').run(req.params.id, req.user.id);
+    const info = getDb().prepare('DELETE FROM battery_order_history WHERE id = ?').run(req.params.id);
     if (info.changes === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ ok: true });
   } catch (e) {

@@ -745,4 +745,7 @@ export default {
   dmpPerfHint: '在此注册DMP批次条目。每个条目将放电测试映射到Excel性能报告模板中的对应行。',
   dmpPerfAutoTraysHint: '留空托盘将自动分配（1产线→全部9个，2产线→1-4/6-9，3产线→1-3/4-6/7-9）',
   dmpPerfEntriesCount: '已注册 {count} 个条目',
+  dmpPerfExportSelectAll: '全选',
+  dmpPerfExportDeselectAll: '取消全选',
+  dmpPerfExportSelectedCount: '将导出 {selected}/{total} 条目',
 };

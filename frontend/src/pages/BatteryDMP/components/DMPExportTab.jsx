@@ -457,6 +457,27 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
     return val == null ? '…' : '-';
   };
 
+  // Compute Uniformity = (1 − (Max − Min) / Avg) × 100% from cycle counts at
+  // the endpoint voltage.  Uses the user-selected endpoint when available;
+  // falls back to the archived endpoint_voltage.
+  const computedUnifRate = useMemo(() => {
+    const ep = reportEndpoint ?? epFromArchive;
+    if (ep == null) return '-';
+    const counts = previewBatys
+      .map((b) => {
+        const rows = telemetryMap[b];
+        if (!rows) return null;
+        return countAtVoltage(rows, ep);
+      })
+      .filter((v) => v != null);
+    if (counts.length < 2) return '-';
+    const maxC = Math.max(...counts);
+    const minC = Math.min(...counts);
+    const avgC = counts.reduce((s, v) => s + v, 0) / counts.length;
+    if (avgC <= 0) return '-';
+    return `${((1 - (maxC - minC) / avgC) * 100).toFixed(2)} %`;
+  }, [previewBatys, telemetryMap, epFromArchive, reportEndpoint]);
+
   return (
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
       <Space align="center" wrap>
@@ -488,7 +509,13 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
               <td style={labelStyle}>{t('dm2000Type')}</td>
               <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.dcxh || '-'}</td>
               <td style={labelStyle}>{t('dm2000DisCondition')}</td>
-              <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.fdfs || '-'}</td>
+              <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>
+                {archiveFields.fdfs
+                  ? (archiveFields.endpoint_voltage
+                    ? `${archiveFields.fdfs} to ${appendUnit(archiveFields.endpoint_voltage, 'V')}`
+                    : archiveFields.fdfs)
+                  : '-'}
+              </td>
             </tr>
             <tr>
               <td style={labelStyle}>{t('dm2000VoltageType')}</td>
@@ -519,6 +546,10 @@ function ReportPreview({ archiveFields, previewBatys, telemetryMap, statsMap, re
               <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.min_duration || '-'}</td>
               <td style={labelStyle}>{t('dm2000EndDate')}</td>
               <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{archiveFields.enddate || '-'}</td>
+            </tr>
+            <tr>
+              <td style={labelStyle}>{t('dm2000UnifRate')}</td>
+              <td colSpan={numCols - 1} style={cellStyle}>{computedUnifRate}</td>
             </tr>
             {/* Battery column headers */}
             <tr>

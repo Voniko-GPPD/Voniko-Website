@@ -124,8 +124,11 @@ function dedupeOrderHistory(items) {
     .slice(0, 50);
 }
 
-function RowWithPopover({ record, readingsByBattery, buildMiniChartOption, ...rowProps }) {
-  const hasReadings = record && readingsByBattery && (readingsByBattery[record.id] || []).length > 0;
+function RowWithPopover({ record, readingsByBattery, chartSeriesByBattery, buildMiniChartOption, ...rowProps }) {
+  const hasReadings = record && (
+    (readingsByBattery && (readingsByBattery[record.id] || []).length > 0) ||
+    (chartSeriesByBattery && ((chartSeriesByBattery[record.id]?.ocv || []).length > 0 || (chartSeriesByBattery[record.id]?.ccv || []).length > 0))
+  );
   if (!hasReadings) {
     return <tr {...rowProps} />;
   }
@@ -1022,14 +1025,13 @@ export default function BatteryPage() {
 
   // ECharts option — show only the latest battery being measured (OCV + CCV connected)
   const allBatteryIds = Object.keys(chartSeriesByBattery).map(Number).sort((a, b) => a - b);
-  // During a live session: show only the battery currently being tested (or retested).
-  // When viewing a loaded snapshot (session not started): show all batteries so the user
-  // can see the full OCV/CCV data for the entire order.
-  const latestBatteryIds = sessionStarted
+  // During active measurement: show only the battery currently being tested (or retested).
+  // When not actively running (loaded snapshot, stopped session): show nothing in the left chart.
+  const latestBatteryIds = running
     ? (retestingBatteryId !== null
         ? [retestingBatteryId]
         : (allBatteryIds.length > 0 ? [allBatteryIds[allBatteryIds.length - 1]] : []))
-    : allBatteryIds;
+    : [];
   const chartSeries = [];
   latestBatteryIds.forEach((bid, idx) => {
     const { ocv = [], ccv = [] } = chartSeriesByBattery[bid];
@@ -1068,7 +1070,7 @@ export default function BatteryPage() {
     });
   });
   // Fallback to legacy flat data when chartSeriesByBattery is empty (e.g. resumed session without per-battery data)
-  if (allBatteryIds.length === 0 && (chartDataOCV.length > 0 || chartDataCCV.length > 0)) {
+  if (running && allBatteryIds.length === 0 && (chartDataOCV.length > 0 || chartDataCCV.length > 0)) {
     chartSeries.push({
       name: 'OCV',
       type: 'line',
@@ -1552,8 +1554,16 @@ export default function BatteryPage() {
 
   const buildMiniChartOption = React.useCallback((batteryId) => {
     const readings = readingsByBattery[batteryId] || [];
-    const ocvData = readings.filter(r => r.phase === 'ocv').map(r => [r.t, r.v]);
-    const ccvData = readings.filter(r => r.phase === 'ccv').map(r => [r.t, r.v]);
+    let ocvData, ccvData;
+    if (readings.length > 0) {
+      ocvData = readings.filter(r => r.phase === 'ocv').map(r => [r.t, r.v]);
+      ccvData = readings.filter(r => r.phase === 'ccv').map(r => [r.t, r.v]);
+    } else {
+      // Fallback to chartSeriesByBattery (e.g. loaded snapshots without readingsByBattery)
+      const series = chartSeriesByBattery[batteryId] || {};
+      ocvData = series.ocv || [];
+      ccvData = series.ccv || [];
+    }
     const ccvDataConnected = ocvData.length > 0 && ccvData.length > 0
       ? [ocvData[ocvData.length - 1], ...ccvData]
       : ccvData;
@@ -1581,7 +1591,7 @@ export default function BatteryPage() {
         { name: 'CCV', type: 'line', data: ccvDataConnected, symbol: 'none', lineStyle: { color: '#0091ea', width: 1.5 } },
       ],
     };
-  }, [readingsByBattery]);
+  }, [readingsByBattery, chartSeriesByBattery]);
 
   const prevRecordsForScrollRef = useRef(records);
   const resultsTableRef = useRef(null);
@@ -2545,7 +2555,7 @@ export default function BatteryPage() {
                     body: {
                       row: (rowProps) => {
                         const record = recordsMap[String(rowProps['data-row-key'])];
-                        return <RowWithPopover record={record} readingsByBattery={readingsByBattery} buildMiniChartOption={buildMiniChartOption} {...rowProps} />;
+                        return <RowWithPopover record={record} readingsByBattery={readingsByBattery} chartSeriesByBattery={chartSeriesByBattery} buildMiniChartOption={buildMiniChartOption} {...rowProps} />;
                       },
                     },
                   }}

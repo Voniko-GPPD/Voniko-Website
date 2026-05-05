@@ -1067,6 +1067,18 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
         if perf_row_idx is not None and sorted_keys:
             template_row = list(ws.iter_rows(min_row=perf_row_idx, max_row=perf_row_idx))[0]
 
+            # Pre-scan template row to detect which RATE_j columns are percentage-formatted.
+            # A percentage-formatted cell (number_format containing "%") expects a 0-1
+            # decimal fraction; the uniform_rate values are in the 0-100 range, so they
+            # must be divided by 100 before being placed in such cells.
+            rate_is_pct: dict[int, bool] = {}  # j → True if RATE_j cell is pct-formatted
+            for rate_tmpl_cell in template_row:
+                if isinstance(rate_tmpl_cell.value, str):
+                    rate_match = re.fullmatch(r"\{\{RATE_(\d+)\}\}", rate_tmpl_cell.value.strip())
+                    if rate_match:
+                        rate_fmt = rate_tmpl_cell.number_format or ""
+                        rate_is_pct[int(rate_match.group(1))] = "%" in rate_fmt
+
             # Insert extra rows so there is one row per data point
             if len(sorted_keys) > 1:
                 ws.insert_rows(perf_row_idx + 1, len(sorted_keys) - 1)
@@ -1082,7 +1094,10 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                     avg_h = entry.get("avg_hours")
                     ur = entry.get("uniform_rate")
                     ctx[f"RESULT_{j}"] = avg_h if avg_h is not None else ""
-                    ctx[f"RATE_{j}"] = ur if ur is not None else ""
+                    ur_val = ur if ur is not None else ""
+                    if isinstance(ur_val, (int, float)) and rate_is_pct.get(j, False):
+                        ur_val = ur_val / 100.0
+                    ctx[f"RATE_{j}"] = ur_val
 
                 for tmpl_cell in template_row:
                     target_cell = ws.cell(row=target_row_idx, column=tmpl_cell.column)
@@ -1191,7 +1206,15 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                                 val = avg_h if avg_h is not None else ""
                             ws.cell(row=target_row, column=r_col).value = val
                         if ur_col is not None:
-                            ws.cell(row=target_row, column=ur_col).value = ur if ur is not None else ""
+                            ur_write: float | str = ur if ur is not None else ""
+                            if isinstance(ur_write, (int, float)):
+                                # If the template cell for this column is formatted as a
+                                # percentage (e.g. "0.00%"), Excel expects a 0-1 decimal
+                                # fraction, not a 0-100 value.  Divide by 100 accordingly.
+                                ur_fmt = ws.cell(row=tag_row_idx, column=ur_col).number_format or ""
+                                if "%" in ur_fmt:
+                                    ur_write = ur_write / 100.0
+                            ws.cell(row=target_row, column=ur_col).value = ur_write
 
                 # Step 5: clear template tags from the tag row if that row's
                 # date was not among the exported data dates (so stale tags
@@ -4444,6 +4467,14 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
 
             fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
             fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
+            # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
+            # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
+            # This allows _perf_fdfs_matches_header to find the correct column in the
+            # Excel template (e.g. "1500mW,(1500mW2s,650mW28s)10T/h,24h/d") instead of
+            # falling through to the position-based fallback that writes to the first
+            # RESULT column regardless of the actual test condition.
+            if not fdfs:
+                fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
             zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
 
             # Parse endpoint voltage

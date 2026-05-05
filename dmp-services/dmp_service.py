@@ -4569,27 +4569,22 @@ async def upload_dmp_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
-@app.post("/dmp-perf-report/generate")
-def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
-    """Generate a DMP battery performance report (Bảng theo dõi hiệu suất pin).
+def _compute_dmp_perf_groups(payload: DmpPerfReportRequest) -> "dict[str, dict]":  # noqa: C901
+    """Compute performance groups dict from DMP entries.
 
-    Each entry maps a DMP batch (batch_id) to one or more production-line groups.
-    The result is written into the appropriate sheet/row/column of the Excel template.
+    Returns ``groups[sheet_key][(row_label, loai)][fdfs_label] =
+    {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}``.
 
-    Sheet name: ``{model} {chuyen}`` (e.g. "LR6 501"), or just ``{model}`` for
-    battery types that don't need a production-line filter (LR61, 9V).
-
-    Row key: date from para_pub.fdrq for normal entries, or a special label
-    ("6020", "3 THÁNG", "6 THÁNG") for special test rows.
-
-    Column: determined by matching para_pub.fdfs against the column headers in
-    the template (same logic as DM2000 perf report).
+    This shared helper is used by both the Excel report generator and the JSON
+    preview endpoint so the computation logic lives in exactly one place.
     """
-    if not payload.entries:
-        raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    # groups[sheet_key][(row_label, loai)][fdfs_label] =
-    #   {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}
+    def _to_date(v) -> str:
+        if v and hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        s = str(v or "").strip()[:10].replace("/", "-")
+        return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
+
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:
@@ -4625,7 +4620,7 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
                         )
                     except pyodbc.Error as exc:
                         logger.warning(
-                            "generate_dmp_perf_report: fdrq date query failed %s: %s",
+                            "_compute_dmp_perf_groups: fdrq date query failed %s: %s",
                             entry.batch_id, exc,
                         )
             except (ValueError, TypeError):
@@ -4644,7 +4639,7 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
                         (entry.batch_id,),
                     )
                 except pyodbc.Error as exc:
-                    logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
+                    logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
         # Fallback: search para_pub.bz (remark field) using the raw_remark text.
         # This handles the case where the user entered a remark without a date
@@ -4670,16 +4665,9 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
                     batch_rows = _read_dmpdata(_bz_sql, (_bz_pattern,))
                 except pyodbc.Error as exc:
                     logger.warning(
-                        "generate_dmp_perf_report: bz LIKE lookup failed '%s': %s",
+                        "_compute_dmp_perf_groups: bz LIKE lookup failed '%s': %s",
                         _remark_search, exc,
                     )
-
-        # Helper to convert Access date values to YYYY-MM-DD strings
-        def _to_date(v) -> str:
-            if v and hasattr(v, "strftime"):
-                return v.strftime("%Y-%m-%d")
-            s = str(v or "").strip()[:10].replace("/", "-")
-            return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
 
         if batch_rows:
             batch = batch_rows[0]
@@ -4710,7 +4698,7 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
         else:
             # Batch not found in DMPDATA.mdb — still include entry in report with
             # empty performance cells so the template rows are populated.
-            logger.warning("generate_dmp_perf_report: batch not found: %s", entry.batch_id)
+            logger.warning("_compute_dmp_perf_groups: batch not found: %s", entry.batch_id)
             actual_batch_id = entry.batch_id
             fdfs = ""
             ep_v = None
@@ -4764,6 +4752,21 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
             row_key = (row_label, grp.loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
 
+    return groups
+
+
+@app.post("/dmp-perf-report/generate")
+def generate_dmp_perf_report(payload: DmpPerfReportRequest):
+    """Generate a DMP battery performance report (Bảng theo dõi hiệu suất pin).
+
+    Each entry maps a DMP batch (batch_id) to one or more production-line groups.
+    The result is written into the appropriate sheet/row/column of the Excel template.
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    groups = _compute_dmp_perf_groups(payload)
+
     if not groups:
         raise HTTPException(
             status_code=422, detail="No data could be extracted for any entry"
@@ -4783,3 +4786,71 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.post("/dmp-perf-data")
+def get_dmp_perf_data(payload: DmpPerfReportRequest):
+    """Return DMP performance data as JSON for web visualization.
+
+    Same computation as ``/dmp-perf-report/generate`` but returns JSON instead
+    of filling an Excel template, enabling the web UI to render an interactive
+    preview table.
+
+    Response shape::
+
+        {
+          "sheets": {
+            "LR6 501": {
+              "rows": [
+                {
+                  "date": "2026-01-01",
+                  "loai": "UD",
+                  "conditions": {
+                    "<fdfs_label>": {
+                      "avg_hours": 25.3,
+                      "avg_minutes": 1518.0,
+                      "avg_count": 12,
+                      "uniform_rate": 96.5
+                    }
+                  }
+                }
+              ],
+              "conditions": ["<fdfs_label1>", ...]
+            }
+          }
+        }
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    groups = _compute_dmp_perf_groups(payload)
+
+    sheets: dict = {}
+    for sheet_key, date_type_map in groups.items():
+        # Collect all unique condition labels for this sheet (preserving insertion order)
+        all_conditions: list[str] = []
+        seen: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen:
+                    seen.add(lbl)
+                    all_conditions.append(lbl)
+
+        rows = []
+        for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
+            rows.append({
+                "date": row_label,
+                "loai": loai,
+                "conditions": {
+                    fdfs_label: {
+                        "avg_hours": perf.get("avg_hours"),
+                        "avg_minutes": perf.get("avg_minutes"),
+                        "avg_count": perf.get("avg_count"),
+                        "uniform_rate": perf.get("uniform_rate"),
+                    }
+                    for fdfs_label, perf in conditions.items()
+                },
+            })
+        sheets[sheet_key] = {"rows": rows, "conditions": all_conditions}
+
+    return {"sheets": sheets}

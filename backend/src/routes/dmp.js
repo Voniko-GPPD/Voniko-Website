@@ -663,4 +663,16 @@ router.post('/dmp-perf-report/generate', authenticateToken, async (req, res, nex
   }
 });
 
+// POST /api/dmp/dmp-perf-data?stationId= — get DMP perf data as JSON for web preview
+router.post('/dmp-perf-data', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dmp-perf-data`, req.body, { timeout: 120000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

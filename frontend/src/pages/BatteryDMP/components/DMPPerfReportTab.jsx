@@ -14,6 +14,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   notification,
 } from 'antd';
@@ -21,6 +22,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   PlusOutlined,
   SaveOutlined,
   UploadOutlined,
@@ -30,6 +32,7 @@ import {
   createPerfEntry,
   deletePerfEntry,
   downloadDmpPerfReport,
+  fetchDmpPerfData,
   fetchDmpPerfTemplates,
   fetchPerfEntries,
   fetchStations,
@@ -525,6 +528,286 @@ function TemplateTab({ stationId }) {
   );
 }
 
+// ─── Performance View Tab ─────────────────────────────────────────────────────
+
+/** Special row labels that should be highlighted (non-date rows). */
+const SPECIAL_ROW_LABELS = new Set(['6020', '3 THÁNG', '6 THÁNG']);
+
+/** Return a coloured tag for special row labels or plain text for dates. */
+function RowLabelCell({ label }) {
+  if (label === '6020') return <Tag color="gold" style={{ fontWeight: 600 }}>{label}</Tag>;
+  if (label === '3 THÁNG') return <Tag color="blue" style={{ fontWeight: 600 }}>{label}</Tag>;
+  if (label === '6 THÁNG') return <Tag color="purple" style={{ fontWeight: 600 }}>{label}</Tag>;
+  return <span>{label}</span>;
+}
+
+/** Format a numeric performance result for display. */
+function fmtResult(cond, unit) {
+  if (!cond) return '-';
+  if (unit === 't') {
+    return cond.avg_count != null ? String(cond.avg_count) : '-';
+  }
+  return cond.avg_hours != null ? `${Number(cond.avg_hours).toFixed(2)}` : '-';
+}
+
+function PerfViewTab({ stationId }) {
+  const { t } = useLang();
+  const [entries, setEntries] = useState([]);
+  const [loadingEntries, setLoadingEntries] = useState(false);
+  const [loadingData, setLoadingData] = useState(false);
+  const [dateRange, setDateRange] = useState([null, null]);
+  const [filterModel, setFilterModel] = useState(null);
+  const [filterLoai, setFilterLoai] = useState(null);
+  const [filterChuyen, setFilterChuyen] = useState(null);
+  const [sheetsData, setSheetsData] = useState(null); // { [sheetKey]: {rows, conditions} }
+  const [activeSheet, setActiveSheet] = useState(null);
+
+  // Load entries from SQLite for filter dropdowns
+  const loadEntries = useCallback(async () => {
+    if (!stationId) return;
+    setLoadingEntries(true);
+    try {
+      const [from, to] = dateRange;
+      const data = await fetchPerfEntries(stationId, {
+        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
+        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
+      });
+      setEntries(data);
+    } catch (err) {
+      notification.error({ message: err.message });
+    } finally {
+      setLoadingEntries(false);
+    }
+  }, [stationId, dateRange]);
+
+  useEffect(() => { loadEntries(); }, [loadEntries]);
+
+  // Available filter options derived from loaded entries
+  const modelOptions = useMemo(() => {
+    const models = [...new Set((entries || []).map((e) => e.model).filter(Boolean))].sort();
+    return models.map((m) => ({ value: m, label: m }));
+  }, [entries]);
+
+  const loaiOptions = useMemo(() => {
+    const loais = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.loai)).filter(Boolean),
+    )].sort();
+    return loais.map((l) => ({ value: l, label: l }));
+  }, [entries]);
+
+  const chuyenOptions = useMemo(() => {
+    const chuyens = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.chuyen)).filter(Boolean),
+    )].sort();
+    return chuyens.map((c) => ({ value: c, label: c }));
+  }, [entries]);
+
+  // Build filtered entries for preview
+  const filteredEntries = useMemo(() => {
+    let result = entries;
+    if (filterModel) result = result.filter((e) => e.model === filterModel);
+    if (filterLoai || filterChuyen) {
+      result = result
+        .map((e) => ({
+          ...e,
+          groups: (e.groups || []).filter((g) => {
+            if (filterLoai && g.loai !== filterLoai) return false;
+            if (filterChuyen && g.chuyen !== filterChuyen) return false;
+            return true;
+          }),
+        }))
+        .filter((e) => e.groups.length > 0);
+    }
+    return result;
+  }, [entries, filterModel, filterLoai, filterChuyen]);
+
+  const handlePreview = async () => {
+    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
+    if (filteredEntries.length === 0) { notification.warning({ message: t('dmpPerfNoEntries') }); return; }
+    setLoadingData(true);
+    setSheetsData(null);
+    try {
+      const payload = filteredEntries.map((e) => ({
+        batch_id: e.batch_id,
+        report_date: e.report_date || null,
+        model: e.model,
+        groups: e.groups,
+        special_type: e.special_type || 'normal',
+        raw_remark: e.raw_remark || null,
+      }));
+      const data = await fetchDmpPerfData({ stationId, entries: payload });
+      setSheetsData(data.sheets || {});
+      const sheetKeys = Object.keys(data.sheets || {});
+      setActiveSheet(sheetKeys[0] || null);
+    } catch (err) {
+      notification.error({ message: t('dmpPerfViewTab'), description: err.message });
+    } finally {
+      setLoadingData(false);
+    }
+  };
+
+  // Build Ant Design table columns for a given sheet
+  const buildColumns = useCallback((sheetKey) => {
+    if (!sheetsData || !sheetsData[sheetKey]) return [];
+    const { conditions } = sheetsData[sheetKey];
+    const cols = [
+      {
+        title: t('dmpPerfViewDate'),
+        dataIndex: 'date',
+        key: 'date',
+        width: 120,
+        fixed: 'left',
+        render: (v) => <RowLabelCell label={v} />,
+        onCell: (row) => ({
+          style: SPECIAL_ROW_LABELS.has(row.date)
+            ? { background: '#fffbe6', fontWeight: 600 }
+            : {},
+        }),
+      },
+      {
+        title: t('dmpPerfViewLoaiCol'),
+        dataIndex: 'loai',
+        key: 'loai',
+        width: 80,
+        fixed: 'left',
+        render: (v) => <Tag>{v}</Tag>,
+      },
+    ];
+
+    (conditions || []).forEach((cond) => {
+      // Detect unit from label suffix (h/m/t)
+      const lc = cond.toLowerCase();
+      const unit = lc.endsWith('(t)') ? 't' : lc.endsWith('(m)') ? 'm' : 'h';
+      const unitLabel = unit === 't' ? t('dmpPerfViewCount') : t('dmpPerfViewHours');
+
+      cols.push({
+        title: (
+          <Tooltip title={cond}>
+            <span style={{ fontSize: 11 }}>{cond}</span>
+          </Tooltip>
+        ),
+        key: cond,
+        children: [
+          {
+            title: `${t('dmpPerfViewResult')} (${unitLabel})`,
+            key: `${cond}_result`,
+            width: 100,
+            render: (_, row) => fmtResult(row.conditions?.[cond], unit),
+          },
+          {
+            title: t('dmpPerfViewRate'),
+            key: `${cond}_rate`,
+            width: 90,
+            render: (_, row) => {
+              const ur = row.conditions?.[cond]?.uniform_rate;
+              return ur != null ? `${Number(ur).toFixed(1)}%` : '-';
+            },
+          },
+        ],
+      });
+    });
+
+    return cols;
+  }, [sheetsData, t]);
+
+  const sheetKeys = Object.keys(sheetsData || {});
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card size="small">
+        <Space wrap>
+          <DatePicker.RangePicker
+            value={dateRange}
+            onChange={setDateRange}
+            allowClear
+          />
+          <Select
+            allowClear
+            style={{ minWidth: 120 }}
+            placeholder={t('dmpPerfViewFilterModel')}
+            value={filterModel}
+            onChange={setFilterModel}
+            options={modelOptions}
+          />
+          <Select
+            allowClear
+            style={{ minWidth: 110 }}
+            placeholder={t('dmpPerfViewFilterLoai')}
+            value={filterLoai}
+            onChange={setFilterLoai}
+            options={loaiOptions}
+          />
+          <Select
+            allowClear
+            style={{ minWidth: 120 }}
+            placeholder={t('dmpPerfViewFilterChuyen')}
+            value={filterChuyen}
+            onChange={setFilterChuyen}
+            options={chuyenOptions}
+          />
+          <Button onClick={loadEntries} loading={loadingEntries}>{t('dm2000Search')}</Button>
+          <Button
+            type="primary"
+            icon={<EyeOutlined />}
+            loading={loadingData}
+            onClick={handlePreview}
+            disabled={filteredEntries.length === 0}
+          >
+            {t('dmpPerfViewPreview')}
+          </Button>
+        </Space>
+      </Card>
+
+      {loadingData && (
+        <Card size="small">
+          <Space><Spin /><Typography.Text type="secondary">{t('dmpPerfViewLoading')}</Typography.Text></Space>
+        </Card>
+      )}
+
+      {!loadingData && sheetsData !== null && sheetKeys.length === 0 && (
+        <Empty description={t('dmpPerfViewNoData')} />
+      )}
+
+      {!loadingData && sheetKeys.length > 0 && (
+        <Card
+          size="small"
+          title={(
+            <Space>
+              <span>{t('dmpPerfViewSheet')}:</span>
+              <Tabs
+                size="small"
+                activeKey={activeSheet}
+                onChange={setActiveSheet}
+                items={sheetKeys.map((k) => ({ key: k, label: k }))}
+                style={{ marginBottom: 0 }}
+              />
+            </Space>
+          )}
+        >
+          {activeSheet && sheetsData[activeSheet] && (
+            <Table
+              size="small"
+              rowKey={(row, i) => `${row.date}-${row.loai}-${i}`}
+              columns={buildColumns(activeSheet)}
+              dataSource={sheetsData[activeSheet].rows || []}
+              pagination={false}
+              scroll={{ x: 'max-content' }}
+              bordered
+              rowClassName={(row) => SPECIAL_ROW_LABELS.has(row.date) ? 'perf-special-row' : ''}
+            />
+          )}
+        </Card>
+      )}
+
+      {!loadingData && sheetsData === null && (
+        <Card size="small">
+          <Empty description={t('dmpPerfViewNoData')} />
+        </Card>
+      )}
+    </Space>
+  );
+}
+
 // ─── Export Tab ───────────────────────────────────────────────────────────────
 
 function ExportTab({ stationId }) {
@@ -537,6 +820,9 @@ function ExportTab({ stationId }) {
   const [generating, setGenerating] = useState(false);
   const [dateRange, setDateRange] = useState([null, null]);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+  const [filterModel, setFilterModel] = useState(null);
+  const [filterLoai, setFilterLoai] = useState(null);
+  const [filterChuyen, setFilterChuyen] = useState(null);
 
   const loadEntries = useCallback(async () => {
     if (!stationId) return;
@@ -567,6 +853,45 @@ function ExportTab({ stationId }) {
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
+  // Derive filter option lists from loaded entries
+  const modelOptions = useMemo(() => {
+    const models = [...new Set((entries || []).map((e) => e.model).filter(Boolean))].sort();
+    return models.map((m) => ({ value: m, label: m }));
+  }, [entries]);
+
+  const loaiOptions = useMemo(() => {
+    const loais = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.loai)).filter(Boolean),
+    )].sort();
+    return loais.map((l) => ({ value: l, label: l }));
+  }, [entries]);
+
+  const chuyenOptions = useMemo(() => {
+    const chuyens = [...new Set(
+      (entries || []).flatMap((e) => (e.groups || []).map((g) => g.chuyen)).filter(Boolean),
+    )].sort();
+    return chuyens.map((c) => ({ value: c, label: c }));
+  }, [entries]);
+
+  // Apply client-side filters
+  const filteredEntries = useMemo(() => {
+    let result = entries;
+    if (filterModel) result = result.filter((e) => e.model === filterModel);
+    if (filterLoai || filterChuyen) {
+      result = result
+        .map((e) => ({
+          ...e,
+          groups: (e.groups || []).filter((g) => {
+            if (filterLoai && g.loai !== filterLoai) return false;
+            if (filterChuyen && g.chuyen !== filterChuyen) return false;
+            return true;
+          }),
+        }))
+        .filter((e) => e.groups.length > 0);
+    }
+    return result;
+  }, [entries, filterModel, filterLoai, filterChuyen]);
+
   const specialTag = (type) => {
     const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
     const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal' };
@@ -577,9 +902,8 @@ function ExportTab({ stationId }) {
   const handleGenerate = async () => {
     if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
     if (!selectedTemplate) { notification.warning({ message: t('dmpPerfNoTemplate') }); return; }
-    const toExport = selectedRowKeys.length > 0
-      ? entries.filter((e) => selectedRowKeys.includes(e.id))
-      : entries;
+    const selected = filteredEntries.filter((e) => selectedRowKeys.includes(e.id));
+    const toExport = selected.length > 0 ? selected : filteredEntries;
     if (toExport.length === 0) { notification.warning({ message: t('dmpPerfNoEntriesToExport') }); return; }
 
     setGenerating(true);
@@ -604,7 +928,9 @@ function ExportTab({ stationId }) {
     }
   };
 
-  const exportCount = selectedRowKeys.length > 0 ? selectedRowKeys.length : entries.length;
+  const exportCount = selectedRowKeys.length > 0
+    ? filteredEntries.filter((e) => selectedRowKeys.includes(e.id)).length
+    : filteredEntries.length;
 
   const columns = [
     { title: '#', key: 'idx', width: 44, render: (_, __, i) => i + 1 },
@@ -656,11 +982,35 @@ function ExportTab({ stationId }) {
               onChange={setDateRange}
               allowClear
             />
+            <Select
+              allowClear
+              style={{ minWidth: 110 }}
+              placeholder={t('dmpPerfViewFilterModel')}
+              value={filterModel}
+              onChange={setFilterModel}
+              options={modelOptions}
+            />
+            <Select
+              allowClear
+              style={{ minWidth: 110 }}
+              placeholder={t('dmpPerfViewFilterLoai')}
+              value={filterLoai}
+              onChange={setFilterLoai}
+              options={loaiOptions}
+            />
+            <Select
+              allowClear
+              style={{ minWidth: 120 }}
+              placeholder={t('dmpPerfViewFilterChuyen')}
+              value={filterChuyen}
+              onChange={setFilterChuyen}
+              options={chuyenOptions}
+            />
             <Button onClick={loadEntries} loading={loadingEntries}>{t('dm2000Search')}</Button>
             <Button
               size="small"
-              onClick={() => setSelectedRowKeys(entries.map((e) => e.id))}
-              disabled={entries.length === 0}
+              onClick={() => setSelectedRowKeys(filteredEntries.map((e) => e.id))}
+              disabled={filteredEntries.length === 0}
             >
               {t('dmpPerfExportSelectAll')}
             </Button>
@@ -673,14 +1023,14 @@ function ExportTab({ stationId }) {
             </Button>
           </Space>
 
-          {loadingEntries ? <Spin /> : entries.length === 0 ? (
+          {loadingEntries ? <Spin /> : filteredEntries.length === 0 ? (
             <Empty description={t('dmpPerfNoEntries')} />
           ) : (
             <Table
               size="small"
               rowKey="id"
               columns={columns}
-              dataSource={entries}
+              dataSource={filteredEntries}
               pagination={{ pageSize: 50, showSizeChanger: true }}
               scroll={{ x: 700 }}
               rowSelection={{
@@ -698,14 +1048,14 @@ function ExportTab({ stationId }) {
             type="primary"
             icon={<DownloadOutlined />}
             loading={generating}
-            disabled={!selectedTemplate || entries.length === 0}
+            disabled={!selectedTemplate || filteredEntries.length === 0}
             onClick={handleGenerate}
           >
             {generating ? t('dmpPerfGenerating') : t('dmpPerfGenerate')}
           </Button>
-          {!loadingEntries && entries.length > 0 && (
+          {!loadingEntries && filteredEntries.length > 0 && (
             <Typography.Text type="secondary">
-              {t('dmpPerfExportSelectedCount', { selected: exportCount, total: entries.length })}
+              {t('dmpPerfExportSelectedCount', { selected: exportCount, total: filteredEntries.length })}
             </Typography.Text>
           )}
         </Space>
@@ -780,6 +1130,11 @@ export default function DMPPerfReportTab() {
             key: 'template',
             label: t('dmpPerfTemplateTab'),
             children: <TemplateTab stationId={stationId} />,
+          },
+          {
+            key: 'view',
+            label: t('dmpPerfViewTab'),
+            children: <PerfViewTab stationId={stationId} />,
           },
           {
             key: 'export',

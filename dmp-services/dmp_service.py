@@ -1001,10 +1001,17 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
 
     if _whole_word(f, h) or _whole_word(h, f):
         return True
-    # Match on leading token (e.g. "10ohm" vs "10ohm 24h/d-0.9V")
-    f_tok = f.split()[0] if f.split() else ""
-    h_tok = h.split()[0] if h.split() else ""
-    if f_tok and h_tok and f_tok == h_tok:
+    # Match on leading token only when at least one side is a bare single-token
+    # label (e.g. "10ohm" stored in DB vs "10ohm 24h/d-0.9V" in template).
+    # Restricting to single-token cases prevents false positives between two
+    # fully-specified conditions that merely share a leading token, such as
+    # "3.9ohm 1h/d-0.8V" (h) and "3.9ohm 4m/h 8h/d-0.9V" (m), or
+    # "1000mA 24h/d-0.9V" and "1000mA 10s/m 1h/d-0.9V" (t).
+    f_parts = f.split()
+    h_parts = h.split()
+    f_tok = f_parts[0] if f_parts else ""
+    h_tok = h_parts[0] if h_parts else ""
+    if f_tok and h_tok and f_tok == h_tok and (len(f_parts) == 1 or len(h_parts) == 1):
         return True
     return False
 

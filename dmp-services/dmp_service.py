@@ -954,7 +954,11 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     """Return True if *fdfs* label is a reasonable match for *header* text.
 
     The header may contain a unit suffix such as ``(h)`` / ``(m)`` / ``(t)``
-    which is ignored for matching purposes.
+    which is ignored for matching purposes.  Additionally, the header often
+    carries a leading prefix (e.g. ``"1500mW/"``), a trailing voltage suffix
+    (e.g. ``"-1.05V"``), and may have different internal spacing compared with
+    the fdfs value stored in the database (e.g. a space between ``")`` and
+    ``"10T/h"``).  The matcher handles all these variations.
 
     Uses whole-word boundary matching to avoid false positives such as
     "10ohm" incorrectly matching a "100ohm" column header.
@@ -985,6 +989,18 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     f_tok = f.split()[0] if f.split() else ""
     h_tok = h.split()[0] if h.split() else ""
     if f_tok and h_tok and f_tok == h_tok:
+        return True
+    # Space-normalised substring check.
+    # The fdfs stored in the DB (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") may
+    # appear inside the column header (e.g. "1500mW/(1500mW2s,650mW28s) 10T/h,
+    # 24h/d-1.05V") with extra leading prefixes, trailing voltage suffixes, or
+    # a space inserted before "10T/h".  Stripping all whitespace from both
+    # strings and checking whether fdfs is contained in the header catches
+    # these variations reliably without the risk of false positives that the
+    # reverse direction (header inside fdfs) would introduce.
+    f_nospace = re.sub(r"\s+", "", f)
+    h_nospace = re.sub(r"\s+", "", h)
+    if f_nospace and h_nospace and f_nospace in h_nospace:
         return True
     return False
 
@@ -1208,11 +1224,15 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                         if ur_col is not None:
                             ur_write: float | str = ur if ur is not None else ""
                             if isinstance(ur_write, (int, float)):
-                                # If the template cell for this column is formatted as a
-                                # percentage (e.g. "0.00%"), Excel expects a 0-1 decimal
-                                # fraction, not a 0-100 value.  Divide by 100 accordingly.
-                                ur_fmt = ws.cell(row=tag_row_idx, column=ur_col).number_format or ""
-                                if "%" in ur_fmt:
+                                # If the data cell (or the template tag cell) is
+                                # formatted as a percentage (e.g. "0.00%"), Excel
+                                # expects a 0-1 fraction, not a 0-100 value.
+                                # Check BOTH the tag-row cell and the actual target
+                                # data cell — the tag-row cell might be "General"
+                                # even when the data rows are pre-formatted as %.
+                                ur_fmt_tag = ws.cell(row=tag_row_idx, column=ur_col).number_format or ""
+                                ur_fmt_data = ws.cell(row=target_row, column=ur_col).number_format or ""
+                                if "%" in ur_fmt_tag or "%" in ur_fmt_data:
                                     ur_write = ur_write / 100.0
                             ws.cell(row=target_row, column=ur_col).value = ur_write
 
@@ -1720,8 +1740,17 @@ def _parse_iso_date_param(value: str | None, field_name: str) -> date | None:
 def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
     """
     Query vidata with fallback strategy for Access ODBC parameter quirks.
+
+    Includes ``daynum`` and ``numb`` so that the caller can reconstruct
+    cumulative test time when the DMP machine stores TIM as per-day seconds
+    (resetting to 0 at the start of each discharge day).  The primary sort
+    order is ``daynum ASC, numb ASC`` which gives the correct temporal
+    sequence regardless of whether TIM is per-day or cumulative.
     """
-    base_sql = "SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {placeholder} ORDER BY TIM ASC"
+    base_sql = (
+        "SELECT baty, numb, daynum, TIM, VOLT, Im FROM vidata"
+        " WHERE baty = {placeholder} ORDER BY daynum ASC, numb ASC"
+    )
 
     try:
         return query_mdb(mdb_path, base_sql.format(placeholder="?"), (channel,))
@@ -1740,7 +1769,8 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
     try:
         return query_mdb(
             mdb_path,
-            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {int(channel)} ORDER BY TIM ASC",
+            f"SELECT baty, numb, daynum, TIM, VOLT, Im FROM vidata"
+            f" WHERE baty = {int(channel)} ORDER BY daynum ASC, numb ASC",
         )
     except HTTPException:
         raise
@@ -1750,7 +1780,8 @@ def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
     try:
         return query_mdb(
             mdb_path,
-            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = '{int(channel)}' ORDER BY TIM ASC",
+            f"SELECT baty, numb, daynum, TIM, VOLT, Im FROM vidata"
+            f" WHERE baty = '{int(channel)}' ORDER BY daynum ASC, numb ASC",
         )
     except HTTPException:
         raise
@@ -1781,11 +1812,38 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
     except Exception as exc:
         logger.exception("_read_telemetry: unexpected error for cdmc=%r channel=%d", cdmc, channel)
         raise HTTPException(status_code=500, detail=f"Unexpected error reading telemetry: {exc}") from exc
+    # Determine whether the DMP machine stored TIM as per-day seconds (0-86400,
+    # resetting to 0 at midnight of each discharge day) or as cumulative seconds
+    # from the very start of the test.
+    #
+    # Heuristic: if all TIM values are <= 86400 the storage is almost certainly
+    # per-day (cumulative TIM for a multi-day test would exceed 86400).  When
+    # per-day storage is detected we reconstruct the true elapsed time using the
+    # daynum column: elapsed = (daynum - 1) x 86400 + TIM  (daynum is 1-indexed).
+    _raw_tims: list[float] = []
+    for row in rows:
+        t = row.get("TIM")
+        if t not in (None, "", "--"):
+            try:
+                _raw_tims.append(float(t))
+            except (TypeError, ValueError):
+                pass
+    _per_day_tim = bool(_raw_tims) and max(_raw_tims) <= 86400.0
+
     for row in rows:
         tim = row.get("TIM")
         if tim is not None and tim != "--":
             try:
-                row["TIM"] = round(float(tim) / 3600, 6)
+                tim_f = float(tim)
+                if _per_day_tim:
+                    daynum = row.get("daynum")
+                    if daynum not in (None, "", "--"):
+                        day_offset = max(float(daynum) - 1.0, 0.0)  # 1-indexed
+                        row["TIM"] = round(day_offset * 24.0 + tim_f / 3600.0, 6)
+                    else:
+                        row["TIM"] = round(tim_f / 3600.0, 6)
+                else:
+                    row["TIM"] = round(tim_f / 3600.0, 6)
             except (TypeError, ValueError):
                 pass
     with _TELEMETRY_CACHE_LOCK:

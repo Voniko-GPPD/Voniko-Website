@@ -696,6 +696,7 @@ class DmpPerfEntry(BaseModel):
     groups: list[DmpPerfGroup]
     special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
     report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
+    raw_remark: Optional[str] = None  # free-text remark; used as fallback to search para_pub.bz
 
 
 class DmpPerfReportRequest(BaseModel):
@@ -4399,6 +4400,34 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):  # noqa: C901
                     )
                 except pyodbc.Error as exc:
                     logger.warning("generate_dmp_perf_report: batch read failed %s: %s", entry.batch_id, exc)
+
+        # Fallback: search para_pub.bz (remark field) using the raw_remark text.
+        # This handles the case where the user entered a remark without a date
+        # prefix (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date
+        # and the date-based lookup yields no results, but the corresponding
+        # para_pub row can still be identified by its bz value.
+        if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
+            _remark_search = entry.raw_remark.strip()
+            # Strip leading 6-digit DDMMYY date prefix so "160226 LR6 UD501"
+            # becomes "LR6 UD501" and matches bz = "160226 LR6 UD501 UD502".
+            _remark_tokens = _remark_search.split()
+            if _remark_tokens and re.fullmatch(r"\d{6}", _remark_tokens[0]):
+                _remark_search = " ".join(_remark_tokens[1:]).strip()
+            if _remark_search:
+                # Leading wildcard is intentional: bz values often contain a
+                # DDMMYY date prefix before the remark text (e.g. "160226 LR6 UD501").
+                _bz_pattern = f"%{_remark_search}%"
+                _bz_sql = (
+                    "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub"
+                    " WHERE bz LIKE ? ORDER BY fdrq DESC"
+                )
+                try:
+                    batch_rows = _read_dmpdata(_bz_sql, (_bz_pattern,))
+                except pyodbc.Error as exc:
+                    logger.warning(
+                        "generate_dmp_perf_report: bz LIKE lookup failed '%s': %s",
+                        _remark_search, exc,
+                    )
 
         # Helper to convert Access date values to YYYY-MM-DD strings
         def _to_date(v) -> str:

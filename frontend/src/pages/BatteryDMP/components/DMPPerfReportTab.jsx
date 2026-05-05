@@ -566,6 +566,7 @@ function ExportTab({ stationId }) {
           model: e.model,
           groups: e.groups,
           special_type: e.special_type || 'normal',
+          raw_remark: e.raw_remark || null,
         })),
         templateName: selectedTemplate,
       });

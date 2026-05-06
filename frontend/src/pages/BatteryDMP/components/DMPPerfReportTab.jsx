@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   Popconfirm,
+  Radio,
   Select,
   Space,
   Spin,
@@ -238,9 +239,12 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [groups, setGroups] = useState(initial?.groups || []);
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
+  // 'dmp' → DMP batch entry;  'dm2000' → DM2000 archive entry
+  const [entryType, setEntryType] = useState(initial?.dm2000_archname ? 'dm2000' : 'dmp');
 
-  // Auto-parse remark on change and fill model + groups
+  // Auto-parse remark (DMP mode only) to fill model + groups
   const handleRemarkChange = (e) => {
+    if (entryType !== 'dmp') return;
     const raw = e.target.value;
     const parsed = parseRemark(raw);
     if (parsed.model) {
@@ -252,8 +256,17 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
     }
   };
 
-  const handleModelChange = (val) => {
-    setCurrentModel(val);
+  const handleModelChange = (val) => { setCurrentModel(val); };
+
+  const handleTypeChange = (e) => {
+    setEntryType(e.target.value);
+    // Clear the field that belongs to the OTHER mode so it doesn't leak into the payload
+    if (e.target.value === 'dm2000') {
+      form.setFieldValue('raw_remark', '');
+    } else {
+      form.setFieldValue('dm2000_archname', '');
+      form.setFieldValue('dm2000_report_date', null);
+    }
   };
 
   const handleSave = async () => {
@@ -261,15 +274,32 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       const values = await form.validateFields();
       setSaving(true);
 
-      // Derive batch_id and report_date from the remark's date prefix
-      const parsed = parseRemark(values.raw_remark);
-      const reportDate = parsed.date
-        ? dayjs(parsed.date).format('YYYY-MM-DD')
-        : dayjs().format('YYYY-MM-DD');
-      const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
-      const batchId = SIX_DIGIT_RE.test(remarkTokens[0])
-        ? remarkTokens[0]
-        : dayjs().format('DDMMYY');
+      let batchId, reportDate, rawRemark, dm2000Archname;
+
+      if (entryType === 'dm2000') {
+        dm2000Archname = (values.dm2000_archname || '').trim();
+        rawRemark = null;
+        // Use the manually supplied date for filtering; the actual row date
+        // in the report is read from the DM2000 archive at generation time.
+        if (values.dm2000_report_date) {
+          reportDate = values.dm2000_report_date.format('YYYY-MM-DD');
+          batchId = values.dm2000_report_date.format('DDMMYY');
+        } else {
+          reportDate = dayjs().format('YYYY-MM-DD');
+          batchId = dayjs().format('DDMMYY');
+        }
+      } else {
+        dm2000Archname = null;
+        rawRemark = values.raw_remark || null;
+        const parsed = parseRemark(values.raw_remark);
+        reportDate = parsed.date
+          ? dayjs(parsed.date).format('YYYY-MM-DD')
+          : dayjs().format('YYYY-MM-DD');
+        const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
+        batchId = SIX_DIGIT_RE.test(remarkTokens[0])
+          ? remarkTokens[0]
+          : dayjs().format('DDMMYY');
+      }
 
       const payload = {
         station_id: stationId,
@@ -278,9 +308,9 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         model: values.model,
         groups,
         special_type: values.special_type || 'normal',
-        raw_remark: values.raw_remark || null,
+        raw_remark: rawRemark,
         notes: values.notes || null,
-        dm2000_archname: (values.dm2000_archname || '').trim() || null,
+        dm2000_archname: dm2000Archname,
       };
       if (initial?.id) {
         await updatePerfEntry(initial.id, payload);
@@ -307,22 +337,51 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         special_type: initial?.special_type || 'normal',
         raw_remark: initial?.raw_remark || '',
         dm2000_archname: initial?.dm2000_archname || '',
+        dm2000_report_date: (initial?.dm2000_archname && initial?.report_date)
+          ? dayjs(initial.report_date)
+          : null,
         notes: initial?.notes || '',
       }}
     >
-      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
-        <Input
-          placeholder="e.g. 160226 LR6 UD501 UDP504"
-          onChange={handleRemarkChange}
-        />
+      {/* ── Source-type selector ── */}
+      <Form.Item label={t('dmpPerfEntrySourceType')}>
+        <Radio.Group value={entryType} onChange={handleTypeChange} buttonStyle="solid" size="small">
+          <Radio.Button value="dmp">DMP</Radio.Button>
+          <Radio.Button value="dm2000">DM2000</Radio.Button>
+        </Radio.Group>
       </Form.Item>
-      <Form.Item
-        name="dm2000_archname"
-        label={t('dmpPerfEntryDm2000Archname')}
-        extra={t('dmpPerfEntryDm2000ArchnameHint')}
-      >
-        <Input placeholder="e.g. QC2026/4/18 or 2026/4/1" />
-      </Form.Item>
+
+      {/* ── DMP-only fields ── */}
+      {entryType === 'dmp' && (
+        <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
+          <Input
+            placeholder="e.g. 160226 LR6 UD501 UDP504"
+            onChange={handleRemarkChange}
+          />
+        </Form.Item>
+      )}
+
+      {/* ── DM2000-only fields ── */}
+      {entryType === 'dm2000' && (
+        <>
+          <Form.Item
+            name="dm2000_archname"
+            label={t('dmpPerfEntryDm2000Archname')}
+            rules={[{ required: true }]}
+          >
+            <Input placeholder="e.g. QC2026/4/18 or 2026/4/1" />
+          </Form.Item>
+          <Form.Item
+            name="dm2000_report_date"
+            label={t('dmpPerfEntryDm2000ReportDate')}
+            extra={t('dmpPerfEntryDm2000ReportDateHint')}
+          >
+            <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
+          </Form.Item>
+        </>
+      )}
+
+      {/* ── Common fields ── */}
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>
         <Select
           options={['LR6', 'LR03', 'LR61', '9V'].map((v) => ({ value: v, label: v }))}
@@ -405,6 +464,14 @@ function RemarkRegistryTab({ stationId, selection }) {
   const columns = [
     { title: '#', key: 'idx', width: 44, render: (_, __, i) => i + 1 },
     { title: t('dmpPerfEntryDate'), dataIndex: 'report_date', key: 'report_date', width: 110 },
+    {
+      title: t('dmpPerfEntrySourceType'),
+      key: 'source',
+      width: 80,
+      render: (_, row) => row.dm2000_archname
+        ? <Tag color="green">DM2000</Tag>
+        : <Tag color="blue">DMP</Tag>,
+    },
     { title: t('dmpPerfEntryModel'), dataIndex: 'model', key: 'model', width: 80 },
     {
       title: t('dmpPerfEntryGroups'),
@@ -422,9 +489,9 @@ function RemarkRegistryTab({ stationId, selection }) {
     },
     {
       title: t('dmpPerfEntryRemark'),
-      dataIndex: 'raw_remark',
-      key: 'raw_remark',
+      key: 'remark',
       ellipsis: true,
+      render: (_, row) => row.dm2000_archname || row.raw_remark || '-',
     },
     {
       title: '',

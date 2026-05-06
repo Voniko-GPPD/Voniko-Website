@@ -233,7 +233,40 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
       },
       timeout: 90000,
     });
-    res.json(r.data);
+    const data = r.data;
+    // Merge user-provided overrides (serialno, remarks) stored in SQLite so
+    // that values set via the web UI survive Access cache refreshes.
+    if (data && Array.isArray(data.archives) && data.archives.length > 0 && req.query.stationId) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const stationId = req.query.stationId;
+        const overrides = db
+          .prepare('SELECT archname, serialno, remarks FROM dm2000_archive_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) {
+            overrideMap[ov.archname] = ov;
+          }
+          data.archives = data.archives.map((archive) => {
+            const ov = overrideMap[archive.archname];
+            if (!ov) return archive;
+            return {
+              ...archive,
+              // User-set overrides always take precedence over the DM2000 DB value
+              // (which may be absent/null if DM2000 software didn't populate the field).
+              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : archive.serialno,
+              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : archive.remarks,
+              _has_override: true,
+            };
+          });
+        }
+      } catch (_) {
+        // Non-fatal: if SQLite read fails, return unmerged data
+      }
+    }
+    res.json(data);
   } catch (err) { handleProxyError(err, res, next); }
 });
 
@@ -491,6 +524,55 @@ router.delete('/dm2000/options/:id', authenticateToken, requireAdmin, (req, res)
     const result = db.prepare('DELETE FROM dm2000_options WHERE id = ?').run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: 'Option not found' });
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DM2000 Archive Overrides (serialno + remarks stored in local SQLite) ────
+
+// GET /api/dmp/dm2000/archive-overrides?stationId=&archname=
+router.get('/dm2000/archive-overrides', authenticateToken, (req, res) => {
+  const { stationId, archname } = req.query;
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    if (archname) {
+      const row = db.prepare(
+        'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'
+      ).get(stationId, archname);
+      return res.json({ override: row || null });
+    }
+    const rows = db.prepare(
+      'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ?'
+    ).all(stationId);
+    res.json({ overrides: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/dm2000/archive-overrides — upsert serialno/remarks for one archive
+router.put('/dm2000/archive-overrides', authenticateToken, (req, res) => {
+  const { stationId, archname, serialno, remarks } = req.body || {};
+  if (!stationId || !archname) return res.status(400).json({ error: 'stationId and archname are required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    db.prepare(`
+      INSERT INTO dm2000_archive_overrides (station_id, archname, serialno, remarks, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now') || 'Z')
+      ON CONFLICT(station_id, archname) DO UPDATE SET
+        serialno = excluded.serialno,
+        remarks = excluded.remarks,
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now', 'utc') || 'Z'
+    `).run(stationId, archname, serialno ?? null, remarks ?? null, req.user.id);
+    const row = db.prepare(
+      'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'
+    ).get(stationId, archname);
+    res.json({ override: row });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

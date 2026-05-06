@@ -2827,8 +2827,8 @@ def get_dm2000_archives(
             "unifrate": _dm2000_get_value(row, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
             "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
             "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
-            "serialno": _dm2000_get_value(row, "serialno", "dcph"),
-            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz"),
+            "serialno": _dm2000_get_value(row, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no"),
+            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz", "note", "memo", "bzh"),
             # Additional fields for report preview.
             # Multiple aliases cover different DM2000 schema versions.
             "voltage_type": _dm2000_get_value(
@@ -3329,8 +3329,8 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
         "MANUFACTURER": _apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
         "MADE_DATE": _apply_override(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
-        "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph"), payload.override_serial_no),
-        "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "remark", "bz"), payload.override_remarks),
+        "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no"), payload.override_serial_no),
+        "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh"), payload.override_remarks),
         "BATTERY_NO": baty_label,
         # Extra fields for full template support
         "COMPANY": DM2000_COMPANY_NAME or "",
@@ -3861,8 +3861,8 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         "unifrate": str(_dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws") or ""),
         "manufacturer": str(_apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer) or ""),
         "madedate": _to_date_text(_dm2000_get_value(archive, "madedate", "scrq")),
-        "serialno": str(_dm2000_get_value(archive, "serialno", "dcph") or ""),
-        "remarks": str(_dm2000_get_value(archive, "remarks", "remark", "bz") or ""),
+        "serialno": str(_dm2000_get_value(archive, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no") or ""),
+        "remarks": str(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh") or ""),
         "voltage_type": str(_dm2000_get_value(
             archive,
             "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",

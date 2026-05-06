@@ -4569,7 +4569,10 @@ async def upload_dmp_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
-def _compute_dmp_perf_groups(payload: DmpPerfReportRequest) -> "dict[str, dict]":  # noqa: C901
+def _compute_dmp_perf_groups(  # noqa: C901
+    payload: DmpPerfReportRequest,
+    skip_not_found: bool = False,
+) -> "dict[str, dict]":
     """Compute performance groups dict from DMP entries.
 
     Returns ``groups[sheet_key][(row_label, loai)][fdfs_label] =
@@ -4696,9 +4699,15 @@ def _compute_dmp_perf_groups(payload: DmpPerfReportRequest) -> "dict[str, dict]"
                 except (TypeError, ValueError):
                     ep_v = None
         else:
-            # Batch not found in DMPDATA.mdb — still include entry in report with
-            # empty performance cells so the template rows are populated.
+            # Batch not found in DMPDATA.mdb.
             logger.warning("_compute_dmp_perf_groups: batch not found: %s", entry.batch_id)
+            # For the web JSON preview we skip entries with no DMP data entirely
+            # so that spurious rows (empty date) and spurious columns (grp.loai
+            # used as fdfs_label instead of the real condition string) do not
+            # appear in the table.  The Excel report generator keeps the old
+            # behaviour (empty cells) so users can still review missing batches.
+            if skip_not_found:
+                continue
             actual_batch_id = entry.batch_id
             fdfs = ""
             ep_v = None
@@ -4823,7 +4832,10 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    groups = _compute_dmp_perf_groups(payload)
+    # skip_not_found=True: entries with no matching DMP data are omitted from the
+    # web preview so the table does not show spurious empty rows or columns whose
+    # header is the battery grade (e.g. "UD+") rather than the real test condition.
+    groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
 
     sheets: dict = {}
     for sheet_key, date_type_map in groups.items():

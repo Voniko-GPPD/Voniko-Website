@@ -604,7 +604,7 @@ function PerfViewTab({ stationId }) {
   const [sheetsData, setSheetsData] = useState(null); // { [sheetKey]: {rows, conditions} }
   const [activeSheet, setActiveSheet] = useState(null);
 
-  // Load entries from SQLite for filter dropdowns
+  // Load entries from SQLite (used on mount and when date range changes)
   const loadEntries = useCallback(async () => {
     if (!stationId) return;
     setLoadingEntries(true);
@@ -627,6 +627,25 @@ function PerfViewTab({ stationId }) {
   const { modelOptions, loaiOptions, chuyenOptions, filteredEntries } = useEntryFilters(
     entries, filterModel, filterLoai, filterChuyen,
   );
+
+  /** Apply the same client-side filters as useEntryFilters to a raw list. */
+  const applyFilters = useCallback((data) => {
+    let result = data;
+    if (filterModel) result = result.filter((e) => e.model === filterModel);
+    if (filterLoai || filterChuyen) {
+      result = result
+        .map((e) => ({
+          ...e,
+          groups: (e.groups || []).filter((g) => {
+            if (filterLoai && g.loai !== filterLoai) return false;
+            if (filterChuyen && g.chuyen !== filterChuyen) return false;
+            return true;
+          }),
+        }))
+        .filter((e) => e.groups.length > 0);
+    }
+    return result;
+  }, [filterLoai, filterChuyen, filterModel]);
 
   const handlePreview = async () => {
     if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
@@ -652,6 +671,53 @@ function PerfViewTab({ stationId }) {
       setLoadingData(false);
     }
   };
+
+  /**
+   * "Tìm kiếm": fetch entries from the server with the current date range,
+   * apply client-side filters, then immediately query DMP performance data
+   * so the table updates in one click.
+   */
+  const handleSearch = useCallback(async () => {
+    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
+    setLoadingEntries(true);
+    setSheetsData(null);
+    let freshEntries = [];
+    try {
+      const [from, to] = dateRange;
+      freshEntries = await fetchPerfEntries(stationId, {
+        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
+        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
+      });
+      setEntries(freshEntries);
+    } catch (err) {
+      notification.error({ message: err.message });
+      setLoadingEntries(false);
+      return;
+    }
+    setLoadingEntries(false);
+
+    const toPreview = applyFilters(freshEntries);
+    if (toPreview.length === 0) { notification.warning({ message: t('dmpPerfNoEntries') }); return; }
+    setLoadingData(true);
+    try {
+      const payload = toPreview.map((e) => ({
+        batch_id: e.batch_id,
+        report_date: e.report_date || null,
+        model: e.model,
+        groups: e.groups,
+        special_type: e.special_type || 'normal',
+        raw_remark: e.raw_remark || null,
+      }));
+      const data = await fetchDmpPerfData({ stationId, entries: payload });
+      setSheetsData(data.sheets || {});
+      const sheetKeys = Object.keys(data.sheets || {});
+      setActiveSheet(sheetKeys[0] || null);
+    } catch (err) {
+      notification.error({ message: t('dmpPerfViewTab'), description: err.message });
+    } finally {
+      setLoadingData(false);
+    }
+  }, [stationId, dateRange, applyFilters, t]);
 
   // Build Ant Design table columns for a given sheet
   const buildColumns = useCallback((sheetKey) => {
@@ -682,9 +748,14 @@ function PerfViewTab({ stationId }) {
     ];
 
     (conditions || []).forEach((cond) => {
-      // Detect unit from label suffix (h/m/t)
+      // Detect unit from label:
+      //   explicit suffix "(t)" → count  |  "(m)" → minutes  |  "(h)" → hours
+      //   pattern "\d+T/h" (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") → count
+      //   fallback → hours
       const lc = cond.toLowerCase();
-      const unit = lc.endsWith('(t)') ? 't' : lc.endsWith('(m)') ? 'm' : 'h';
+      const unit = lc.endsWith('(t)') || /\d+t\/h/.test(lc) ? 't'
+        : lc.endsWith('(m)') ? 'm'
+        : 'h';
       const unitLabel = unit === 't' ? t('dmpPerfViewCount') : t('dmpPerfViewHours');
 
       cols.push({
@@ -752,7 +823,12 @@ function PerfViewTab({ stationId }) {
             onChange={setFilterChuyen}
             options={chuyenOptions}
           />
-          <Button onClick={loadEntries} loading={loadingEntries}>{t('dm2000Search')}</Button>
+          <Button
+            onClick={handleSearch}
+            loading={loadingEntries || loadingData}
+          >
+            {t('dm2000Search')}
+          </Button>
           <Button
             type="primary"
             icon={<EyeOutlined />}

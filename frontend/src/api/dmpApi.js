@@ -243,3 +243,20 @@ export async function downloadDmpPerfReport({ stationId, entries, templateName }
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function fetchDmpPerfData({ stationId, entries }) {
+  const token = localStorage.getItem('accessToken');
+  const res = await fetch(`${BASE}/dmp-perf-data?stationId=${encodeURIComponent(stationId)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ entries }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Failed to load performance data');
+  }
+  return res.json();
+}

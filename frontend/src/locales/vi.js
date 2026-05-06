@@ -762,6 +762,7 @@ export default {
   dmpPerfViewResult: 'Kết quả',
   dmpPerfViewRate: 'Tỷ lệ (%)',
   dmpPerfViewHours: 'h',
+  dmpPerfViewMinutes: 'phút',
   dmpPerfViewCount: 'lần',
   dmpPerfViewAllModels: 'Tất cả loại pin',
   dmpPerfViewAllLoai: 'Tất cả mẫu',

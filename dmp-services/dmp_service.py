@@ -4618,7 +4618,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except pyodbc.Error:
                     try:
                         batch_rows = _read_dmpdata(
-                            "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE fdrq = ?",
+                            "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub WHERE fdrq = ?",
                             (_qdate,),
                         )
                     except pyodbc.Error as exc:
@@ -4638,7 +4638,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             except pyodbc.Error:
                 try:
                     batch_rows = _read_dmpdata(
-                        "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub WHERE id = ?",
+                        "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub WHERE id = ?",
                         (entry.batch_id,),
                     )
                 except pyodbc.Error as exc:
@@ -4661,7 +4661,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 # DDMMYY date prefix before the remark text (e.g. "160226 LR6 UD501").
                 _bz_pattern = f"%{_remark_search}%"
                 _bz_sql = (
-                    "SELECT id, dcxh, fdrq, fdfs, zzdy, bz FROM para_pub"
+                    "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
                     " WHERE bz LIKE ? ORDER BY fdrq DESC"
                 )
                 try:
@@ -4688,6 +4688,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # RESULT column regardless of the actual test condition.
             if not fdfs:
                 fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
+            # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
+            _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
+            _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
+            _HFSJ_MINUTE = {"minute", "minutes", "phút", "m", "min", "phu"}
+            if _hfsj_raw in _HFSJ_TIMES:
+                hfsj_unit = "times"
+            elif _hfsj_raw in _HFSJ_MINUTE:
+                hfsj_unit = "minute"
+            else:
+                hfsj_unit = "hour"
             zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
 
             # Parse endpoint voltage
@@ -4710,6 +4720,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 continue
             actual_batch_id = entry.batch_id
             fdfs = ""
+            hfsj_unit = "hour"
             ep_v = None
 
             # Derive a proper YYYY-MM-DD row label from the available fields.
@@ -4745,6 +4756,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # Compute performance values for this group's trays using the resolved
             # para_pub.id (actual_batch_id) so that the para_singl lookup succeeds.
             perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
+            perf["hfsj_unit"] = hfsj_unit
 
             # Determine sheet name
             model_upper = entry.model.strip().upper()
@@ -4863,6 +4875,15 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                     for fdfs_label, perf in conditions.items()
                 },
             })
-        sheets[sheet_key] = {"rows": rows, "conditions": all_conditions}
+
+        # Build a per-sheet units dict: fdfs_label → "hour"|"minute"|"times".
+        # Take the first non-null value seen across all rows for each condition.
+        units: dict[str, str] = {}
+        for row_data in date_type_map.values():
+            for lbl, perf in row_data.items():
+                if lbl not in units and perf.get("hfsj_unit"):
+                    units[lbl] = perf["hfsj_unit"]
+
+        sheets[sheet_key] = {"rows": rows, "conditions": all_conditions, "units": units}
 
     return {"sheets": sheets}

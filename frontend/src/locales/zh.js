@@ -761,6 +761,7 @@ export default {
   dmpPerfViewResult: '测试结果',
   dmpPerfViewRate: '均匀率 (%)',
   dmpPerfViewHours: 'h',
+  dmpPerfViewMinutes: '分钟',
   dmpPerfViewCount: '次',
   dmpPerfViewAllModels: '所有型号',
   dmpPerfViewAllLoai: '所有等级',

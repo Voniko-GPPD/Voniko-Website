@@ -280,6 +280,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         special_type: values.special_type || 'normal',
         raw_remark: values.raw_remark || null,
         notes: values.notes || null,
+        dm2000_archname: (values.dm2000_archname || '').trim() || null,
       };
       if (initial?.id) {
         await updatePerfEntry(initial.id, payload);
@@ -305,6 +306,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         model: initial?.model || 'LR6',
         special_type: initial?.special_type || 'normal',
         raw_remark: initial?.raw_remark || '',
+        dm2000_archname: initial?.dm2000_archname || '',
         notes: initial?.notes || '',
       }}
     >
@@ -313,6 +315,13 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
           placeholder="e.g. 160226 LR6 UD501 UDP504"
           onChange={handleRemarkChange}
         />
+      </Form.Item>
+      <Form.Item
+        name="dm2000_archname"
+        label={t('dmpPerfEntryDm2000Archname')}
+        extra={t('dmpPerfEntryDm2000ArchnameHint')}
+      >
+        <Input placeholder="e.g. QC2026/4/18 or 2026/4/1" />
       </Form.Item>
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>
         <Select
@@ -685,6 +694,7 @@ function PerfViewTab({ stationId }) {
         groups: e.groups,
         special_type: e.special_type || 'normal',
         raw_remark: e.raw_remark || null,
+        dm2000_archname: e.dm2000_archname || null,
       }));
       const data = await fetchDmpPerfData({ stationId, entries: payload });
       setSheetsData(data.sheets || {});
@@ -957,6 +967,7 @@ function ExportTab({ stationId }) {
           groups: e.groups,
           special_type: e.special_type || 'normal',
           raw_remark: e.raw_remark || null,
+          dm2000_archname: e.dm2000_archname || null,
         })),
         templateName: selectedTemplate,
       });

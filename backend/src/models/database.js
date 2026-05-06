@@ -272,6 +272,7 @@ function createTables() {
       special_type TEXT NOT NULL DEFAULT 'normal',
       raw_remark TEXT,
       notes TEXT,
+      dm2000_archname TEXT,
       created_by TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
       updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
@@ -327,6 +328,12 @@ function createTables() {
   const historyColumns = db.prepare("PRAGMA table_info(battery_order_history)").all();
   if (!historyColumns.some(c => c.name === 'status')) {
     db.exec("ALTER TABLE battery_order_history ADD COLUMN status TEXT DEFAULT 'new'");
+  }
+
+  // Safe migration: add dm2000_archname column to dmp_perf_entries if not present
+  const perfEntryColumns = db.prepare("PRAGMA table_info(dmp_perf_entries)").all();
+  if (!perfEntryColumns.some(c => c.name === 'dm2000_archname')) {
+    db.exec('ALTER TABLE dmp_perf_entries ADD COLUMN dm2000_archname TEXT');
   }
 
 }

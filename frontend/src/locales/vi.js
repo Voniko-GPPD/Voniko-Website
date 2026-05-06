@@ -718,6 +718,8 @@ export default {
   dmpPerfEntryGroups: 'Chuyền',
   dmpPerfEntrySpecialType: 'Loại hàng',
   dmpPerfEntryRemark: 'Remark',
+  dmpPerfEntryDm2000Archname: 'Tên archive DM2000 (tuỳ chọn)',
+  dmpPerfEntryDm2000ArchnameHint: 'Nếu điền, dữ liệu hiệu suất sẽ được đọc từ archive DM2000 thay vì DMP. Dùng mã archive hiển thị trong DM Historic (ví dụ: QC2026/4/18).',
   dmpPerfEntryNotes: 'Ghi chú',
   dmpPerfSpecialNormal: 'Hàng thường (theo ngày)',
   dmpPerfSpecial6020: 'Hàng 6020',

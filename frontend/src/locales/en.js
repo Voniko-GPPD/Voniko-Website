@@ -718,6 +718,8 @@ export default {
   dmpPerfEntryGroups: 'Groups (loại/chuyền)',
   dmpPerfEntrySpecialType: 'Row Type',
   dmpPerfEntryRemark: 'Remark',
+  dmpPerfEntryDm2000Archname: 'DM2000 Archive Name (optional)',
+  dmpPerfEntryDm2000ArchnameHint: 'When set, performance data is read from the DM2000 archive instead of DMP. Use the archive ID shown in DM Historic (e.g. QC2026/4/18).',
   dmpPerfEntryNotes: 'Notes',
   dmpPerfSpecialNormal: 'Normal (date row)',
   dmpPerfSpecial6020: '6020 row',

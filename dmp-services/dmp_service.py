@@ -241,6 +241,10 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
                     _DM2000_BATTERIES_CACHE.clear()
+                with _DM2000_STATS_CACHE_LOCK:
+                    _DM2000_STATS_CACHE.clear()
+                with _DM2000_CURVE_CACHE_LOCK:
+                    _DM2000_CURVE_CACHE.clear()
             return
 
         # Validate magic bytes before replacing.
@@ -260,18 +264,44 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
+            source_str = str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = str(ls_path)
+                _DM2000_LS_CACHE_PATH = source_str
                 _DM2000_LS_CACHE_READY.set()
+            elif _DM2000_LS_CACHE_PATH != source_str:
+                # Validation failed (e.g. partial write during copy).  Fall back
+                # to reading directly from the source so stale data is not served.
+                _DM2000_LS_CACHE_PATH = source_str
+                with _DM2000_ARCHIVES_CACHE_LOCK:
+                    _DM2000_ARCHIVES_CACHE.clear()
+                with _DM2000_BATTERIES_CACHE_LOCK:
+                    _DM2000_BATTERIES_CACHE.clear()
+                with _DM2000_STATS_CACHE_LOCK:
+                    _DM2000_STATS_CACHE.clear()
+                with _DM2000_CURVE_CACHE_LOCK:
+                    _DM2000_CURVE_CACHE.clear()
             return
 
-        try:
-            os.replace(cache_tmp, cache_final)
-        except OSError as exc:
-            # On Windows the cache_final file may be held open by an active
-            # pyodbc connection.  Delete the temp copy and fall back to reading
-            # directly from the source path so that callers see fresh data.
-            logger.warning("dm2000_cache: rename failed (file in use?), falling back to source: %s", exc)
+        # Atomically replace the cached copy.  On Windows a concurrent pyodbc
+        # reader may hold cache_final open, causing os.replace to fail with
+        # PermissionError.  Retry a few times with a short sleep to let
+        # short-lived ODBC connections finish before giving up.
+        replace_exc: "OSError | None" = None
+        for attempt in range(6):
+            try:
+                os.replace(cache_tmp, cache_final)
+                replace_exc = None
+                break
+            except OSError as exc:
+                replace_exc = exc
+                if attempt < 5:
+                    time.sleep(0.4)
+        if replace_exc is not None:
+            # All retries failed — fall back to reading directly from source.
+            logger.warning(
+                "dm2000_cache: rename failed after retries (file in use?), falling back to source: %s",
+                replace_exc,
+            )
             try:
                 os.unlink(cache_tmp)
             except OSError:
@@ -354,9 +384,12 @@ def _dmpdata_refresh_cache(force: bool = False) -> None:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
+            source_str = str(dmpdata_path)
             if not _DMPDATA_CACHE_READY.is_set():
-                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_PATH = source_str
                 _DMPDATA_CACHE_READY.set()
+            elif _DMPDATA_CACHE_PATH != source_str:
+                _DMPDATA_CACHE_PATH = source_str
             return
 
         # Validate magic bytes before replacing.
@@ -373,18 +406,31 @@ def _dmpdata_refresh_cache(force: bool = False) -> None:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
+            source_str = str(dmpdata_path)
             if not _DMPDATA_CACHE_READY.is_set():
-                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_PATH = source_str
                 _DMPDATA_CACHE_READY.set()
+            elif _DMPDATA_CACHE_PATH != source_str:
+                _DMPDATA_CACHE_PATH = source_str
             return
 
-        try:
-            os.replace(cache_tmp, cache_final)
-        except OSError as exc:
-            # On Windows the cache_final file may be held open by an active
-            # pyodbc connection.  Delete the temp copy and fall back to reading
-            # directly from the source path so callers see fresh data.
-            logger.warning("dmpdata_cache: rename failed (file in use?), falling back to source: %s", exc)
+        # Atomically replace the cached copy.  Retry on transient ODBC locks.
+        replace_exc: "OSError | None" = None
+        for attempt in range(6):
+            try:
+                os.replace(cache_tmp, cache_final)
+                replace_exc = None
+                break
+            except OSError as exc:
+                replace_exc = exc
+                if attempt < 5:
+                    time.sleep(0.4)
+        if replace_exc is not None:
+            # All retries failed — fall back to reading directly from source.
+            logger.warning(
+                "dmpdata_cache: rename failed after retries (file in use?), falling back to source: %s",
+                replace_exc,
+            )
             try:
                 os.unlink(cache_tmp)
             except OSError:

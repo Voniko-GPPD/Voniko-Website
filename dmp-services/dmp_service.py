@@ -2716,7 +2716,9 @@ def get_dm2000_archives(
             "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
             "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
             "serialno": _dm2000_get_value(row, "serialno", "dcph"),
-            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz"),
+            # bz = explicit operator remark; sbmc = brand/device name used as
+            # a fallback when no explicit remark has been entered.
+            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz", "sbmc"),
             # Additional fields for report preview.
             # Multiple aliases cover different DM2000 schema versions.
             "voltage_type": _dm2000_get_value(
@@ -2776,7 +2778,7 @@ def get_dm2000_archives(
             kw = keyword.lower()
             if not any(
                 kw in str(row.get(field) or "").lower()
-                for field in ("dcxh", "name", "manufacturer", "serialno", "archname")
+                for field in ("dcxh", "name", "manufacturer", "serialno", "archname", "remarks")
             ):
                 continue
         filtered.append(row)

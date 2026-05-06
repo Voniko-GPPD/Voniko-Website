@@ -221,15 +221,15 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
         try:
             shutil.copy2(str(ls_path), cache_tmp)
         except (OSError, PermissionError) as exc:
-            logger.warning("dm2000_cache: copy failed (%s), using existing cache if available: %s", ls_path, exc)
+            logger.warning("dm2000_cache: copy failed (%s), falling back to live source: %s", ls_path, exc)
             try:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
-            # Prefer the existing cache_final over the source: the source may
-            # be exclusively locked by DM2000/Access, and cache_final may
-            # contain user edits that would be lost by switching to source.
-            preferred = cache_final if Path(cache_final).exists() else str(ls_path)
+            # Fall back to the live source path so ODBC reads attempt to
+            # pick up the latest data.  If the source is exclusively locked,
+            # ODBC will also fail, but this is no worse than using a stale copy.
+            preferred = str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
                 _DM2000_LS_CACHE_PATH = preferred
                 _DM2000_LS_CACHE_READY.set()
@@ -264,9 +264,9 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
-            # Prefer the existing cache_final over the source for the same
-            # reason as the copy-failure case above.
-            preferred = cache_final if Path(cache_final).exists() else str(ls_path)
+            # Fall back to the live source path so ODBC reads are never
+            # blocked by a partially-written or corrupt temporary file.
+            preferred = str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
                 _DM2000_LS_CACHE_PATH = preferred
                 _DM2000_LS_CACHE_READY.set()

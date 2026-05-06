@@ -234,8 +234,10 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
       timeout: 90000,
     });
     const data = r.data;
-    // Merge user-provided overrides (serialno, remarks) stored in SQLite so
-    // that values set via the web UI survive Access cache refreshes.
+    // Merge user-provided overrides (serialno, remarks) stored in SQLite.
+    // DB value always takes precedence when it is non-null/non-empty so that
+    // direct edits to dmdata_ls.mdb are immediately reflected after a reload.
+    // The SQLite override is only used as a fallback when the DB has no value.
     if (data && Array.isArray(data.archives) && data.archives.length > 0 && req.query.stationId) {
       try {
         const { getDb } = require('../models/database');
@@ -254,10 +256,10 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
             if (!ov) return archive;
             return {
               ...archive,
-              // User-set overrides always take precedence over the DM2000 DB value
-              // (which may be absent/null if DM2000 software didn't populate the field).
-              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : archive.serialno,
-              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : archive.remarks,
+              // DB value wins when non-null/non-empty; SQLite override is the
+              // fallback for archives where DM2000 software left the field empty.
+              serialno: (archive.serialno != null && archive.serialno !== '') ? archive.serialno : (ov.serialno ?? null),
+              remarks: (archive.remarks != null && archive.remarks !== '') ? archive.remarks : (ov.remarks ?? null),
               _has_override: true,
             };
           });

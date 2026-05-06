@@ -4515,10 +4515,13 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
 
     Handles exact tokens (e.g. ``"501"`` in ``"501-502"``) and tokens with a
     non-digit prefix (e.g. ``"HP501"`` → stripped ``"501"`` matches ``"501"``).
+
+    Returns ``False`` when *chuyen* is empty so that groups without a
+    production-line filter are never incorrectly matched to all archives.
     """
     chuyen = str(chuyen).strip()
     if not chuyen:
-        return True  # no filter → always matches
+        return False  # cannot match without a production-line code
     for field_val in (
         _dm2000_get_value(arch_meta, "manufacturer", "changshang", "cs"),
         _dm2000_get_value(arch_meta, "serialno", "dcph"),

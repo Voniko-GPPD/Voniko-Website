@@ -4962,9 +4962,86 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except (TypeError, ValueError):
                     ep_v = None
         else:
-            # Batch not found in DMPDATA.mdb.
+            # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
+            # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
+            # either a DMP batch or a DM2000 archive transparently.
+            if entry.raw_remark and entry.raw_remark.strip():
+                _fb_remark = entry.raw_remark.strip()
+                _fb_arch_rows: list[dict] = []
+                try:
+                    _fb_arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
+                    )
+                except pyodbc.Error:
+                    pass
+                if not _fb_arch_rows:
+                    _fb_escaped = _fb_remark.replace("%", "[%]").replace("_", "[_]")
+                    try:
+                        _fb_arch_rows = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
+                            (f"%{_fb_escaped}%",),
+                        )
+                    except pyodbc.Error:
+                        pass
+                if _fb_arch_rows:
+                    _fb_meta = _fb_arch_rows[0]
+                    _fb_resolved = (
+                        str(_dm2000_get_value(_fb_meta, "cdid", "archname") or _fb_remark).strip()
+                        or _fb_remark
+                    )
+                    _fb_fdfs_raw = str(_dm2000_get_value(_fb_meta, "fdfs") or "").strip()
+                    _fb_load_res = str(_dm2000_get_value(
+                        _fb_meta, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                    ) or "").strip()
+                    _fb_ep_raw = _dm2000_get_value(
+                        _fb_meta,
+                        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                    )
+                    _fb_ep_str = str(_fb_ep_raw or "").strip()
+                    _fb_fdfs = _fb_fdfs_raw or _fb_load_res or _fb_remark
+                    _fb_startdate_raw = _dm2000_get_value(_fb_meta, "startdate", "fdrq")
+                    _fb_fdrq = _to_date(_fb_startdate_raw) if _fb_startdate_raw else ""
+                    if entry.special_type in _SPECIAL_TYPE_LABEL:
+                        _fb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                    elif entry.report_date:
+                        _fb_row_label = _to_date(entry.report_date) or entry.report_date
+                    else:
+                        _fb_row_label = _fb_fdrq or _fb_remark
+                    _fb_all_batys = _get_batys_for_archive(_fb_resolved)
+                    _fb_n = len(entry.groups)
+                    _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
+                    _fb_model_upper = entry.model.strip().upper()
+                    _fb_no_chuyen = {"LR61", "9V", "6LR61"}
+                    for _fb_g_idx, _fb_grp in enumerate(entry.groups):
+                        if _fb_grp.trays:
+                            _fb_batys = [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                        else:
+                            _fb_batys = (
+                                _fb_auto_trays[_fb_g_idx]
+                                if _fb_g_idx < len(_fb_auto_trays)
+                                else _fb_all_batys
+                            )
+                        if not _fb_batys:
+                            continue
+                        _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
+                        _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
+                        _fb_perf["hfsj_unit"] = "hour"
+                        _fb_sheet = (
+                            entry.model.strip()
+                            if _fb_model_upper in _fb_no_chuyen
+                            else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
+                        )
+                        _fb_fdfs_label = _fb_fdfs or _fb_grp.loai
+                        groups.setdefault(_fb_sheet, {}).setdefault(
+                            (_fb_row_label, _fb_grp.loai), {}
+                        )[_fb_fdfs_label] = _fb_perf
+                    continue  # DM2000 path handled; skip rest of DMP path
+
+            # Both DMP and DM2000 lookups failed.
             logger.warning("_compute_dmp_perf_groups: batch not found: %s", entry.batch_id)
-            # For the web JSON preview we skip entries with no DMP data entirely
+            # For the web JSON preview we skip entries with no data entirely
             # so that spurious rows (empty date) and spurious columns (grp.loai
             # used as fdfs_label instead of the real condition string) do not
             # appear in the table.  The Excel report generator keeps the old

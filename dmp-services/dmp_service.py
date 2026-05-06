@@ -221,22 +221,22 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
         try:
             shutil.copy2(str(ls_path), cache_tmp)
         except (OSError, PermissionError) as exc:
-            logger.warning("dm2000_cache: copy failed (%s), falling back to source path: %s", ls_path, exc)
+            logger.warning("dm2000_cache: copy failed (%s), using existing cache if available: %s", ls_path, exc)
             try:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
-            source_str = str(ls_path)
+            # Prefer the existing cache_final over the source: the source may
+            # be exclusively locked by DM2000/Access, and cache_final may
+            # contain user edits that would be lost by switching to source.
+            preferred = cache_final if Path(cache_final).exists() else str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
-                # First-time fallback: read directly from source (legacy behaviour).
-                _DM2000_LS_CACHE_PATH = source_str
+                _DM2000_LS_CACHE_PATH = preferred
                 _DM2000_LS_CACHE_READY.set()
-            elif _DM2000_LS_CACHE_PATH != source_str:
-                # Source has been modified (mtime changed) but the file is
-                # currently locked for copying (e.g. Access has it open).
-                # Point directly to the source so subsequent ODBC reads see
-                # fresh data without waiting for a successful file copy.
-                _DM2000_LS_CACHE_PATH = source_str
+            else:
+                # Always update the path and clear caches so the next ODBC
+                # read picks up whatever data is available in preferred.
+                _DM2000_LS_CACHE_PATH = preferred
                 with _DM2000_ARCHIVES_CACHE_LOCK:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
@@ -264,14 +264,14 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
-            source_str = str(ls_path)
+            # Prefer the existing cache_final over the source for the same
+            # reason as the copy-failure case above.
+            preferred = cache_final if Path(cache_final).exists() else str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = source_str
+                _DM2000_LS_CACHE_PATH = preferred
                 _DM2000_LS_CACHE_READY.set()
-            elif _DM2000_LS_CACHE_PATH != source_str:
-                # Validation failed (e.g. partial write during copy).  Fall back
-                # to reading directly from the source so stale data is not served.
-                _DM2000_LS_CACHE_PATH = source_str
+            else:
+                _DM2000_LS_CACHE_PATH = preferred
                 with _DM2000_ARCHIVES_CACHE_LOCK:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
@@ -297,21 +297,58 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 if attempt < 5:
                     time.sleep(0.4)
         if replace_exc is not None:
-            # All retries failed — fall back to reading directly from source.
-            logger.warning(
-                "dm2000_cache: rename failed after retries (file in use?), falling back to source: %s",
-                replace_exc,
-            )
+            # cache_final is held open by a process (e.g. Access).  Decide the
+            # best read target without overwriting user edits.
+            #
+            # shutil.copy2 preserves the source file's mtime, so cache_tmp.mtime
+            # equals the source's current mtime (current_mtime).  If cache_final
+            # has a *newer* mtime it means the user edited it directly in Access
+            # (e.g. adding remarks), and we must NOT replace it with the older
+            # source copy.  In that case keep cache_final as the read target.
+            #
+            # Otherwise fall back to the live source path as before.  We do NOT
+            # keep cache_tmp in this branch: the background watcher also writes
+            # to that same path, so using it as a live cache could cause
+            # concurrent-write races; the source file is a safer choice.
+            cache_final_path = Path(cache_final)
+            cache_final_mtime = 0.0
+            if cache_final_path.exists():
+                try:
+                    cache_final_mtime = cache_final_path.stat().st_mtime
+                except OSError:
+                    pass
+
             try:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
-            source_str = str(ls_path)
+
+            if cache_final_mtime > current_mtime:
+                # User edited the cache file; keep it as the read target.
+                logger.warning(
+                    "dm2000_cache: rename failed (file in use?), keeping user-edited"
+                    " cache_final (mtime %.0f > source %.0f): %s",
+                    cache_final_mtime,
+                    current_mtime,
+                    replace_exc,
+                )
+                preferred = cache_final
+            else:
+                # Source is newer or cache_final absent; fall back to source.
+                logger.warning(
+                    "dm2000_cache: rename failed (file in use?), falling back to"
+                    " source: %s",
+                    replace_exc,
+                )
+                preferred = str(ls_path)
+
             if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = source_str
+                _DM2000_LS_CACHE_PATH = preferred
                 _DM2000_LS_CACHE_READY.set()
-            elif _DM2000_LS_CACHE_PATH != source_str:
-                _DM2000_LS_CACHE_PATH = source_str
+            else:
+                # Always update the path and clear caches so the next ODBC read
+                # sees fresh data, even if preferred equals the previous path.
+                _DM2000_LS_CACHE_PATH = preferred
                 with _DM2000_ARCHIVES_CACHE_LOCK:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:

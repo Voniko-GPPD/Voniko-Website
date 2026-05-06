@@ -593,6 +593,7 @@ export default {
   dm2000ExportTab: 'Export Report',
   dm2000Search: 'Search',
   dm2000Reset: 'Reset',
+  dm2000ReloadData: 'Reload Data',
   dm2000Total: 'Total: {count} records',
   dm2000StartDate: 'Start Date',
   dm2000Type: 'Type',

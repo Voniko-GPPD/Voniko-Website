@@ -221,15 +221,26 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
         try:
             shutil.copy2(str(ls_path), cache_tmp)
         except (OSError, PermissionError) as exc:
-            logger.warning("dm2000_cache: copy failed (%s), continuing with existing cache: %s", ls_path, exc)
+            logger.warning("dm2000_cache: copy failed (%s), falling back to source path: %s", ls_path, exc)
             try:
                 os.unlink(cache_tmp)
             except OSError:
                 pass
+            source_str = str(ls_path)
             if not _DM2000_LS_CACHE_READY.is_set():
-                # Fallback: read directly from source (legacy behaviour)
-                _DM2000_LS_CACHE_PATH = str(ls_path)
+                # First-time fallback: read directly from source (legacy behaviour).
+                _DM2000_LS_CACHE_PATH = source_str
                 _DM2000_LS_CACHE_READY.set()
+            elif _DM2000_LS_CACHE_PATH != source_str:
+                # Source has been modified (mtime changed) but the file is
+                # currently locked for copying (e.g. Access has it open).
+                # Point directly to the source so subsequent ODBC reads see
+                # fresh data without waiting for a successful file copy.
+                _DM2000_LS_CACHE_PATH = source_str
+                with _DM2000_ARCHIVES_CACHE_LOCK:
+                    _DM2000_ARCHIVES_CACHE.clear()
+                with _DM2000_BATTERIES_CACHE_LOCK:
+                    _DM2000_BATTERIES_CACHE.clear()
             return
 
         # Validate magic bytes before replacing.
@@ -2716,9 +2727,7 @@ def get_dm2000_archives(
             "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
             "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
             "serialno": _dm2000_get_value(row, "serialno", "dcph"),
-            # bz = explicit operator remark; sbmc = brand/device name used as
-            # a fallback when no explicit remark has been entered.
-            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz", "sbmc"),
+            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz"),
             # Additional fields for report preview.
             # Multiple aliases cover different DM2000 schema versions.
             "voltage_type": _dm2000_get_value(
@@ -3102,7 +3111,25 @@ def get_dm2000_archive_schema(archname: str):
     return {"archname": archname, "columns": columns}
 
 
-@app.get("/dm2000/templates")
+@app.post("/dm2000/refresh-archives")
+def refresh_dm2000_archives():
+    """Force-refresh the DM2000 archives in-memory cache.
+
+    Clears the in-memory archives cache and attempts to re-copy the source
+    database file. If the copy fails (e.g. the file is currently locked by
+    Microsoft Access), the service falls back to reading directly from the
+    source path so updated records are visible immediately.
+
+    Call this endpoint after manually editing dmdata_ls.mdb in Access to see
+    changes without waiting for the next auto-refresh cycle.
+    """
+    # Attempt a forced file-copy refresh (skips the mtime short-circuit).
+    _dm2000_refresh_ls_cache(force=True)
+    # Always clear the in-memory archives cache regardless of whether the
+    # file copy succeeded, so the very next query reads fresh data from DB.
+    with _DM2000_ARCHIVES_CACHE_LOCK:
+        _DM2000_ARCHIVES_CACHE.clear()
+    return {"status": "ok", "cache_path": _DM2000_LS_CACHE_PATH}
 def get_dm2000_templates():
     templates_dir = Path(DM2000_TEMPLATES_DIR).resolve()
     if not templates_dir.exists():

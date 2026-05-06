@@ -593,6 +593,7 @@ export default {
   dm2000ExportTab: 'Xuất báo cáo',
   dm2000Search: 'Tìm kiếm',
   dm2000Reset: 'Đặt lại',
+  dm2000ReloadData: 'Tải lại dữ liệu',
   dm2000Total: 'Tổng: {count} bản ghi',
   dm2000StartDate: 'Ngày bắt đầu',
   dm2000Type: 'Kiểu pin',

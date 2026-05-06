@@ -593,6 +593,7 @@ export default {
   dm2000ExportTab: '导出报告',
   dm2000Search: '查询',
   dm2000Reset: '重置',
+  dm2000ReloadData: '重新加载数据',
   dm2000Total: '共 {count} 条记录',
   dm2000StartDate: '开始日期',
   dm2000Type: '电池型号',

@@ -331,6 +331,17 @@ router.get('/dm2000/archives/:archname/schema', authenticateToken, async (req, r
   } catch (err) { handleProxyError(err, res, next); }
 });
 
+// POST /api/dmp/dm2000/refresh-archives — force-refresh archives cache after manual Access edits
+router.post('/dm2000/refresh-archives', authenticateToken, async (req, res, next) => {
+  const { stationId, ...body } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/refresh-archives`, body, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
 router.post('/dm2000/report', authenticateToken, async (req, res, next) => {
   const { stationId, ...reportBody } = req.body || {};
   const stationUrl = getStationUrl(stationId, res);

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { Alert, Button, Col, DatePicker, Form, Input, Row, Space, Table, Typography } from 'antd';
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { fetchDM2000Archives } from '../../../api/dm2000Api';
+import { fetchDM2000Archives, refreshDM2000Archives } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const dateFormat = 'YYYY-MM-DD';
@@ -16,6 +16,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   const [total, setTotal] = useState(0);
   const [searched, setSearched] = useState(false);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
+  const [reloading, setReloading] = useState(false);
 
   const onSearch = async () => {
     if (!stationId) return;
@@ -54,6 +55,20 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     setTotal(0);
     setPagination((prev) => ({ ...prev, current: 1 }));
     onSelect?.(null);
+  };
+
+  const onReloadData = async () => {
+    if (!stationId) return;
+    setReloading(true);
+    setError('');
+    try {
+      await refreshDM2000Archives(stationId);
+      if (searched) await onSearch();
+    } catch (err) {
+      setError(err.message || 'Reload failed');
+    } finally {
+      setReloading(false);
+    }
   };
 
   const columns = [
@@ -132,6 +147,9 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
           </Button>
           <Button icon={<ReloadOutlined />} onClick={onReset}>
             {t('dm2000Reset')}
+          </Button>
+          <Button icon={<SyncOutlined />} onClick={onReloadData} disabled={!stationId} loading={reloading}>
+            {t('dm2000ReloadData')}
           </Button>
         </Space>
       </Form>

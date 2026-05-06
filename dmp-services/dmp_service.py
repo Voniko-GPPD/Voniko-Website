@@ -4750,7 +4750,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             except pyodbc.Error:
                 pass
             if not _arch_rows:
-                _bz_like = f"%{_dm2k_arch}%"
+                # Escape Access SQL LIKE wildcards so a remark containing % or _ is treated literally
+                _bz_escaped = _dm2k_arch.replace("%", "[%]").replace("_", "[_]")
+                _bz_like = f"%{_bz_escaped}%"
                 try:
                     _arch_rows = _read_dm2000_ls(
                         "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (_bz_like,)

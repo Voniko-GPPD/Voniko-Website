@@ -145,7 +145,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
         const resistance = String(record.load_resistance || '').trim();
         const fdfs = String(record.fdfs || '').trim();
         const endpoint = String(record.endpoint_voltage || '').trim();
-        const prefix = [resistance, fdfs].filter(Boolean).join(',');
+        const prefix = [resistance, fdfs].filter(Boolean).join(' ');
         const suffix = endpoint ? ` to ${endpoint}V` : '';
         const full = prefix + suffix;
         return full || '-';

@@ -4739,14 +4739,31 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 logger.warning("_compute_dmp_perf_groups: invalid dm2000_archname: %s", _dm2k_arch)
                 continue
 
-            # Read archive metadata from ls_jb_cs
+            # Read archive metadata from ls_jb_cs.
+            # Primary lookup: by bz/remarks column (the remark text the user enters).
+            # Fallback lookups: by cdid then by archname for backward compatibility.
             _arch_rows: list[dict] = []
             try:
                 _arch_rows = _read_dm2000_ls(
-                    "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_dm2k_arch,)
+                    "SELECT * FROM ls_jb_cs WHERE bz = ?", (_dm2k_arch,)
                 )
             except pyodbc.Error:
                 pass
+            if not _arch_rows:
+                _bz_like = f"%{_dm2k_arch}%"
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (_bz_like,)
+                    )
+                except pyodbc.Error:
+                    pass
+            if not _arch_rows:
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_dm2k_arch,)
+                    )
+                except pyodbc.Error:
+                    pass
             if not _arch_rows:
                 try:
                     _arch_rows = _read_dm2000_ls(
@@ -4758,8 +4775,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if skip_not_found:
                     continue
                 _arch_meta: dict = {}
+                _dm2k_resolved = _dm2k_arch
             else:
                 _arch_meta = _arch_rows[0]
+                # Resolve the actual cdid so battery/TAV queries use the correct key
+                _dm2k_resolved = (
+                    str(_dm2000_get_value(_arch_meta, "cdid", "archname") or _dm2k_arch).strip()
+                    or _dm2k_arch
+                )
 
             _dm2k_fdfs_raw = str(_dm2000_get_value(_arch_meta, "fdfs") or "").strip()
             _dm2k_load_res = str(_dm2000_get_value(
@@ -4785,7 +4808,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_row_label = _dm2k_fdrq or _dm2k_arch
 
             # Get all active batteries for auto-assignment fallback
-            _dm2k_all_batys = _get_batys_for_archive(_dm2k_arch)
+            _dm2k_all_batys = _get_batys_for_archive(_dm2k_resolved)
 
             n_groups = len(entry.groups)
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
@@ -4807,7 +4830,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if not _dm2k_batys:
                     continue
 
-                _dm2k_tav_map = _get_tav_for_batteries(_dm2k_arch, _dm2k_batys)
+                _dm2k_tav_map = _get_tav_for_batteries(_dm2k_resolved, _dm2k_batys)
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
 

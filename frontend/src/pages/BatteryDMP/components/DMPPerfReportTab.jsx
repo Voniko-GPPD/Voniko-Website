@@ -369,7 +369,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
             label={t('dmpPerfEntryDm2000Archname')}
             rules={[{ required: true }]}
           >
-            <Input placeholder="e.g. QC2026/4/18 or 2026/4/1" />
+            <Input placeholder="e.g. LR6 UDP501 HP503" />
           </Form.Item>
           <Form.Item
             name="dm2000_report_date"

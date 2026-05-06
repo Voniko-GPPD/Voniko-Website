@@ -719,7 +719,7 @@ export default {
   dmpPerfEntrySpecialType: 'Loại hàng',
   dmpPerfEntrySourceType: 'Nguồn dữ liệu',
   dmpPerfEntryRemark: 'Remark',
-  dmpPerfEntryDm2000Archname: 'Tên archive DM2000',
+  dmpPerfEntryDm2000Archname: 'Remark DM2000',
   dmpPerfEntryDm2000ReportDate: 'Ngày (để lọc danh sách)',
   dmpPerfEntryDm2000ReportDateHint: 'Tuỳ chọn. Dùng để lọc mục này theo ngày trong danh sách Remark. Ngày thực tế hiển thị trên báo cáo được đọc từ archive DM2000.',
   dmpPerfEntryNotes: 'Ghi chú',

@@ -719,7 +719,7 @@ export default {
   dmpPerfEntrySpecialType: 'Row Type',
   dmpPerfEntrySourceType: 'Data Source',
   dmpPerfEntryRemark: 'Remark',
-  dmpPerfEntryDm2000Archname: 'DM2000 Archive Name',
+  dmpPerfEntryDm2000Archname: 'DM2000 Remark',
   dmpPerfEntryDm2000ReportDate: 'Date (for list filtering)',
   dmpPerfEntryDm2000ReportDateHint: 'Optional. Used to filter this entry by date in the Remark list. The actual row date shown in the report is read from the DM2000 archive.',
   dmpPerfEntryNotes: 'Notes',

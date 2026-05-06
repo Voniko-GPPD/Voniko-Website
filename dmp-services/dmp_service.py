@@ -4773,7 +4773,8 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     * ``HP{n}``   →  ``{"loai": "HP",  "chuyen": "{n}"}``
     * ``UD{n}``   →  ``{"loai": "UD",  "chuyen": "{n}"}``
 
-    A leading 6-digit DDMMYY date token is skipped.  Returns ``[]`` when no
+    A leading 6-digit DDMMYY date token is skipped.  Unrecognised tokens (e.g.
+    model names like ``'LR6'``) are silently ignored.  Returns ``[]`` when no
     group tokens are found.
     """
     groups: list[dict] = []
@@ -4982,7 +4983,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 for grp in entry.groups
             ]
             _dm2k_n = len(_dm2k_eff_groups)
-            if len(_dm2k_bz_groups) > _dm2k_n and not any(g["trays"] for g in _dm2k_eff_groups):
+            if len(_dm2k_bz_groups) > len(_dm2k_eff_groups) and not any(g["trays"] for g in _dm2k_eff_groups):
                 # More groups in bz than entry specifies; use bz groups for full coverage
                 _dm2k_eff_groups = [
                     {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
@@ -5275,7 +5276,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         for grp in entry.groups
                     ]
                     _fb_n = len(_fb_eff_groups)
-                    if len(_fb_bz_groups) > _fb_n and not any(g["trays"] for g in _fb_eff_groups):
+                    if len(_fb_bz_groups) > len(_fb_eff_groups) and not any(g["trays"] for g in _fb_eff_groups):
                         _fb_eff_groups = [
                             {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
                             for g in _fb_bz_groups

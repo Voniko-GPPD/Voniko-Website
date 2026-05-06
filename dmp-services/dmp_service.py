@@ -809,6 +809,7 @@ class DmpPerfEntry(BaseModel):
     special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
     report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
     raw_remark: Optional[str] = None  # free-text remark; used as fallback to search para_pub.bz
+    dm2000_archname: Optional[str] = None  # DM2000 archive name; when set, data is read from DM2000 instead of DMP
 
 
 class DmpPerfReportRequest(BaseModel):
@@ -4726,8 +4727,100 @@ def _compute_dmp_perf_groups(  # noqa: C901
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:
-        if not entry.batch_id.strip():
+        if not (entry.batch_id or "").strip() and not entry.dm2000_archname:
             continue
+
+        # ── DM2000 path: when dm2000_archname is set, read from DM2000 instead of DMP ──
+        if entry.dm2000_archname and entry.dm2000_archname.strip():
+            _dm2k_arch = entry.dm2000_archname.strip()
+            try:
+                _validate_dm2000_archname(_dm2k_arch)
+            except HTTPException:
+                logger.warning("_compute_dmp_perf_groups: invalid dm2000_archname: %s", _dm2k_arch)
+                continue
+
+            # Read archive metadata from ls_jb_cs
+            _arch_rows: list[dict] = []
+            try:
+                _arch_rows = _read_dm2000_ls(
+                    "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_dm2k_arch,)
+                )
+            except pyodbc.Error:
+                pass
+            if not _arch_rows:
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE archname = ?", (_dm2k_arch,)
+                    )
+                except pyodbc.Error:
+                    pass
+            if not _arch_rows:
+                if skip_not_found:
+                    continue
+                _arch_meta: dict = {}
+            else:
+                _arch_meta = _arch_rows[0]
+
+            _dm2k_fdfs_raw = str(_dm2000_get_value(_arch_meta, "fdfs") or "").strip()
+            _dm2k_load_res = str(_dm2000_get_value(
+                _arch_meta, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+            ) or "").strip()
+            _dm2k_ep_raw = _dm2000_get_value(
+                _arch_meta,
+                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+            )
+            _dm2k_ep_str = str(_dm2k_ep_raw or "").strip()
+            _dm2k_fdfs = _dm2k_fdfs_raw or _dm2k_load_res or _dm2k_arch
+
+            # Determine row label
+            _dm2k_startdate_raw = _dm2000_get_value(_arch_meta, "startdate", "fdrq")
+            _dm2k_fdrq = _to_date(_dm2k_startdate_raw) if _dm2k_startdate_raw else ""
+            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                _dm2k_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+            elif entry.report_date:
+                _dm2k_row_label = _to_date(entry.report_date) or entry.report_date
+            else:
+                _dm2k_row_label = _dm2k_fdrq or _dm2k_arch
+
+            # Get all active batteries for auto-assignment fallback
+            _dm2k_all_batys = _get_batys_for_archive(_dm2k_arch)
+
+            n_groups = len(entry.groups)
+            _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
+                n_groups, [_dm2k_all_batys]
+            )
+
+            model_upper = entry.model.strip().upper()
+            no_chuyen_models = {"LR61", "9V", "6LR61"}
+
+            for g_idx, grp in enumerate(entry.groups):
+                if grp.trays:
+                    _dm2k_batys = [b for b in grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                else:
+                    _dm2k_batys = (
+                        _dm2k_auto_trays[g_idx]
+                        if g_idx < len(_dm2k_auto_trays)
+                        else _dm2k_all_batys
+                    )
+                if not _dm2k_batys:
+                    continue
+
+                _dm2k_tav_map = _get_tav_for_batteries(_dm2k_arch, _dm2k_batys)
+                _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
+                _dm2k_perf["hfsj_unit"] = "hour"
+
+                if model_upper in no_chuyen_models:
+                    _dm2k_sheet_key = entry.model.strip()
+                else:
+                    _dm2k_sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
+
+                _dm2k_fdfs_label = _dm2k_fdfs or grp.loai
+                _dm2k_row_key = (_dm2k_row_label, grp.loai)
+                groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
+
+            continue  # Skip DMP lookup path for this entry
 
         # Fetch batch metadata from DMPDATA.mdb.
         # batch_id may be a 6-digit DDMMYY date (the agreed convention for column-A

@@ -610,12 +610,14 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
   const { getDb } = require('../models/database');
   const { v4: uuidv4 } = require('uuid');
   const db = getDb();
-  const { station_id, batch_id, report_date, model, groups, special_type, raw_remark, notes } = req.body || {};
+  const { station_id, batch_id, report_date, model, groups, special_type, raw_remark, notes, dm2000_archname } = req.body || {};
   if (!station_id || !model) {
     return res.status(400).json({ error: 'station_id and model are required' });
   }
   // Derive batch_id and report_date from raw_remark when not supplied by the client.
   // Expected format: "DDMMYY <battery> <group>…" where the first token is a 6-digit date.
+  // For DM2000 entries (dm2000_archname set), batch_id/report_date defaults are still computed
+  // but are not used for data lookup (the archname is used instead).
   let effectiveBatchId = batch_id;
   let effectiveDate = report_date;
   if (!effectiveBatchId || !effectiveDate) {
@@ -640,8 +642,8 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
     const id = uuidv4();
     db.prepare(`
       INSERT INTO dmp_perf_entries
-        (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, dm2000_archname, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       station_id,
@@ -652,6 +654,7 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
       special_type || 'normal',
       raw_remark || null,
       notes || null,
+      dm2000_archname || null,
       req.user.id,
     );
     res.json({ ok: true, id });
@@ -664,7 +667,7 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
 router.put('/perf-entries/:id', authenticateToken, (req, res) => {
   const { getDb } = require('../models/database');
   const db = getDb();
-  const { batch_id, report_date, model, groups, special_type, raw_remark, notes } = req.body || {};
+  const { batch_id, report_date, model, groups, special_type, raw_remark, notes, dm2000_archname } = req.body || {};
   try {
     const result = db.prepare(`
       UPDATE dmp_perf_entries SET
@@ -675,6 +678,7 @@ router.put('/perf-entries/:id', authenticateToken, (req, res) => {
         special_type = COALESCE(?, special_type),
         raw_remark = ?,
         notes = ?,
+        dm2000_archname = ?,
         updated_at = datetime('now') || 'Z'
       WHERE id = ?
     `).run(
@@ -685,6 +689,7 @@ router.put('/perf-entries/:id', authenticateToken, (req, res) => {
       special_type || null,
       raw_remark || null,
       notes || null,
+      dm2000_archname || null,
       req.params.id,
     );
     if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });

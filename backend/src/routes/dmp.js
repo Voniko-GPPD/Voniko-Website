@@ -567,7 +567,7 @@ router.put('/dm2000/archive-overrides', authenticateToken, (req, res) => {
         serialno = excluded.serialno,
         remarks = excluded.remarks,
         updated_by = excluded.updated_by,
-        updated_at = excluded.updated_at
+        updated_at = datetime('now', 'utc') || 'Z'
     `).run(stationId, archname, serialno ?? null, remarks ?? null, req.user.id);
     const row = db.prepare(
       'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'

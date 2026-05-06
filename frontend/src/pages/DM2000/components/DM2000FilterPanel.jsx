@@ -142,7 +142,9 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       key: 'dis_condition',
       width: 240,
       render: (_, record) => {
-        const resistance = String(record.load_resistance || '').trim();
+        const rawRes = String(record.load_resistance || '').trim();
+        // Append "ohm" unit when the value is a bare number (e.g. "10" → "10ohm")
+        const resistance = rawRes && /^\d+(\.\d+)?$/.test(rawRes) ? `${rawRes}ohm` : rawRes;
         const fdfs = String(record.fdfs || '').trim();
         const endpoint = String(record.endpoint_voltage || '').trim();
         const prefix = [resistance, fdfs].filter(Boolean).join(' ');

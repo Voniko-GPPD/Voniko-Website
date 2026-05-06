@@ -4690,9 +4690,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
             # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
             _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
-            if "times" in _hfsj_raw or "lần" in _hfsj_raw or _hfsj_raw == "t":
+            _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
+            _HFSJ_MINUTE = {"minute", "minutes", "phút", "m", "min", "phu"}
+            if _hfsj_raw in _HFSJ_TIMES:
                 hfsj_unit = "times"
-            elif "minute" in _hfsj_raw or "phút" in _hfsj_raw or _hfsj_raw in ("m", "min"):
+            elif _hfsj_raw in _HFSJ_MINUTE:
                 hfsj_unit = "minute"
             else:
                 hfsj_unit = "hour"

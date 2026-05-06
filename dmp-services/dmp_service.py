@@ -4509,6 +4509,35 @@ _SPECIAL_TYPE_LABEL: dict[str, str] = {
 }
 
 
+def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
+    """Return True if *chuyen* (production-line code) is contained in the
+    archive's manufacturer or serial-number range field.
+
+    Handles exact tokens (e.g. ``"501"`` in ``"501-502"``) and tokens with a
+    non-digit prefix (e.g. ``"HP501"`` → stripped ``"501"`` matches ``"501"``).
+    """
+    chuyen = str(chuyen).strip()
+    if not chuyen:
+        return True  # no filter → always matches
+    for field_val in (
+        _dm2000_get_value(arch_meta, "manufacturer", "changshang", "cs"),
+        _dm2000_get_value(arch_meta, "serialno", "dcph"),
+    ):
+        if not field_val:
+            continue
+        for tok in re.split(r"[\-,/\s]+", str(field_val).strip()):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok == chuyen:
+                return True
+            # Strip leading non-digit prefix (e.g. "HP501" → "501")
+            stripped = re.sub(r"^[^0-9]+", "", tok)
+            if stripped and stripped == chuyen:
+                return True
+    return False
+
+
 def _dmp_compute_group_perf(
     batch_id: str,
     trays: list[int],
@@ -4779,6 +4808,67 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _arch_meta: dict = {}
                 _dm2k_resolved = _dm2k_arch
             else:
+                # When multiple archives match and at least one can be paired with a
+                # group by production-line (chuyen), process every archive separately
+                # for its matching group so that:
+                #   • each group reads data from its own archive (correct grade/line),
+                #   • all discharge conditions across all archives are collected.
+                _dm2k_multi = len(_arch_rows) > 1 and len(entry.groups) > 0 and any(
+                    _dm2000_archive_matches_chuyen(a, g.chuyen)
+                    for a in _arch_rows for g in entry.groups
+                )
+                if _dm2k_multi:
+                    _dm2k_model_upper_m = entry.model.strip().upper()
+                    _dm2k_no_chuyen_m = {"LR61", "9V", "6LR61"}
+                    for _dm2k_a in _arch_rows:
+                        _dm2k_a_resolved = (
+                            str(_dm2000_get_value(_dm2k_a, "cdid", "archname") or _dm2k_arch).strip()
+                            or _dm2k_arch
+                        )
+                        _dm2k_a_fdfs_raw = str(_dm2000_get_value(_dm2k_a, "fdfs") or "").strip()
+                        _dm2k_a_load_res = str(_dm2000_get_value(
+                            _dm2k_a, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                        ) or "").strip()
+                        _dm2k_a_ep_raw = _dm2000_get_value(
+                            _dm2k_a,
+                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                        )
+                        _dm2k_a_ep_str = str(_dm2k_a_ep_raw or "").strip()
+                        _dm2k_a_fdfs = _dm2k_a_fdfs_raw or _dm2k_a_load_res or _dm2k_arch
+                        _dm2k_a_startdate = _dm2000_get_value(_dm2k_a, "startdate", "fdrq")
+                        _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
+                        if entry.special_type in _SPECIAL_TYPE_LABEL:
+                            _dm2k_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                        elif entry.report_date:
+                            _dm2k_a_row_label = _to_date(entry.report_date) or entry.report_date
+                        else:
+                            _dm2k_a_row_label = _dm2k_a_fdrq or _dm2k_arch
+                        _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
+                        for _dm2k_grp in entry.groups:
+                            if not _dm2000_archive_matches_chuyen(_dm2k_a, _dm2k_grp.chuyen):
+                                continue
+                            _dm2k_a_batys = (
+                                [b for b in _dm2k_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                                if _dm2k_grp.trays else _dm2k_a_all_batys
+                            )
+                            if not _dm2k_a_batys:
+                                continue
+                            _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
+                            _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
+                            _dm2k_a_perf["hfsj_unit"] = "hour"
+                            _dm2k_a_sheet_key = (
+                                entry.model.strip()
+                                if _dm2k_model_upper_m in _dm2k_no_chuyen_m
+                                else f"{entry.model.strip()} {_dm2k_grp.chuyen.strip()}"
+                            )
+                            _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_grp.loai
+                            groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
+                                (_dm2k_a_row_label, _dm2k_grp.loai), {}
+                            )[_dm2k_a_fdfs_label] = _dm2k_a_perf
+                    continue  # all archives processed; skip DMP path
+
                 _arch_meta = _arch_rows[0]
                 # Resolve the actual cdid so battery/TAV queries use the correct key
                 _dm2k_resolved = (
@@ -4984,6 +5074,67 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     except pyodbc.Error:
                         pass
                 if _fb_arch_rows:
+                    # When multiple archives are found and at least one can be paired
+                    # with a group by production-line (chuyen), process every archive
+                    # for its matching group so that:
+                    #   • each group reads its own archive (correct grade/manufacturer),
+                    #   • all discharge conditions across archives are collected.
+                    _fb_multi = len(_fb_arch_rows) > 1 and len(entry.groups) > 0 and any(
+                        _dm2000_archive_matches_chuyen(a, g.chuyen)
+                        for a in _fb_arch_rows for g in entry.groups
+                    )
+                    if _fb_multi:
+                        _fb_model_upper_m = entry.model.strip().upper()
+                        _fb_no_chuyen_m = {"LR61", "9V", "6LR61"}
+                        for _fb_a in _fb_arch_rows:
+                            _fb_a_resolved = (
+                                str(_dm2000_get_value(_fb_a, "cdid", "archname") or _fb_remark).strip()
+                                or _fb_remark
+                            )
+                            _fb_a_fdfs_raw = str(_dm2000_get_value(_fb_a, "fdfs") or "").strip()
+                            _fb_a_load_res = str(_dm2000_get_value(
+                                _fb_a, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                            ) or "").strip()
+                            _fb_a_ep_raw = _dm2000_get_value(
+                                _fb_a,
+                                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                            )
+                            _fb_a_ep_str = str(_fb_a_ep_raw or "").strip()
+                            _fb_a_fdfs = _fb_a_fdfs_raw or _fb_a_load_res or _fb_remark
+                            _fb_a_startdate = _dm2000_get_value(_fb_a, "startdate", "fdrq")
+                            _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
+                            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                                _fb_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                            elif entry.report_date:
+                                _fb_a_row_label = _to_date(entry.report_date) or entry.report_date
+                            else:
+                                _fb_a_row_label = _fb_a_fdrq or _fb_remark
+                            _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
+                            for _fb_grp in entry.groups:
+                                if not _dm2000_archive_matches_chuyen(_fb_a, _fb_grp.chuyen):
+                                    continue
+                                _fb_a_batys = (
+                                    [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                                    if _fb_grp.trays else _fb_a_all_batys
+                                )
+                                if not _fb_a_batys:
+                                    continue
+                                _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
+                                _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
+                                _fb_a_perf["hfsj_unit"] = "hour"
+                                _fb_a_sheet = (
+                                    entry.model.strip()
+                                    if _fb_model_upper_m in _fb_no_chuyen_m
+                                    else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
+                                )
+                                _fb_a_fdfs_label = _fb_a_fdfs or _fb_grp.loai
+                                groups.setdefault(_fb_a_sheet, {}).setdefault(
+                                    (_fb_a_row_label, _fb_grp.loai), {}
+                                )[_fb_a_fdfs_label] = _fb_a_perf
+                        continue  # DM2000 path handled; skip rest of DMP path
+
                     _fb_meta = _fb_arch_rows[0]
                     _fb_resolved = (
                         str(_dm2000_get_value(_fb_meta, "cdid", "archname") or _fb_remark).strip()
@@ -5189,6 +5340,18 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                 if lbl not in seen:
                     seen.add(lbl)
                     all_conditions.append(lbl)
+
+        # Sort conditions by their earliest row-label (first appearance date).
+        # Because DM2000/DMP archives are created in test-sequence order, the
+        # oldest date corresponds to the first discharge condition (e.g.
+        # "10ohm 24h/d" before "1000mA 24h/d" for LR6), producing a column
+        # order that matches the physical test schedule.
+        _cond_first: dict[str, str] = {}
+        for (row_lbl, _), rd in date_type_map.items():
+            for lbl in rd:
+                if lbl not in _cond_first or row_lbl < _cond_first[lbl]:
+                    _cond_first[lbl] = row_lbl
+        all_conditions.sort(key=lambda c: _cond_first.get(c, "9999-99-99"))
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):

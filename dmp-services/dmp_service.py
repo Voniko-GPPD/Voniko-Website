@@ -4523,7 +4523,7 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
     if not chuyen:
         return False  # cannot match without a production-line code
     for field_val in (
-        _dm2000_get_value(arch_meta, "manufacturer", "changshang", "cs"),
+        _dm2000_get_value(arch_meta, "manufacturer", "changshang", "cs", "scdw"),
         _dm2000_get_value(arch_meta, "serialno", "dcph"),
     ):
         if not field_val:
@@ -4539,6 +4539,23 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
             if stripped and stripped == chuyen:
                 return True
     return False
+
+
+def _build_dm2000_condition_label(fdfs_raw: str, load_res: str, ep_str: str, fallback: str) -> str:
+    """Build a combined DM2000 condition label like '10ohm 24h/d to 0.900V'.
+
+    Mirrors the DM Historic display logic:
+      resistance = load_res appended with "ohm" when it is a bare number
+      prefix     = resistance + fdfs joined by a space (empty parts omitted)
+      suffix     = " to <ep_str>V" when endpoint voltage is present
+    """
+    resistance = ""
+    if load_res:
+        resistance = f"{load_res}ohm" if re.match(r"^\d+(\.\d+)?$", load_res) else load_res
+    parts = [p for p in (resistance, fdfs_raw) if p]
+    prefix = " ".join(parts)
+    suffix = f" to {ep_str}V" if ep_str else ""
+    return (prefix + suffix) or fallback
 
 
 def _dmp_compute_group_perf(
@@ -4839,7 +4856,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
                         )
                         _dm2k_a_ep_str = str(_dm2k_a_ep_raw or "").strip()
-                        _dm2k_a_fdfs = _dm2k_a_fdfs_raw or _dm2k_a_load_res or _dm2k_arch
+                        _dm2k_a_fdfs = _build_dm2000_condition_label(
+                            _dm2k_a_fdfs_raw, _dm2k_a_load_res, _dm2k_a_ep_str, _dm2k_arch,
+                        )
                         _dm2k_a_startdate = _dm2000_get_value(_dm2k_a, "startdate", "fdrq")
                         _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
                         if entry.special_type in _SPECIAL_TYPE_LABEL:
@@ -4890,7 +4909,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
             )
             _dm2k_ep_str = str(_dm2k_ep_raw or "").strip()
-            _dm2k_fdfs = _dm2k_fdfs_raw or _dm2k_load_res or _dm2k_arch
+            _dm2k_fdfs = _build_dm2000_condition_label(
+                _dm2k_fdfs_raw, _dm2k_load_res, _dm2k_ep_str, _dm2k_arch,
+            )
 
             # Determine row label
             _dm2k_startdate_raw = _dm2000_get_value(_arch_meta, "startdate", "fdrq")
@@ -5105,7 +5126,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
                             )
                             _fb_a_ep_str = str(_fb_a_ep_raw or "").strip()
-                            _fb_a_fdfs = _fb_a_fdfs_raw or _fb_a_load_res or _fb_remark
+                            _fb_a_fdfs = _build_dm2000_condition_label(
+                                _fb_a_fdfs_raw, _fb_a_load_res, _fb_a_ep_str, _fb_remark,
+                            )
                             _fb_a_startdate = _dm2000_get_value(_fb_a, "startdate", "fdrq")
                             _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
                             if entry.special_type in _SPECIAL_TYPE_LABEL:
@@ -5154,7 +5177,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
                     )
                     _fb_ep_str = str(_fb_ep_raw or "").strip()
-                    _fb_fdfs = _fb_fdfs_raw or _fb_load_res or _fb_remark
+                    _fb_fdfs = _build_dm2000_condition_label(
+                        _fb_fdfs_raw, _fb_load_res, _fb_ep_str, _fb_remark,
+                    )
                     _fb_startdate_raw = _dm2000_get_value(_fb_meta, "startdate", "fdrq")
                     _fb_fdrq = _to_date(_fb_startdate_raw) if _fb_startdate_raw else ""
                     if entry.special_type in _SPECIAL_TYPE_LABEL:
@@ -5344,17 +5369,29 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                     seen.add(lbl)
                     all_conditions.append(lbl)
 
-        # Sort conditions by their earliest row-label (first appearance date).
-        # Because DM2000/DMP archives are created in test-sequence order, the
-        # oldest date corresponds to the first discharge condition (e.g.
-        # "10ohm 24h/d" before "1000mA 24h/d" for LR6), producing a column
-        # order that matches the physical test schedule.
+        # Build a per-sheet units dict: fdfs_label → "hour"|"minute"|"times".
+        # Built before sorting so unit type can be used as a primary sort key.
+        # Take the first non-null value seen across all rows for each condition.
+        units: dict[str, str] = {}
+        for row_data in date_type_map.values():
+            for lbl, perf in row_data.items():
+                if lbl not in units and perf.get("hfsj_unit"):
+                    units[lbl] = perf["hfsj_unit"]
+
+        # Sort conditions: "times" (DMP) first, then "hour"/"minute" (DM2000),
+        # matching the typical report template column order.  Within each unit
+        # group, sort by earliest row-label (first appearance date) so that
+        # archives tested earlier appear to the left.
         _cond_first: dict[str, str] = {}
         for (row_lbl, _), rd in date_type_map.items():
             for lbl in rd:
                 if lbl not in _cond_first or row_lbl < _cond_first[lbl]:
                     _cond_first[lbl] = row_lbl
-        all_conditions.sort(key=lambda c: _cond_first.get(c, "9999-99-99"))
+        _UNIT_ORDER = {"times": 0, "minute": 1, "hour": 2}
+        all_conditions.sort(key=lambda c: (
+            _UNIT_ORDER.get(units.get(c, "hour"), 2),
+            _cond_first.get(c, "9999-99-99"),
+        ))
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
@@ -5371,14 +5408,6 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                     for fdfs_label, perf in conditions.items()
                 },
             })
-
-        # Build a per-sheet units dict: fdfs_label → "hour"|"minute"|"times".
-        # Take the first non-null value seen across all rows for each condition.
-        units: dict[str, str] = {}
-        for row_data in date_type_map.values():
-            for lbl, perf in row_data.items():
-                if lbl not in units and perf.get("hfsj_unit"):
-                    units[lbl] = perf["hfsj_unit"]
 
         sheets[sheet_key] = {"rows": rows, "conditions": all_conditions, "units": units}
 

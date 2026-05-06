@@ -21,6 +21,14 @@ export async function fetchDM2000Config(stationId, { signal } = {}) {
   return res.json();
 }
 
+export async function refreshDM2000Archives(stationId) {
+  const res = await apiFetch(`${BASE}/refresh-archives`, {
+    method: 'POST',
+    body: JSON.stringify({ stationId }),
+  });
+  return res.json();
+}
+
 export async function fetchDM2000Archives(stationId, filters = {}, { signal } = {}) {
   const params = new URLSearchParams({ stationId });
   if (filters.date_from) params.set('date_from', filters.date_from);

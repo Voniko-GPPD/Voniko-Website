@@ -762,6 +762,7 @@ export default {
   dmpPerfViewResult: 'Result',
   dmpPerfViewRate: 'Rate (%)',
   dmpPerfViewHours: 'h',
+  dmpPerfViewMinutes: 'min',
   dmpPerfViewCount: 't',
   dmpPerfViewAllModels: 'All Models',
   dmpPerfViewAllLoai: 'All Grades',

@@ -586,8 +586,11 @@ function RowLabelCell({ label }) {
 /** Format a numeric performance result for display. */
 function fmtResult(cond, unit) {
   if (!cond) return '-';
-  if (unit === 't') {
+  if (unit === 'times') {
     return cond.avg_count != null ? String(cond.avg_count) : '-';
+  }
+  if (unit === 'minute') {
+    return cond.avg_minutes != null ? `${Number(cond.avg_minutes).toFixed(1)}` : '-';
   }
   return cond.avg_hours != null ? `${Number(cond.avg_hours).toFixed(2)}` : '-';
 }
@@ -647,33 +650,8 @@ function PerfViewTab({ stationId }) {
     return result;
   }, [filterLoai, filterChuyen, filterModel]);
 
-  const handlePreview = async () => {
-    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
-    if (filteredEntries.length === 0) { notification.warning({ message: t('dmpPerfNoEntries') }); return; }
-    setLoadingData(true);
-    setSheetsData(null);
-    try {
-      const payload = filteredEntries.map((e) => ({
-        batch_id: e.batch_id,
-        report_date: e.report_date || null,
-        model: e.model,
-        groups: e.groups,
-        special_type: e.special_type || 'normal',
-        raw_remark: e.raw_remark || null,
-      }));
-      const data = await fetchDmpPerfData({ stationId, entries: payload });
-      setSheetsData(data.sheets || {});
-      const sheetKeys = Object.keys(data.sheets || {});
-      setActiveSheet(sheetKeys[0] || null);
-    } catch (err) {
-      notification.error({ message: t('dmpPerfViewTab'), description: err.message });
-    } finally {
-      setLoadingData(false);
-    }
-  };
-
   /**
-   * "Tìm kiếm": fetch entries from the server with the current date range,
+   * "Xem trước": fetch entries from the server with the current date range,
    * apply client-side filters, then immediately query DMP performance data
    * so the table updates in one click.
    */
@@ -722,7 +700,7 @@ function PerfViewTab({ stationId }) {
   // Build Ant Design table columns for a given sheet
   const buildColumns = useCallback((sheetKey) => {
     if (!sheetsData || !sheetsData[sheetKey]) return [];
-    const { conditions } = sheetsData[sheetKey];
+    const { conditions, units: sheetUnits = {} } = sheetsData[sheetKey];
     const cols = [
       {
         title: t('dmpPerfViewDate'),
@@ -748,15 +726,25 @@ function PerfViewTab({ stationId }) {
     ];
 
     (conditions || []).forEach((cond) => {
-      // Detect unit from label:
-      //   explicit suffix "(t)" → count  |  "(m)" → minutes  |  "(h)" → hours
-      //   pattern "\d+T/h" (e.g. "(1500mW2s,650mW28s)10T/h,24h/d") → count
-      //   fallback → hours
-      const lc = cond.toLowerCase();
-      const unit = lc.endsWith('(t)') || /\d+t\/h/.test(lc) ? 't'
-        : lc.endsWith('(m)') ? 'm'
-        : 'h';
-      const unitLabel = unit === 't' ? t('dmpPerfViewCount') : t('dmpPerfViewHours');
+      // Prefer unit from backend hfsj field; fall back to text inference from label.
+      const backendUnit = sheetUnits[cond]; // "hour" | "minute" | "times" | undefined
+      let unit;
+      if (backendUnit === 'times') {
+        unit = 'times';
+      } else if (backendUnit === 'minute') {
+        unit = 'minute';
+      } else if (backendUnit === 'hour') {
+        unit = 'hour';
+      } else {
+        // Fallback: infer from label text
+        const lc = cond.toLowerCase();
+        if (lc.endsWith('(t)') || /\d+t\/h/.test(lc)) unit = 'times';
+        else if (lc.endsWith('(m)')) unit = 'minute';
+        else unit = 'hour';
+      }
+      const unitLabel = unit === 'times' ? t('dmpPerfViewCount')
+        : unit === 'minute' ? t('dmpPerfViewMinutes')
+        : t('dmpPerfViewHours');
 
       cols.push({
         title: (
@@ -769,16 +757,23 @@ function PerfViewTab({ stationId }) {
           {
             title: `${t('dmpPerfViewResult')} (${unitLabel})`,
             key: `${cond}_result`,
-            width: 100,
-            render: (_, row) => fmtResult(row.conditions?.[cond], unit),
+            width: 110,
+            align: 'right',
+            render: (_, row) => {
+              const val = fmtResult(row.conditions?.[cond], unit);
+              return <Typography.Text strong={val !== '-'}>{val}</Typography.Text>;
+            },
           },
           {
             title: t('dmpPerfViewRate'),
             key: `${cond}_rate`,
             width: 90,
+            align: 'right',
             render: (_, row) => {
               const ur = row.conditions?.[cond]?.uniform_rate;
-              return ur != null ? `${Number(ur).toFixed(1)}%` : '-';
+              if (ur == null) return '-';
+              const color = ur >= 95 ? '#52c41a' : ur >= 85 ? '#faad14' : '#ff4d4f';
+              return <span style={{ color, fontWeight: 500 }}>{`${Number(ur).toFixed(1)}%`}</span>;
             },
           },
         ],
@@ -791,9 +786,13 @@ function PerfViewTab({ stationId }) {
   const sheetKeys = Object.keys(sheetsData || {});
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card size="small">
-        <Space wrap>
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Card
+        size="small"
+        style={{ borderRadius: 8 }}
+        bodyStyle={{ padding: '12px 16px' }}
+      >
+        <Space wrap size={8}>
           <DatePicker.RangePicker
             value={dateRange}
             onChange={setDateRange}
@@ -809,7 +808,7 @@ function PerfViewTab({ stationId }) {
           />
           <Select
             allowClear
-            style={{ minWidth: 110 }}
+            style={{ minWidth: 130 }}
             placeholder={t('dmpPerfViewFilterLoai')}
             value={filterLoai}
             onChange={setFilterLoai}
@@ -824,47 +823,39 @@ function PerfViewTab({ stationId }) {
             options={chuyenOptions}
           />
           <Button
-            onClick={handleSearch}
-            loading={loadingEntries || loadingData}
-          >
-            {t('dm2000Search')}
-          </Button>
-          <Button
             type="primary"
             icon={<EyeOutlined />}
-            loading={loadingData}
-            onClick={handlePreview}
-            disabled={filteredEntries.length === 0}
+            loading={loadingEntries || loadingData}
+            onClick={handleSearch}
           >
             {t('dmpPerfViewPreview')}
           </Button>
         </Space>
       </Card>
 
-      {loadingData && (
-        <Card size="small">
+      {(loadingEntries || loadingData) && (
+        <Card size="small" style={{ borderRadius: 8, textAlign: 'center' }}>
           <Space><Spin /><Typography.Text type="secondary">{t('dmpPerfViewLoading')}</Typography.Text></Space>
         </Card>
       )}
 
-      {!loadingData && sheetsData !== null && sheetKeys.length === 0 && (
+      {!loadingEntries && !loadingData && sheetsData !== null && sheetKeys.length === 0 && (
         <Empty description={t('dmpPerfViewNoData')} />
       )}
 
-      {!loadingData && sheetKeys.length > 0 && (
+      {!loadingEntries && !loadingData && sheetKeys.length > 0 && (
         <Card
           size="small"
+          style={{ borderRadius: 8 }}
+          bodyStyle={{ padding: 0 }}
           title={(
-            <Space>
-              <span>{t('dmpPerfViewSheet')}:</span>
-              <Tabs
-                size="small"
-                activeKey={activeSheet}
-                onChange={setActiveSheet}
-                items={sheetKeys.map((k) => ({ key: k, label: k }))}
-                style={{ marginBottom: 0 }}
-              />
-            </Space>
+            <Tabs
+              size="small"
+              activeKey={activeSheet}
+              onChange={setActiveSheet}
+              items={sheetKeys.map((k) => ({ key: k, label: <Typography.Text strong>{k}</Typography.Text> }))}
+              style={{ marginBottom: 0 }}
+            />
           )}
         >
           {activeSheet && sheetsData[activeSheet] && (
@@ -877,13 +868,14 @@ function PerfViewTab({ stationId }) {
               scroll={{ x: 'max-content' }}
               bordered
               rowClassName={(row) => SPECIAL_ROW_LABELS.has(row.date) ? 'perf-special-row' : ''}
+              style={{ borderRadius: 0 }}
             />
           )}
         </Card>
       )}
 
-      {!loadingData && sheetsData === null && (
-        <Card size="small">
+      {!loadingEntries && !loadingData && sheetsData === null && (
+        <Card size="small" style={{ borderRadius: 8, textAlign: 'center' }}>
           <Empty description={t('dmpPerfViewNoData')} />
         </Card>
       )}

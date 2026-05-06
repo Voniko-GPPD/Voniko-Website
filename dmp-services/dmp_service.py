@@ -4727,7 +4727,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:
-        if not entry.batch_id.strip() and not entry.dm2000_archname:
+        if not (entry.batch_id or "").strip() and not entry.dm2000_archname:
             continue
 
         # ── DM2000 path: when dm2000_archname is set, read from DM2000 instead of DMP ──
@@ -4816,7 +4816,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 else:
                     _dm2k_sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
 
-                _dm2k_fdfs_label = _dm2k_fdfs if _dm2k_fdfs else grp.loai
+                _dm2k_fdfs_label = _dm2k_fdfs or grp.loai
                 _dm2k_row_key = (_dm2k_row_label, grp.loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
 

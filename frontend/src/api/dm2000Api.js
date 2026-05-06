@@ -259,3 +259,18 @@ export async function deleteDM2000Option(id) {
   });
   return res.json();
 }
+
+export async function fetchDM2000ArchiveOverride(stationId, archname) {
+  const params = new URLSearchParams({ stationId, archname });
+  const res = await apiFetch(`${BASE}/archive-overrides?${params.toString()}`);
+  const data = await res.json();
+  return data.override || null;
+}
+
+export async function saveDM2000ArchiveOverride(stationId, archname, { serialno, remarks } = {}) {
+  const res = await apiFetch(`${BASE}/archive-overrides`, {
+    method: 'PUT',
+    body: JSON.stringify({ stationId, archname, serialno: serialno ?? null, remarks: remarks ?? null }),
+  });
+  return res.json();
+}

@@ -280,6 +280,22 @@ function createTables() {
 
     CREATE INDEX IF NOT EXISTS idx_dmp_perf_entries_station ON dmp_perf_entries(station_id);
     CREATE INDEX IF NOT EXISTS idx_dmp_perf_entries_date ON dmp_perf_entries(report_date);
+
+    -- DM2000 archive metadata overrides: user-provided serial no and remarks
+    -- for each archive, stored here so edits survive Access cache refreshes.
+    CREATE TABLE IF NOT EXISTS dm2000_archive_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      station_id TEXT NOT NULL,
+      archname TEXT NOT NULL,
+      serialno TEXT,
+      remarks TEXT,
+      updated_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(station_id, archname)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dm2000_overrides_station ON dm2000_archive_overrides(station_id);
   `);
 
   // Safe migration: add folder_id column to files if not present

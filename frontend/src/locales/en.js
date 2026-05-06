@@ -649,6 +649,12 @@ export default {
   dm2000MeasureInstrument: 'Measure Instrument',
   dm2000DurationEndpoint: 'Duration End-point',
   dm2000DurationEndpointAll: 'All',
+  dm2000EditOverride: 'Edit Serial No / Remark',
+  dm2000EditOverrideTitle: 'Edit Archive Info: {archname}',
+  dm2000Save: 'Save',
+  dm2000Cancel: 'Cancel',
+  dm2000SerialNoPlaceholder: 'Enter serial / batch number',
+  dm2000RemarksPlaceholder: 'Enter remark',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',

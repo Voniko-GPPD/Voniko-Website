@@ -649,6 +649,12 @@ export default {
   dm2000MeasureInstrument: '测量仪器',
   dm2000DurationEndpoint: '持续时间截止电压',
   dm2000DurationEndpointAll: '全部',
+  dm2000EditOverride: '编辑序列号 / 备注',
+  dm2000EditOverrideTitle: '编辑存档信息: {archname}',
+  dm2000Save: '保存',
+  dm2000Cancel: '取消',
+  dm2000SerialNoPlaceholder: '输入序列号 / 批号',
+  dm2000RemarksPlaceholder: '输入备注',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',

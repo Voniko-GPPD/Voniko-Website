@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
-import { Alert, Button, Col, DatePicker, Form, Input, Row, Space, Table, Typography } from 'antd';
-import { ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import React, { useRef, useState } from 'react';
+import { Alert, Button, Col, DatePicker, Form, Input, Modal, Row, Space, Table, Tooltip, Typography } from 'antd';
+import { EditOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { fetchDM2000Archives, refreshDM2000Archives } from '../../../api/dm2000Api';
+import { fetchDM2000Archives, refreshDM2000Archives, saveDM2000ArchiveOverride } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const dateFormat = 'YYYY-MM-DD';
@@ -10,6 +10,7 @@ const dateFormat = 'YYYY-MM-DD';
 export default function DM2000FilterPanel({ stationId, selectedArchname, onSelect }) {
   const { t } = useLang();
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [archives, setArchives] = useState([]);
@@ -17,11 +18,14 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   const [searched, setSearched] = useState(false);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
   const [reloading, setReloading] = useState(false);
+  const [editingArchive, setEditingArchive] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const lastFiltersRef = useRef({});
 
-  const onSearch = async () => {
+  const onSearch = async (filters) => {
     if (!stationId) return;
-    const values = form.getFieldsValue();
-    const filters = {
+    const values = filters || form.getFieldsValue();
+    const queryFilters = {
       date_from: values.date_from ? dayjs(values.date_from).format(dateFormat) : undefined,
       date_to: values.date_to ? dayjs(values.date_to).format(dateFormat) : undefined,
       type_filter: values.type_filter?.trim() || undefined,
@@ -29,12 +33,13 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       mfr_filter: values.mfr_filter?.trim() || undefined,
       keyword: values.keyword?.trim() || undefined,
     };
+    lastFiltersRef.current = values;
 
     setLoading(true);
     setError('');
     setSearched(true);
     try {
-      const result = await fetchDM2000Archives(stationId, filters);
+      const result = await fetchDM2000Archives(stationId, queryFilters);
       setArchives(result.archives || []);
       setTotal(result.total || 0);
       setPagination((prev) => ({ ...prev, current: 1 }));
@@ -63,13 +68,62 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     setError('');
     try {
       await refreshDM2000Archives(stationId);
-      if (searched) await onSearch();
+      if (searched) await onSearch(lastFiltersRef.current);
     } catch (err) {
       setError(err.message || 'Reload failed');
     } finally {
       setReloading(false);
     }
   };
+
+  const openEditModal = (e, record) => {
+    e.stopPropagation();
+    setEditingArchive(record);
+    editForm.setFieldsValue({
+      serialno: record.serialno || '',
+      remarks: record.remarks || '',
+    });
+  };
+
+  const handleEditSave = async () => {
+    if (!editingArchive || !stationId) return;
+    const values = editForm.getFieldsValue();
+    setEditSaving(true);
+    try {
+      await saveDM2000ArchiveOverride(stationId, editingArchive.archname, {
+        serialno: values.serialno?.trim() || null,
+        remarks: values.remarks?.trim() || null,
+      });
+      // Update local state so the table shows the new values immediately
+      setArchives((prev) =>
+        prev.map((a) =>
+          a.archname === editingArchive.archname
+            ? { ...a, serialno: values.serialno?.trim() || null, remarks: values.remarks?.trim() || null }
+            : a
+        )
+      );
+      setEditingArchive(null);
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const EditableCell = ({ value, record, field }) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{value || '-'}</span>
+      <Tooltip title={t('dm2000EditOverride')}>
+        <Button
+          size="small"
+          type="text"
+          icon={<EditOutlined style={{ fontSize: 11, color: '#999' }} />}
+          style={{ flexShrink: 0, padding: '0 2px', height: 18, minWidth: 18 }}
+          onClick={(e) => openEditModal(e, record)}
+        />
+      </Tooltip>
+    </div>
+  );
 
   const columns = [
     {
@@ -102,8 +156,20 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 140, render: (v) => v || '-' },
     { title: t('dm2000MadeDate'), dataIndex: 'madedate', key: 'madedate', width: 120, render: (v) => v || '-' },
     { title: t('dm2000ArchName'), dataIndex: 'archname', key: 'archname', width: 160, render: (v) => v || '-' },
-    { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 140, render: (v) => v || '-' },
-    { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 160, render: (v) => v || '-' },
+    {
+      title: t('dm2000SerialNo'),
+      dataIndex: 'serialno',
+      key: 'serialno',
+      width: 160,
+      render: (v, record) => <EditableCell value={v} record={record} field="serialno" />,
+    },
+    {
+      title: t('dm2000Remarks'),
+      dataIndex: 'remarks',
+      key: 'remarks',
+      width: 180,
+      render: (v, record) => <EditableCell value={v} record={record} field="remarks" />,
+    },
   ];
 
   return (
@@ -142,7 +208,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
           </Col>
         </Row>
         <Space>
-          <Button type="primary" icon={<SearchOutlined />} onClick={onSearch} disabled={!stationId} loading={loading}>
+          <Button type="primary" icon={<SearchOutlined />} onClick={() => onSearch()} disabled={!stationId} loading={loading}>
             {t('dm2000Search')}
           </Button>
           <Button icon={<ReloadOutlined />} onClick={onReset}>
@@ -182,6 +248,27 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
           />
         </>
       )}
+
+      <Modal
+        open={!!editingArchive}
+        title={t('dm2000EditOverrideTitle', { archname: editingArchive?.archname || '' })}
+        onCancel={() => setEditingArchive(null)}
+        onOk={handleEditSave}
+        okText={t('dm2000Save')}
+        cancelText={t('dm2000Cancel')}
+        confirmLoading={editSaving}
+        width={420}
+        destroyOnClose
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="serialno" label={t('dm2000SerialNo')}>
+            <Input placeholder={t('dm2000SerialNoPlaceholder')} allowClear />
+          </Form.Item>
+          <Form.Item name="remarks" label={t('dm2000Remarks')}>
+            <Input.TextArea rows={3} placeholder={t('dm2000RemarksPlaceholder')} allowClear />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 }

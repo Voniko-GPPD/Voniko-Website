@@ -649,6 +649,12 @@ export default {
   dm2000MeasureInstrument: 'Thiết bị đo lường',
   dm2000DurationEndpoint: 'Điểm cuối thời lượng',
   dm2000DurationEndpointAll: 'Tất cả',
+  dm2000EditOverride: 'Sửa Số Serial / Ghi chú',
+  dm2000EditOverrideTitle: 'Sửa thông tin lưu trữ: {archname}',
+  dm2000Save: 'Lưu',
+  dm2000Cancel: 'Hủy',
+  dm2000SerialNoPlaceholder: 'Nhập số serial / lô',
+  dm2000RemarksPlaceholder: 'Nhập ghi chú',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',

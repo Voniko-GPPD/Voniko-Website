@@ -2409,46 +2409,6 @@ export default function BatteryPage() {
             >
               {/* Row 1: mode selector + live buffer + read-only value cells */}
               <Row gutter={[16, 12]} align="middle" wrap>
-                {/* Mode toggle + live buffer from caliper */}
-                <Col xs={24} sm="auto">
-                  <Space direction="vertical" size={4}>
-                    <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      {t('batteryCaliperMode')}
-                    </span>
-                    <Space size={8}>
-                      <Radio.Group
-                        value={caliperMode}
-                        onChange={(e) => {
-                          setCaliperMode(e.target.value);
-                          // Blur the radio button so the caliper's next Enter keypress
-                          // is caught by the global window keydown listener, not the button
-                          e.target.blur();
-                        }}
-                        buttonStyle="solid"
-                        size="small"
-                      >
-                        <Radio.Button value="dia">{t('batteryCaliperModeDia')}</Radio.Button>
-                        <Radio.Button value="hei">{t('batteryCaliperModeHei')}</Radio.Button>
-                      </Radio.Group>
-                      <Input
-                        ref={caliperInputRef}
-                        size="small"
-                        value={caliperBuffer}
-                        placeholder="Đang chờ thước kẹp..."
-                        style={{
-                          width: 170,
-                          fontFamily: 'monospace',
-                          background: caliperBuffer ? '#f6ffed' : '#fafafa',
-                          borderColor: caliperBuffer ? '#52c41a' : '#d9d9d9',
-                          color: caliperBuffer ? '#389e0d' : '#8c8c8c',
-                        }}
-                        readOnly
-                        tabIndex={-1}
-                      />
-                    </Space>
-                  </Space>
-                </Col>
-
                 {/* Diameter — read-only display */}
                 <Col xs="auto">
                   <Space direction="vertical" size={4}>

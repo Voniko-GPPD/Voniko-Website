@@ -467,6 +467,8 @@ def _run_test_loop(params: dict) -> None:
         _broadcast({"type": "error", "message": str(exc)})
         with _lock:
             session["running"] = False
+            session["connected"] = False
+        _broadcast({"type": "disconnected"})
     finally:
         if inst is not None:
             try:

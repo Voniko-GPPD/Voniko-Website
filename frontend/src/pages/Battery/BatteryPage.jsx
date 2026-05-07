@@ -40,6 +40,7 @@ const RETRY_DELAY_MS = 2000;
 const Y_AXIS_PADDING_RATIO = 0.1;
 const MIN_Y_AXIS_PADDING = 0.01;
 const ZOOM_MODAL_TABLE_SCROLL_Y = 'calc(80vh - 120px)';
+const LS_SELECTED_STATION = 'battery_selected_station';
 const ZOOM_CHART_DATA_ZOOM = [{ type: 'inside', filterMode: 'none' }, { type: 'slider', height: 20, bottom: 4 }];
 
 function parseStandard(str) {
@@ -329,6 +330,8 @@ export default function BatteryPage() {
   // Flag: when handleLoadOrder sends a clear_session to reset the backend, ignore the resulting
   // session_cleared broadcast so the snapshot records we just loaded are not wiped.
   const ignoreClearedRef = useRef(false);
+  // Flag: whether the station has been auto-restored from localStorage on this page load
+  const stationRestoredRef = useRef(false);
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -336,18 +339,37 @@ export default function BatteryPage() {
   const productLineRef = useRef(productLine);
   useEffect(() => { productLineRef.current = productLine; }, [productLine]);
 
-  // Poll station list every 30s
+  // Poll station list every 30s; on first load, restore last-used station from localStorage
   useEffect(() => {
-    const fetchStations = async () => {
+    const fetchStations = async (isFirst = false) => {
       setStationsLoading(true);
       try {
         const res = await getStations();
-        setStations(res.data.stations || []);
+        const stList = res.data.stations || [];
+        setStations(stList);
+        // Auto-restore the station that was selected before a page reload
+        if (isFirst && !stationRestoredRef.current && !selectedStationRef.current) {
+          stationRestoredRef.current = true;
+          const savedId = localStorage.getItem(LS_SELECTED_STATION);
+          if (savedId) {
+            const found = stList.find((s) => s.id === savedId);
+            if (found) {
+              selectedStationRef.current = found;
+              setSelectedStation(found);
+              // If WS is already open, fetch ports and status immediately;
+              // otherwise ws.onopen will send get_ports + get_status automatically.
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ action: 'get_ports', stationId: found.id }));
+                wsRef.current.send(JSON.stringify({ action: 'get_status', stationId: found.id }));
+              }
+            }
+          }
+        }
       } catch (_) { }
       finally { setStationsLoading(false); }
     };
-    fetchStations();
-    const interval = setInterval(fetchStations, 30_000);
+    fetchStations(true);
+    const interval = setInterval(() => fetchStations(false), 30_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -692,9 +714,10 @@ export default function BatteryPage() {
 
     ws.onopen = () => {
       retryCountRef.current = 0;
-      // Only fetch ports if a station is already selected
+      // Only fetch ports and status if a station is already selected
       if (selectedStationRef.current?.id) {
         ws.send(JSON.stringify({ action: 'get_ports', stationId: selectedStationRef.current.id }));
+        ws.send(JSON.stringify({ action: 'get_status', stationId: selectedStationRef.current.id }));
       }
       if (pendingNewSessionRef.current) {
         try {
@@ -1933,6 +1956,12 @@ export default function BatteryPage() {
                   setStationOccupied(false);
                   setPorts([]);
                   setPort('');
+                  // Persist selection so it survives page reloads
+                  if (s) {
+                    localStorage.setItem(LS_SELECTED_STATION, s.id);
+                  } else {
+                    localStorage.removeItem(LS_SELECTED_STATION);
+                  }
                   if (s) {
                     // Load ports and subscribe to current station state
                     sendMsg({ action: 'get_ports' });
@@ -3204,6 +3233,10 @@ export default function BatteryPage() {
             }
           }}>{t('batteryNewSession')}</Button>,
           <Button key="continue" type="primary" onClick={() => {
+            // Resume from where we left off: use max battery ID from saved records + 1 to handle gaps
+            const savedRecords = savedSessionInfo?.records || [];
+            const maxId = savedRecords.length > 0 ? Math.max(...savedRecords.map((r) => r.id || 0)) : 0;
+            startIdRef.current = maxId + 1;
             setResumeModalVisible(false);
           }}>{t('batteryContinueSession')}</Button>,
         ]}

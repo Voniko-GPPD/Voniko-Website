@@ -340,6 +340,10 @@ function startSseRelay(stationId, base) {
           if (!dataLine) continue;
           try {
             const json = JSON.parse(dataLine.slice(5).trim());
+            // If the Python service signals a hardware disconnection, release the operator role
+            if (json.type === 'disconnected') {
+              stationOperatorMap.delete(stationId);
+            }
             // Attach stationId so the browser can filter messages
             broadcastToStation(stationId, { ...json, stationId });
           } catch (_) {}

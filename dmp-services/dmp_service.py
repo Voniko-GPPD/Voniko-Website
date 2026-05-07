@@ -4943,18 +4943,22 @@ def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -
         return False
     # Require unique start dates.  When any two archives share the same date
     # this is a same-day per-grade scenario, not different-dates same-bz.
-    dates: list[str] = []
-    for a in arch_rows:
-        raw_d = _dm2000_get_value(a, "startdate", "fdrq")
-        if raw_d is None:
-            d_str = ""
-        elif hasattr(raw_d, "strftime"):
-            d_str = raw_d.strftime("%Y-%m-%d")
-        else:
-            d_str = str(raw_d).strip()[:10]
-        dates.append(d_str)
-    non_empty = [d for d in dates if d]
-    if non_empty and len(non_empty) != len(set(non_empty)):
+    # Archives with no start date are excluded from the uniqueness check
+    # (they cannot be distinguished by date and are treated as unique).
+    def _date_str(raw) -> str:
+        if raw is None:
+            return ""
+        if hasattr(raw, "strftime"):
+            return raw.strftime("%Y-%m-%d")
+        s = str(raw).strip()
+        # Validate YYYY-MM-DD (or YYYY/MM/DD after replace) to avoid treating
+        # truncated or non-date strings as matching dates.
+        s = s.replace("/", "-")[:10]
+        return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
+
+    valid_dates = [_date_str(_dm2000_get_value(a, "startdate", "fdrq")) for a in arch_rows]
+    valid_dates = [d for d in valid_dates if d]
+    if valid_dates and len(valid_dates) != len(set(valid_dates)):
         return False
     return True
 

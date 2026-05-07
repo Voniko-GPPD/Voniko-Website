@@ -4111,18 +4111,28 @@ def _compute_perf_values(
         except (TypeError, ValueError):
             ep = None
 
-    # Fallback: use the minimum voltage seen across all TAV rows (last milestone)
+    # Fallback: use the minimum voltage that has at least one battery with valid data.
+    # Using plain min(all_sj) would pick the lowest threshold voltage even when all
+    # batteries have null data there (e.g. a 0.600V row where no battery reached that
+    # voltage), which then causes the tolerance check to fail for batteries whose curve
+    # only goes down to 0.900V.  We therefore find the lowest voltage where at least
+    # one battery actually has a finite, non-negative discharge time recorded.
     if ep is None:
-        all_sj: set[float] = set()
-        for b in batys:
-            for row in (tav_map.get(b) or []):
-                sj = row.get("sj") or row.get("SJ")
+        _fb_ep: Optional[float] = None
+        for _fb_b in batys:
+            for _fb_row in (tav_map.get(_fb_b) or []):
+                _fb_sj = _fb_row.get("sj") or _fb_row.get("SJ")
+                _fb_m = _fb_row.get("minutes") or _fb_row.get("MINUTES")
                 try:
-                    all_sj.add(float(sj))
+                    _fb_sv = float(_fb_sj)
+                    _fb_mv = float(_fb_m)
+                    if not math.isnan(_fb_mv) and _fb_mv >= 0:
+                        if _fb_ep is None or _fb_sv < _fb_ep:
+                            _fb_ep = _fb_sv
                 except (TypeError, ValueError):
                     pass
-        if all_sj:
-            ep = min(all_sj)
+        if _fb_ep is not None:
+            ep = _fb_ep
         else:
             return {
                 "avg_hours": None,
@@ -4754,6 +4764,32 @@ async def upload_dmp_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
+def _parse_bz_groups(bz: str) -> list[dict]:
+    """Parse a DM2000 remark like ``'LR6 UDP501 HP503'`` into group tokens.
+
+    Recognises the same token formats as the frontend ``parseRemark`` function:
+
+    * ``UDP{n}``  →  ``{"loai": "UD+", "chuyen": "{n}"}``
+    * ``HP{n}``   →  ``{"loai": "HP",  "chuyen": "{n}"}``
+    * ``UD{n}``   →  ``{"loai": "UD",  "chuyen": "{n}"}``
+
+    A leading 6-digit DDMMYY date token is skipped.  Unrecognised tokens (e.g.
+    model names like ``'LR6'``) are silently ignored.  Returns ``[]`` when no
+    group tokens are found.
+    """
+    groups: list[dict] = []
+    tokens = (bz or "").strip().upper().split()
+    start = 1 if (tokens and re.fullmatch(r"\d{6}", tokens[0])) else 0
+    for tok in tokens[start:]:
+        if re.fullmatch(r"UDP\d+", tok):
+            groups.append({"loai": "UD+", "chuyen": tok[3:]})
+        elif re.fullmatch(r"HP\d+", tok):
+            groups.append({"loai": "HP", "chuyen": tok[2:]})
+        elif re.fullmatch(r"UD\d+", tok):
+            groups.append({"loai": "UD", "chuyen": tok[2:]})
+    return groups
+
+
 def _compute_dmp_perf_groups(  # noqa: C901
     payload: DmpPerfReportRequest,
     skip_not_found: bool = False,
@@ -4863,10 +4899,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
                         if entry.special_type in _SPECIAL_TYPE_LABEL:
                             _dm2k_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                        elif _dm2k_a_fdrq:
+                            _dm2k_a_row_label = _dm2k_a_fdrq
                         elif entry.report_date:
                             _dm2k_a_row_label = _to_date(entry.report_date) or entry.report_date
                         else:
-                            _dm2k_a_row_label = _dm2k_a_fdrq or _dm2k_arch
+                            _dm2k_a_row_label = _dm2k_arch
                         _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
                         for _dm2k_grp in entry.groups:
                             if not _dm2000_archive_matches_chuyen(_dm2k_a, _dm2k_grp.chuyen):
@@ -4913,34 +4951,60 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_fdfs_raw, _dm2k_load_res, _dm2k_ep_str, _dm2k_arch,
             )
 
-            # Determine row label
+            # Determine row label — prefer the archive's own start date (fdrq) over
+            # entry.report_date, which is typically set to today when no date prefix
+            # was entered in the remark.  The DM2000 archive's fdrq is the actual
+            # test start date and should be used as the row label.
             _dm2k_startdate_raw = _dm2000_get_value(_arch_meta, "startdate", "fdrq")
             _dm2k_fdrq = _to_date(_dm2k_startdate_raw) if _dm2k_startdate_raw else ""
             if entry.special_type in _SPECIAL_TYPE_LABEL:
                 _dm2k_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+            elif _dm2k_fdrq:
+                _dm2k_row_label = _dm2k_fdrq
             elif entry.report_date:
                 _dm2k_row_label = _to_date(entry.report_date) or entry.report_date
             else:
-                _dm2k_row_label = _dm2k_fdrq or _dm2k_arch
+                _dm2k_row_label = _dm2k_arch
 
             # Get all active batteries for auto-assignment fallback
             _dm2k_all_batys = _get_batys_for_archive(_dm2k_resolved)
 
-            n_groups = len(entry.groups)
+            # Auto-detect groups from the archive's bz/remarks when the entry's groups
+            # have no explicit tray assignments.  A bz like "LR6 UDP501 HP503" implies
+            # two groups with positional tray assignment ([1-4] for group-0, [6-9] for
+            # group-1).  Using all batteries for a single group would mix channels from
+            # different production lines and produce an incorrect average.
+            _dm2k_bz_raw = str(_dm2000_get_value(
+                _arch_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+            ) or "").strip()
+            _dm2k_bz_groups = _parse_bz_groups(_dm2k_bz_raw)
+            _dm2k_eff_groups = [
+                {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                for grp in entry.groups
+            ]
+            _dm2k_n = len(_dm2k_eff_groups)
+            if len(_dm2k_bz_groups) > len(_dm2k_eff_groups) and not any(g["trays"] for g in _dm2k_eff_groups):
+                # More groups in bz than entry specifies; use bz groups for full coverage
+                _dm2k_eff_groups = [
+                    {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                    for g in _dm2k_bz_groups
+                ]
+                _dm2k_n = len(_dm2k_eff_groups)
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
-                n_groups, [_dm2k_all_batys]
+                _dm2k_n, [_dm2k_all_batys]
             )
 
             model_upper = entry.model.strip().upper()
             no_chuyen_models = {"LR61", "9V", "6LR61"}
 
-            for g_idx, grp in enumerate(entry.groups):
-                if grp.trays:
-                    _dm2k_batys = [b for b in grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+            for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
+                _dm2k_grp_trays = _dm2k_eff_grp.get("trays") or []
+                if _dm2k_grp_trays:
+                    _dm2k_batys = [b for b in _dm2k_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                 else:
                     _dm2k_batys = (
-                        _dm2k_auto_trays[g_idx]
-                        if g_idx < len(_dm2k_auto_trays)
+                        _dm2k_auto_trays[_dm2k_g_idx]
+                        if _dm2k_g_idx < len(_dm2k_auto_trays)
                         else _dm2k_all_batys
                     )
                 if not _dm2k_batys:
@@ -4950,13 +5014,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
 
+                _dm2k_grp_chuyen = _dm2k_eff_grp.get("chuyen") or ""
+                _dm2k_grp_loai = _dm2k_eff_grp.get("loai") or ""
                 if model_upper in no_chuyen_models:
                     _dm2k_sheet_key = entry.model.strip()
                 else:
-                    _dm2k_sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
+                    _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
-                _dm2k_fdfs_label = _dm2k_fdfs or grp.loai
-                _dm2k_row_key = (_dm2k_row_label, grp.loai)
+                _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
+                _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
 
             continue  # Skip DMP lookup path for this entry
@@ -5133,10 +5199,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
                             if entry.special_type in _SPECIAL_TYPE_LABEL:
                                 _fb_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                            elif _fb_a_fdrq:
+                                _fb_a_row_label = _fb_a_fdrq
                             elif entry.report_date:
                                 _fb_a_row_label = _to_date(entry.report_date) or entry.report_date
                             else:
-                                _fb_a_row_label = _fb_a_fdrq or _fb_remark
+                                _fb_a_row_label = _fb_remark
                             _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
                             for _fb_grp in entry.groups:
                                 if not _dm2000_archive_matches_chuyen(_fb_a, _fb_grp.chuyen):
@@ -5180,22 +5248,47 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_fdfs = _build_dm2000_condition_label(
                         _fb_fdfs_raw, _fb_load_res, _fb_ep_str, _fb_remark,
                     )
+                    # Determine row label — prefer the archive's own start date (fdrq)
+                    # over entry.report_date, which is typically set to today when no
+                    # date prefix was entered in the remark.
                     _fb_startdate_raw = _dm2000_get_value(_fb_meta, "startdate", "fdrq")
                     _fb_fdrq = _to_date(_fb_startdate_raw) if _fb_startdate_raw else ""
                     if entry.special_type in _SPECIAL_TYPE_LABEL:
                         _fb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                    elif _fb_fdrq:
+                        _fb_row_label = _fb_fdrq
                     elif entry.report_date:
                         _fb_row_label = _to_date(entry.report_date) or entry.report_date
                     else:
-                        _fb_row_label = _fb_fdrq or _fb_remark
+                        _fb_row_label = _fb_remark
                     _fb_all_batys = _get_batys_for_archive(_fb_resolved)
-                    _fb_n = len(entry.groups)
+                    # Auto-detect groups from the archive's bz/remarks when the entry's
+                    # groups have no explicit tray assignments.  A bz like "LR6 UDP501
+                    # HP503" implies two groups with positional tray assignment ([1-4]
+                    # for group-0, [6-9] for group-1).  Using all batteries for a single
+                    # group would mix channels from different production lines.
+                    _fb_bz_raw = str(_dm2000_get_value(
+                        _fb_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+                    ) or "").strip()
+                    _fb_bz_groups = _parse_bz_groups(_fb_bz_raw)
+                    _fb_eff_groups = [
+                        {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                        for grp in entry.groups
+                    ]
+                    _fb_n = len(_fb_eff_groups)
+                    if len(_fb_bz_groups) > len(_fb_eff_groups) and not any(g["trays"] for g in _fb_eff_groups):
+                        _fb_eff_groups = [
+                            {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                            for g in _fb_bz_groups
+                        ]
+                        _fb_n = len(_fb_eff_groups)
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}
-                    for _fb_g_idx, _fb_grp in enumerate(entry.groups):
-                        if _fb_grp.trays:
-                            _fb_batys = [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                    for _fb_g_idx, _fb_eff_grp in enumerate(_fb_eff_groups):
+                        _fb_grp_trays = _fb_eff_grp.get("trays") or []
+                        if _fb_grp_trays:
+                            _fb_batys = [b for b in _fb_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                         else:
                             _fb_batys = (
                                 _fb_auto_trays[_fb_g_idx]
@@ -5207,14 +5300,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
                         _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
                         _fb_perf["hfsj_unit"] = "hour"
+                        _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""
+                        _fb_grp_loai = _fb_eff_grp.get("loai") or ""
                         _fb_sheet = (
                             entry.model.strip()
                             if _fb_model_upper in _fb_no_chuyen
-                            else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
+                            else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
-                        _fb_fdfs_label = _fb_fdfs or _fb_grp.loai
+                        _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
                         groups.setdefault(_fb_sheet, {}).setdefault(
-                            (_fb_row_label, _fb_grp.loai), {}
+                            (_fb_row_label, _fb_grp_loai), {}
                         )[_fb_fdfs_label] = _fb_perf
                     continue  # DM2000 path handled; skip rest of DMP path
 

@@ -1144,13 +1144,20 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
         return True
 
-    # Strip trailing endpoint-voltage suffix from one side at a time
-    _vsuf = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
+    # Strip trailing endpoint-voltage suffix from one or both sides.
+    # Handles both "-0.9V" (template / DMP jstj format) and " to 0.900V"
+    # (older DM2000 label format) suffixes so that "10ohm 24h/d-0.900V"
+    # and "10ohm 24h/d-0.9V" are considered equivalent.
+    _vsuf = re.compile(r'(\s*-\s*|\s+to\s+)\d+\.?\d*\s*[vV]\s*$', re.IGNORECASE)
     f_no_v = re.sub(r'\s+', '', _vsuf.sub('', f))
     h_no_v = re.sub(r'\s+', '', _vsuf.sub('', h))
     if f_no_v and h_no_ws and f_no_v == h_no_ws:
         return True
     if f_no_ws and h_no_v and f_no_ws == h_no_v:
+        return True
+    # Both sides voltage-stripped (handles differing decimal precision, e.g.
+    # "10ohm 24h/d-0.900V" vs "10ohm 24h/d-0.9V")
+    if f_no_v and h_no_v and f_no_v == h_no_v:
         return True
 
     return False
@@ -4510,7 +4517,7 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         manufacturer_db = str(_dm2000_get_value(archive, "manufacturer", "changshang", "cs") or "").strip()
         load_resistance = str(_dm2000_get_value(
             archive,
-            "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+            "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
         ) or "").strip()
         endpoint_voltage_raw = _dm2000_get_value(
             archive,
@@ -4660,19 +4667,22 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
 
 
 def _build_dm2000_condition_label(fdfs_raw: str, load_res: str, ep_str: str, fallback: str) -> str:
-    """Build a combined DM2000 condition label like '10ohm 24h/d to 0.900V'.
+    """Build a combined DM2000 condition label like '10ohm 24h/d-0.900V'.
 
-    Mirrors the DM Historic display logic:
+    Uses the same format as DMP's para_pub.jstj (e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V")
+    so that _perf_fdfs_matches_template can correctly locate the label in the IEC
+    60086-2 template and assign the right column order.
+
       resistance = load_res appended with "ohm" when it is a bare number
       prefix     = resistance + fdfs joined by a space (empty parts omitted)
-      suffix     = " to <ep_str>V" when endpoint voltage is present
+      suffix     = "-<ep_str>V" when endpoint voltage is present
     """
     resistance = ""
     if load_res:
         resistance = f"{load_res}ohm" if re.match(r"^\d+(\.\d+)?$", load_res) else load_res
     parts = [p for p in (resistance, fdfs_raw) if p]
     prefix = " ".join(parts)
-    suffix = f" to {ep_str}V" if ep_str else ""
+    suffix = f"-{ep_str}V" if ep_str else ""
     return (prefix + suffix) or fallback
 
 
@@ -4991,7 +5001,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         )
                         _dm2k_a_fdfs_raw = str(_dm2000_get_value(_dm2k_a, "fdfs") or "").strip()
                         _dm2k_a_load_res = str(_dm2000_get_value(
-                            _dm2k_a, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                            _dm2k_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
                         ) or "").strip()
                         _dm2k_a_ep_raw = _dm2000_get_value(
                             _dm2k_a,
@@ -5046,7 +5056,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             _dm2k_fdfs_raw = str(_dm2000_get_value(_arch_meta, "fdfs") or "").strip()
             _dm2k_load_res = str(_dm2000_get_value(
-                _arch_meta, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                _arch_meta, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
             ) or "").strip()
             _dm2k_ep_raw = _dm2000_get_value(
                 _arch_meta,
@@ -5291,7 +5301,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             )
                             _fb_a_fdfs_raw = str(_dm2000_get_value(_fb_a, "fdfs") or "").strip()
                             _fb_a_load_res = str(_dm2000_get_value(
-                                _fb_a, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                                _fb_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
                             ) or "").strip()
                             _fb_a_ep_raw = _dm2000_get_value(
                                 _fb_a,
@@ -5344,7 +5354,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )
                     _fb_fdfs_raw = str(_dm2000_get_value(_fb_meta, "fdfs") or "").strip()
                     _fb_load_res = str(_dm2000_get_value(
-                        _fb_meta, "load_resistance", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                        _fb_meta, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
                     ) or "").strip()
                     _fb_ep_raw = _dm2000_get_value(
                         _fb_meta,

@@ -39,6 +39,7 @@ import {
   updatePerfEntry,
   uploadDmpPerfTemplate,
 } from '../../../api/dmpApi';
+import { getBatteryTypes } from '../../../api/battery';
 import { useLang } from '../../../contexts/LangContext';
 
 const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
@@ -107,15 +108,19 @@ const SIX_DIGIT_RE = /^\d{6}$/;
  *
  * Rules:
  *   - First token that is exactly 6 digits → DDMMYY date (optional)
- *   - Token matching battery family (LR6, LR03, 9V, …) → model
+ *   - Token matching a battery family name (from batteryTypes list, or LR\d{1,2}/9V as fallback) → model
  *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [] }
  *   - "HP<n>"  → { loai: 'HP',  chuyen: '<n>', trays: [] }
  *   - "UD<n>"  → { loai: 'UD',  chuyen: '<n>', trays: [] }
  *
  * Trays are always left empty so the backend assigns them positionally:
  *   1 group → trays 1-9 | 2 groups → 1-4 / 6-9 | 3 groups → 1-3 / 4-6 / 7-9
+ *
+ * @param {string} raw - raw remark string to parse
+ * @param {string[]} batteryTypes - list of battery family names from admin settings
+ *   (e.g. ['LR6', 'LR03', 'LR61', '9V']). Falls back to /^(LR\d{1,2}|9V)$/ when empty.
  */
-function parseRemark(raw) {
+function parseRemark(raw, batteryTypes) {
   if (!raw || !raw.trim()) return { date: null, model: null, groups: [] };
 
   const tokens = raw.trim().toUpperCase().split(/\s+/);
@@ -142,11 +147,18 @@ function parseRemark(raw) {
     start = 1;
   }
 
-  // LR\d{1,2} already covers LR6, LR03, LR61, etc.
-  const batteryRe = /^(LR\d{1,2}|9V)$/;
+  // Build battery family matcher from the admin-configured list.
+  // Falls back to the built-in pattern when no types are loaded yet.
+  const batterySet = batteryTypes && batteryTypes.length > 0
+    ? new Set(batteryTypes.map((t) => t.trim().toUpperCase()))
+    : null;
+  const isBatteryModel = batterySet
+    ? (tok) => batterySet.has(tok)
+    : (tok) => /^(LR\d{1,2}|9V)$/.test(tok);
+
   for (let i = start; i < tokens.length; i++) {
     const tok = tokens[i];
-    if (batteryRe.test(tok)) {
+    if (isBatteryModel(tok)) {
       model = tok;
     } else if (/^UDP\d+$/.test(tok)) {
       // Trays are assigned positionally (not by type) — leave empty for auto-assignment
@@ -238,11 +250,28 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [groups, setGroups] = useState(initial?.groups || []);
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
+  const [batteryTypes, setBatteryTypes] = useState([]);
+
+  // Load admin-configured battery family names once
+  useEffect(() => {
+    getBatteryTypes()
+      .then((res) => {
+        const names = (res.data?.types || res.data || []).map((t) => t.name).filter(Boolean);
+        if (names.length > 0) setBatteryTypes(names);
+      })
+      .catch(() => {}); // silently fall back to built-in defaults
+  }, []);
+
+  const modelOptions = useMemo(
+    () => (batteryTypes.length > 0 ? batteryTypes : ['LR6', 'LR03', 'LR61', '9V'])
+      .map((v) => ({ value: v, label: v })),
+    [batteryTypes],
+  );
 
   // Auto-parse remark to fill model + groups
   const handleRemarkChange = (e) => {
     const raw = e.target.value;
-    const parsed = parseRemark(raw);
+    const parsed = parseRemark(raw, batteryTypes);
     if (parsed.model) {
       form.setFieldValue('model', parsed.model);
       setCurrentModel(parsed.model);
@@ -260,7 +289,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       setSaving(true);
 
       const rawRemark = values.raw_remark || null;
-      const parsed = parseRemark(values.raw_remark);
+      const parsed = parseRemark(values.raw_remark, batteryTypes);
       const reportDate = parsed.date
         ? dayjs(parsed.date).format('YYYY-MM-DD')
         : dayjs().format('YYYY-MM-DD');
@@ -319,7 +348,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       {/* ── Common fields ── */}
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>
         <Select
-          options={['LR6', 'LR03', 'LR61', '9V'].map((v) => ({ value: v, label: v }))}
+          options={modelOptions}
           onChange={handleModelChange}
         />
       </Form.Item>

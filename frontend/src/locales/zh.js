@@ -387,6 +387,7 @@ export default {
   batterySessionCleared: '会话已清除',
   batteryTestStarted: '测试已开始',
   batteryTestStopped: '测试已停止',
+  batteryAutoSavedToHistory: '检测数据已自动保存到历史记录',
   batteryDownloading: '正在下载报告...',
   batteryDownloadSuccess: '报告已下载',
   batteryDownloadFailed: '下载报告失败',

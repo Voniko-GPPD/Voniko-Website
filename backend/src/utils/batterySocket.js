@@ -11,6 +11,10 @@
  */
 const { WebSocketServer, WebSocket } = require('ws');
 const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
+const jwt = require('jsonwebtoken');
+const config = require('../config');
+const { getDb } = require('../models/database');
 const logger = require('./logger');
 const { resolveUrl, getStations } = require('./stationRegistry');
 
@@ -77,6 +81,77 @@ function _broadcastStationState(stationId) {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-save session to history when operator disconnects unexpectedly
+// ---------------------------------------------------------------------------
+
+/**
+ * Called when the operator's WS connection closes.
+ * Stops the running test on the Python service and auto-saves the current
+ * session (records + order_id) to the battery_order_history table so that
+ * any user can load the saved snapshot from history and continue measuring.
+ */
+async function _autoSaveSessionOnDisconnect(stationId, base, operatorToken) {
+  try {
+    // Always try to stop the test (idempotent — safe even if already stopped)
+    await axios.post(`${base}/stop`).catch((e) => {
+      logger.warn('Battery auto-save: failed to stop test on operator disconnect', { stationId, error: e.message });
+    });
+
+    // Fetch current session state from the Python service
+    const statusRes = await axios.get(`${base}/status`).catch((e) => {
+      logger.warn('Battery auto-save: failed to fetch status on operator disconnect', { stationId, error: e.message });
+      return null;
+    });
+    if (!statusRes) return;
+
+    const { records = [], order_id: orderId, date } = statusRes.data || {};
+    if (!orderId || records.length === 0) return;
+
+    // Decode the operator's JWT to resolve their user ID
+    if (!operatorToken) return;
+    let userId;
+    try {
+      const payload = jwt.verify(operatorToken, config.jwt.secret);
+      userId = payload.userId;
+    } catch {
+      return; // expired / invalid token — skip auto-save
+    }
+
+    // Verify the user still exists and is active
+    const db = getDb();
+    const user = db.prepare('SELECT id FROM users WHERE id = ? AND is_active = 1').get(userId);
+    if (!user) return;
+
+    const normalizedOrderId = String(orderId).trim().toLowerCase();
+    const existing = db.prepare(
+      'SELECT id FROM battery_order_history WHERE lower(order_id) = ? AND created_by = ?'
+    ).get(normalizedOrderId, userId);
+
+    const savedAt = new Date().toISOString();
+
+    if (existing) {
+      // Update records; preserve any chart/readings data already stored there
+      db.prepare(
+        "UPDATE battery_order_history SET records_json=?, saved_at=?, status='updated' WHERE id=?"
+      ).run(JSON.stringify(records), savedAt, existing.id);
+      logger.info('Battery session auto-saved (updated) on operator disconnect', { stationId, orderId });
+    } else {
+      // No existing entry — create one (chart series will be empty; can be enriched later)
+      const id = uuidv4();
+      db.prepare(
+        "INSERT INTO battery_order_history (id, order_id, test_date, battery_type, product_line, records_json, chart_series_json, readings_json, saved_at, created_by, status) VALUES (?, ?, ?, ?, ?, ?, '{}', '{}', ?, ?, 'new')"
+      ).run(id, String(orderId).trim(), date || null, null, null, JSON.stringify(records), savedAt, userId);
+      logger.info('Battery session auto-saved (new) on operator disconnect', { stationId, orderId });
+    }
+
+    // Notify all remaining clients so they can refresh their order-history list
+    broadcastToStation(stationId, { type: 'session_auto_saved', stationId });
+  } catch (e) {
+    logger.error('Battery auto-save on operator disconnect failed', { stationId, error: e.message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Initialise WebSocket server
 // ---------------------------------------------------------------------------
 
@@ -99,14 +174,22 @@ function initBatteryWebSocket(server) {
     });
 
     ws.on('close', () => {
-      const { stationId } = clients.get(ws) || {};
+      // Capture client state before removing from map
+      const clientState = clients.get(ws) || {};
+      const { stationId, token } = clientState;
       clients.delete(ws);
       logger.info('Battery WS client disconnected', { total: clients.size });
       if (stationId) {
-        // If the closing client was the operator, release the station
+        // If the closing client was the operator, release the station, stop the
+        // test, and auto-save the session to history so no measurement data is lost.
         if (stationOperatorMap.get(stationId) === ws) {
           stationOperatorMap.delete(stationId);
+          const base = _getBase(stationId);
+          // Immediately notify remaining clients that the test stopped
+          broadcastToStation(stationId, { type: 'test_stopped', stationId });
           _broadcastStationState(stationId);
+          // Async: stop the hardware + persist session to history (non-blocking)
+          _autoSaveSessionOnDisconnect(stationId, base, token).catch(() => {});
         }
         // Stop SSE relay for this station if no clients remain
         if (!_hasClientsForStation(stationId)) {

@@ -387,6 +387,7 @@ export default {
   batterySessionCleared: 'Session cleared',
   batteryTestStarted: 'Test started',
   batteryTestStopped: 'Test stopped',
+  batteryAutoSavedToHistory: 'Session auto-saved to history',
   batteryDownloading: 'Downloading report...',
   batteryDownloadSuccess: 'Report downloaded',
   batteryDownloadFailed: 'Failed to download report',

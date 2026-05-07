@@ -387,6 +387,7 @@ export default {
   batterySessionCleared: 'Đã xoá phiên làm việc',
   batteryTestStarted: 'Bắt đầu kiểm tra',
   batteryTestStopped: 'Đã dừng kiểm tra',
+  batteryAutoSavedToHistory: 'Phiên đo đã được lưu tự động vào lịch sử',
   batteryDownloading: 'Đang tải báo cáo...',
   batteryDownloadSuccess: 'Đã tải báo cáo',
   batteryDownloadFailed: 'Tải báo cáo thất bại',

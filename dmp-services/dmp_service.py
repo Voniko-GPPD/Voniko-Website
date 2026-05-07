@@ -4636,10 +4636,16 @@ _SPECIAL_TYPE_LABEL: dict[str, str] = {
 
 def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
     """Return True if *chuyen* (production-line code) is contained in the
-    archive's manufacturer or serial-number range field.
+    archive's **remark (bz)**, **archive name**, or **serial number** fields.
 
-    Handles exact tokens (e.g. ``"501"`` in ``"501-502"``) and tokens with a
-    non-digit prefix (e.g. ``"HP501"`` → stripped ``"501"`` matches ``"501"``).
+    Deliberately does *not* check the manufacturer/cs field (``scdw``): that
+    field often covers a range of production lines (e.g. ``"501-502"``) and
+    would match archives for a completely different line — making the match
+    ambiguous when two archives share the same manufacturer range.
+
+    Handles exact tokens (e.g. ``"501"`` in ``"UDP501"``) and bare numeric
+    tokens (e.g. ``"501"``).  Tokens with a non-digit prefix are stripped
+    (e.g. ``"HP503"`` → ``"503"``).
 
     Returns ``False`` when *chuyen* is empty so that groups without a
     production-line filter are never incorrectly matched to all archives.
@@ -4648,8 +4654,9 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
     if not chuyen:
         return False  # cannot match without a production-line code
     for field_val in (
-        _dm2000_get_value(arch_meta, "manufacturer", "changshang", "cs", "scdw"),
-        _dm2000_get_value(arch_meta, "serialno", "dcph"),
+        _dm2000_get_value(arch_meta, "bz", "remark"),           # remark / ghi chú
+        _dm2000_get_value(arch_meta, "archname", "cdmc"),        # archive name
+        _dm2000_get_value(arch_meta, "serialno", "dcph"),        # serial number
     ):
         if not field_val:
             continue
@@ -4659,7 +4666,7 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
                 continue
             if tok == chuyen:
                 return True
-            # Strip leading non-digit prefix (e.g. "HP501" → "501")
+            # Strip leading non-digit prefix (e.g. "HP503" → "503", "UDP501" → "501")
             stripped = re.sub(r"^[^0-9]+", "", tok)
             if stripped and stripped == chuyen:
                 return True
@@ -4908,6 +4915,66 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     return groups
 
 
+def _pair_dm2000_archives_to_groups(
+    arch_rows: list[dict],
+    groups: list,
+) -> list[tuple[int, int]]:
+    """Return ``[(arch_idx, grp_idx), ...]`` pairs for multi-archive DM2000 data.
+
+    **Strategy 1 — bijective chuyen matching** (preferred):
+    Build a 1-to-1 mapping where each archive uniquely matches exactly one group
+    via :func:`_dm2000_archive_matches_chuyen` and each group is matched by
+    exactly one archive.  Used when manufacturers differ between archives (e.g.
+    ``"501"`` vs ``"503"``).
+
+    **Strategy 2 — positional fallback** (ambiguous case):
+    When the chuyen-based mapping is ambiguous — e.g. both archives share the
+    same manufacturer field (``"501-502"``), so both match the first group and
+    neither matches the second — sort archives by their minimum battery number
+    (ascending) and pair them with groups in declaration order.  This correctly
+    assigns the archive whose channels start at 1 (batteries 1-4, UD+) to
+    group 0 and the archive whose channels start at 6 (batteries 6-9, HP) to
+    group 1.
+    """
+    n_archs = len(arch_rows)
+    n_grps = len(groups)
+
+    # Build per-archive match lists via chuyen
+    arch_to_grp: dict[int, int] = {}   # ai → gi  (only when the match is unique)
+    grp_to_archs: dict[int, list[int]] = {}
+    for ai, a in enumerate(arch_rows):
+        matches = [
+            gi for gi, g in enumerate(groups)
+            if _dm2000_archive_matches_chuyen(a, g.chuyen)
+        ]
+        if len(matches) == 1:
+            arch_to_grp[ai] = matches[0]
+            grp_to_archs.setdefault(matches[0], []).append(ai)
+
+    # Bijective: every archive has exactly one match AND every matched group is
+    # claimed by exactly one archive AND all groups are covered.
+    is_bijective = (
+        len(arch_to_grp) == n_archs
+        and all(len(v) == 1 for v in grp_to_archs.values())
+        and len(grp_to_archs) == min(n_archs, n_grps)
+    )
+
+    if is_bijective:
+        return list(arch_to_grp.items())
+
+    # Positional fallback — sort archives by min battery number then pair.
+    # Archives with no battery data sort last (using MAX_BATTERY_NUMBER + 1).
+    _NO_BATTERY_SORT_VALUE = MAX_BATTERY_NUMBER + 1
+
+    def _min_battery_key(ai: int) -> tuple:
+        cdid = str(_dm2000_get_value(arch_rows[ai], "cdid", "archname") or "").strip()
+        batys = _get_batys_for_archive(cdid) if cdid else []
+        return (min(batys) if batys else _NO_BATTERY_SORT_VALUE, cdid, ai)
+
+    sorted_ais = sorted(range(n_archs), key=_min_battery_key)
+    return [(sorted_ais[i], i) for i in range(min(len(sorted_ais), n_grps))]
+
+
 def _compute_dmp_perf_groups(  # noqa: C901
     payload: DmpPerfReportRequest,
     skip_not_found: bool = False,
@@ -4987,6 +5054,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 # for its matching group so that:
                 #   • each group reads data from its own archive (correct grade/line),
                 #   • all discharge conditions across all archives are collected.
+                # _pair_dm2000_archives_to_groups handles the case where archives share
+                # the same manufacturer field (e.g. both "501-502") and chuyen matching
+                # is therefore ambiguous — it falls back to positional sort by min battery.
                 _dm2k_multi = len(_arch_rows) > 1 and len(entry.groups) > 0 and any(
                     _dm2000_archive_matches_chuyen(a, g.chuyen)
                     for a in _arch_rows for g in entry.groups
@@ -4994,7 +5064,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _dm2k_multi:
                     _dm2k_model_upper_m = entry.model.strip().upper()
                     _dm2k_no_chuyen_m = {"LR61", "9V", "6LR61"}
-                    for _dm2k_a in _arch_rows:
+                    _dm2k_ai_gi_pairs = _pair_dm2000_archives_to_groups(_arch_rows, entry.groups)
+                    _dm2k_ai_to_gi = dict(_dm2k_ai_gi_pairs)
+                    for _dm2k_ai, _dm2k_a in enumerate(_arch_rows):
+                        _dm2k_gi = _dm2k_ai_to_gi.get(_dm2k_ai)
+                        if _dm2k_gi is None:
+                            continue
+                        _dm2k_grp = entry.groups[_dm2k_gi]
                         _dm2k_a_resolved = (
                             str(_dm2000_get_value(_dm2k_a, "cdid", "archname") or _dm2k_arch).strip()
                             or _dm2k_arch
@@ -5024,27 +5100,24 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         else:
                             _dm2k_a_row_label = _dm2k_arch
                         _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
-                        for _dm2k_grp in entry.groups:
-                            if not _dm2000_archive_matches_chuyen(_dm2k_a, _dm2k_grp.chuyen):
-                                continue
-                            _dm2k_a_batys = (
-                                [b for b in _dm2k_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                                if _dm2k_grp.trays else _dm2k_a_all_batys
-                            )
-                            if not _dm2k_a_batys:
-                                continue
-                            _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
-                            _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
-                            _dm2k_a_perf["hfsj_unit"] = "hour"
-                            _dm2k_a_sheet_key = (
-                                entry.model.strip()
-                                if _dm2k_model_upper_m in _dm2k_no_chuyen_m
-                                else f"{entry.model.strip()} {_dm2k_grp.chuyen.strip()}"
-                            )
-                            _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_grp.loai
-                            groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
-                                (_dm2k_a_row_label, _dm2k_grp.loai), {}
-                            )[_dm2k_a_fdfs_label] = _dm2k_a_perf
+                        _dm2k_a_batys = (
+                            [b for b in _dm2k_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                            if _dm2k_grp.trays else _dm2k_a_all_batys
+                        )
+                        if not _dm2k_a_batys:
+                            continue
+                        _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
+                        _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
+                        _dm2k_a_perf["hfsj_unit"] = "hour"
+                        _dm2k_a_sheet_key = (
+                            entry.model.strip()
+                            if _dm2k_model_upper_m in _dm2k_no_chuyen_m
+                            else f"{entry.model.strip()} {_dm2k_grp.chuyen.strip()}"
+                        )
+                        _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_grp.loai
+                        groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
+                            (_dm2k_a_row_label, _dm2k_grp.loai), {}
+                        )[_dm2k_a_fdfs_label] = _dm2k_a_perf
                     continue  # all archives processed; skip DMP path
 
                 _arch_meta = _arch_rows[0]
@@ -5287,6 +5360,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # for its matching group so that:
                     #   • each group reads its own archive (correct grade/manufacturer),
                     #   • all discharge conditions across archives are collected.
+                    # _pair_dm2000_archives_to_groups handles the ambiguous case where
+                    # archives share the same manufacturer (e.g. both "501-502") so
+                    # chuyen matching alone cannot distinguish them — it falls back to
+                    # positional sort by min battery number.
                     _fb_multi = len(_fb_arch_rows) > 1 and len(entry.groups) > 0 and any(
                         _dm2000_archive_matches_chuyen(a, g.chuyen)
                         for a in _fb_arch_rows for g in entry.groups
@@ -5294,7 +5371,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     if _fb_multi:
                         _fb_model_upper_m = entry.model.strip().upper()
                         _fb_no_chuyen_m = {"LR61", "9V", "6LR61"}
-                        for _fb_a in _fb_arch_rows:
+                        _fb_ai_gi_pairs = _pair_dm2000_archives_to_groups(_fb_arch_rows, entry.groups)
+                        _fb_ai_to_gi = dict(_fb_ai_gi_pairs)
+                        for _fb_ai, _fb_a in enumerate(_fb_arch_rows):
+                            _fb_gi = _fb_ai_to_gi.get(_fb_ai)
+                            if _fb_gi is None:
+                                continue
+                            _fb_grp = entry.groups[_fb_gi]
                             _fb_a_resolved = (
                                 str(_dm2000_get_value(_fb_a, "cdid", "archname") or _fb_remark).strip()
                                 or _fb_remark
@@ -5324,27 +5407,24 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else:
                                 _fb_a_row_label = _fb_remark
                             _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
-                            for _fb_grp in entry.groups:
-                                if not _dm2000_archive_matches_chuyen(_fb_a, _fb_grp.chuyen):
-                                    continue
-                                _fb_a_batys = (
-                                    [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                                    if _fb_grp.trays else _fb_a_all_batys
-                                )
-                                if not _fb_a_batys:
-                                    continue
-                                _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
-                                _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
-                                _fb_a_perf["hfsj_unit"] = "hour"
-                                _fb_a_sheet = (
-                                    entry.model.strip()
-                                    if _fb_model_upper_m in _fb_no_chuyen_m
-                                    else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
-                                )
-                                _fb_a_fdfs_label = _fb_a_fdfs or _fb_grp.loai
-                                groups.setdefault(_fb_a_sheet, {}).setdefault(
-                                    (_fb_a_row_label, _fb_grp.loai), {}
-                                )[_fb_a_fdfs_label] = _fb_a_perf
+                            _fb_a_batys = (
+                                [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                                if _fb_grp.trays else _fb_a_all_batys
+                            )
+                            if not _fb_a_batys:
+                                continue
+                            _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
+                            _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
+                            _fb_a_perf["hfsj_unit"] = "hour"
+                            _fb_a_sheet = (
+                                entry.model.strip()
+                                if _fb_model_upper_m in _fb_no_chuyen_m
+                                else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
+                            )
+                            _fb_a_fdfs_label = _fb_a_fdfs or _fb_grp.loai
+                            groups.setdefault(_fb_a_sheet, {}).setdefault(
+                                (_fb_a_row_label, _fb_grp.loai), {}
+                            )[_fb_a_fdfs_label] = _fb_a_perf
                         continue  # DM2000 path handled; skip rest of DMP path
 
                     _fb_meta = _fb_arch_rows[0]

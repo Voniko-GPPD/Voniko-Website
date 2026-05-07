@@ -289,6 +289,8 @@ export default function BatteryPage() {
   // Resume session modal
   const [resumeModalVisible, setResumeModalVisible] = useState(false);
   const [savedSessionInfo, setSavedSessionInfo] = useState(null);
+  // Holds session data loaded on mount; the modal is only opened once isOperator is confirmed
+  const [pendingResumeSession, setPendingResumeSession] = useState(null);
 
   // Duplicate order ID blocking modal (shown when user types a code that already exists in history)
   const [duplicateOrderWarningVisible, setDuplicateOrderWarningVisible] = useState(false);
@@ -1783,11 +1785,21 @@ export default function BatteryPage() {
     try {
       const parsed = JSON.parse(localStorage.getItem('battery_session') || '{}');
       if (parsed?.records?.length > 0) {
-        setSavedSessionInfo(parsed);
-        setResumeModalVisible(true);
+        // Don't show the modal immediately — wait until we know the user is the operator.
+        // Showing it to viewer-mode clients would be incorrect.
+        setPendingResumeSession(parsed);
       }
     } catch { }
   }, []);
+
+  // Show the resume modal only after the operator role is confirmed via WebSocket
+  useEffect(() => {
+    if (isOperator && pendingResumeSession) {
+      setSavedSessionInfo(pendingResumeSession);
+      setResumeModalVisible(true);
+      setPendingResumeSession(null);
+    }
+  }, [isOperator, pendingResumeSession]);
 
   // Verify template file still exists on server on mount
   useEffect(() => {

@@ -4948,6 +4948,16 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     return groups
 
 
+def _escape_sql_wildcards(s: str) -> str:
+    """Escape Access SQL LIKE wildcard characters in *s* so they are treated literally.
+
+    Access uses ``%`` and ``_`` as wildcards in ``LIKE`` patterns.  Wrapping
+    each in square brackets (``[%]``, ``[_]``) causes Access to match them as
+    literal characters rather than wildcards.
+    """
+    return s.replace("%", "[%]").replace("_", "[_]")
+
+
 def _group_to_bz_token(loai: str, chuyen: str) -> str:
     """Return the bz search token for a production-line group — inverse of *_parse_bz_groups*.
 
@@ -5028,10 +5038,10 @@ def _dm2000_archive_matches_loai(arch_meta: dict, loai: str) -> bool:
     """Return True if the archive's battery-type field (``dcxh``) matches *loai*.
 
     DM2000 stores the battery type/grade in the ``dcxh`` column of ``ls_jb_cs``
-    (e.g. ``"LR6UD-UD+"``, ``"LR6HP"``, ``"LR6UD-UD"``).  This is used as a
-    **secondary** pairing strategy when two archives share an identical remark
-    (``bz``) and therefore cannot be distinguished by
-    :func:`_dm2000_archive_matches_chuyen` alone.
+    (e.g. ``"LR6UD-UD+"``, ``"LR6HP"``, ``"LR6UD-UD"``).  This is Strategy 2
+    in the archive-to-group pairing hierarchy: it is tried after chuyen-based
+    matching (:func:`_dm2000_archive_matches_chuyen`) and before positional
+    (sort-by-battery-number) fallback.
 
     Matching rules (case-insensitive):
 
@@ -5201,6 +5211,163 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 logger.warning("_compute_dmp_perf_groups: invalid dm2000_archname: %s", _dm2k_arch)
                 continue
 
+            # ── When explicit groups are configured: DMP-mirroring per-group path ──────────
+            # This mirrors the DMP batch path exactly:
+            #   DMP:    one batch + entry.groups → for each group, pick trays → _dmp_compute_group_perf
+            #   DM2000: for each group → search archive by bz token → determine batys from archive.bz → compute_perf
+            #
+            # Search strategy (applied independently for each group):
+            #   1. Primary:  WHERE bz LIKE "%{token}%"  (DM History style, e.g. "%UDP501%")
+            #      Finds both per-grade archives (bz="LR6 UDP501") and composite archives
+            #      (bz="LR6 UDP501 HP503").
+            #   2. Fallback: composite archname queries (bz exact → bz LIKE → cdid → archname)
+            #      Used when the group token search finds nothing.
+            #
+            # Tray assignment per archive (mirrors DMP's DMP_TRAY_ASSIGNMENT logic):
+            #   • Per-grade archive (bz has only 1 group token) → ALL batteries in the archive
+            #   • Composite archive (bz has 2+ group tokens)    → positional DMP_TRAY_ASSIGNMENT split
+            #   • Explicit trays configured                      → use those directly
+            if entry.groups:
+                _dm2k_model_up = entry.model.strip().upper()
+                _dm2k_no_ch = {"LR61", "9V", "6LR61"}
+                # Re-derive loai from archname remark (mirrors DMP's _remark_loai_by_chuyen)
+                _dm2k_loai_map: dict[str, str] = {
+                    str(_rg["chuyen"]): _rg["loai"]
+                    for _rg in _parse_bz_groups(_dm2k_arch)
+                    if _rg.get("chuyen")
+                }
+                # Build eff_groups with corrected loai and sort by chuyen (mirrors DMP)
+                _dm2k_eff_gs = [
+                    {
+                        "loai": _dm2k_loai_map.get(str(grp.chuyen or "").strip(), grp.loai),
+                        "chuyen": grp.chuyen,
+                        "trays": list(grp.trays or []),
+                    }
+                    for grp in entry.groups
+                ]
+                _dm2k_eff_gs = _sort_eff_groups_for_tray_assignment(_dm2k_eff_gs)
+                # Reusable: run four composite archname searches (bz exact → bz LIKE → cdid → archname)
+                def _dm2k_search_archname(key: str) -> list[dict]:
+                    for _sql, _par in [
+                        ("SELECT * FROM ls_jb_cs WHERE bz = ?", (key,)),
+                        ("SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
+                         (f"%{_escape_sql_wildcards(key)}%",)),
+                        ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (key,)),
+                        ("SELECT * FROM ls_jb_cs WHERE archname = ?", (key,)),
+                    ]:
+                        try:
+                            _r = _read_dm2000_ls(_sql, _par)
+                            if _r:
+                                return _r
+                        except pyodbc.Error:
+                            pass
+                    return []
+                _dm2k_seen_pairs: set[tuple] = set()  # (resolved_id, chuyen) dedup guard
+                for _dm2k_eg in _dm2k_eff_gs:
+                    # Step 1: search archives for this group
+                    _eg_token = _group_to_bz_token(_dm2k_eg["loai"], _dm2k_eg["chuyen"])
+                    _eg_rows: list[dict] = []
+                    if _eg_token:
+                        _eg_esc = _escape_sql_wildcards(_eg_token)
+                        try:
+                            _eg_rows = _read_dm2000_ls(
+                                "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_eg_esc}%",)
+                            )
+                        except pyodbc.Error:
+                            pass
+                    if not _eg_rows:
+                        _eg_rows = _dm2k_search_archname(_dm2k_arch)
+                    if not _eg_rows:
+                        if skip_not_found:
+                            continue
+                    for _eg_arch in (_eg_rows or [{}]):
+                        _eg_resolved = (
+                            str(_dm2000_get_value(_eg_arch, "cdid", "archname") or _dm2k_arch).strip()
+                            or _dm2k_arch
+                        )
+                        _eg_dedup = (_eg_resolved, str(_dm2k_eg["chuyen"] or ""))
+                        if _eg_dedup in _dm2k_seen_pairs:
+                            continue
+                        _dm2k_seen_pairs.add(_eg_dedup)
+                        # Step 2: archive metadata (mirrors DMP batch.fdfs / batch.zzdy)
+                        _eg_fdfs_raw = str(_dm2000_get_value(_eg_arch, "fdfs") or "").strip()
+                        _eg_load_res = str(_dm2000_get_value(
+                            _eg_arch, "load_resistance", "fzdz", "fzlkdz", "dw",
+                            "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                        ) or "").strip()
+                        _eg_ep_raw = _dm2000_get_value(
+                            _eg_arch,
+                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                        )
+                        _eg_ep_str = str(_eg_ep_raw or "").strip()
+                        _eg_fdfs = _build_dm2000_condition_label(
+                            _eg_fdfs_raw, _eg_load_res, _eg_ep_str, _dm2k_arch,
+                        )
+                        _eg_startdate = _dm2000_get_value(_eg_arch, "startdate", "fdrq")
+                        _eg_fdrq = _to_date(_eg_startdate) if _eg_startdate else ""
+                        if entry.special_type in _SPECIAL_TYPE_LABEL:
+                            _eg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                        elif _eg_fdrq:
+                            _eg_row_label = _eg_fdrq
+                        elif entry.report_date:
+                            _eg_row_label = _to_date(entry.report_date) or entry.report_date
+                        else:
+                            _eg_row_label = _dm2k_arch
+                        # Step 3: determine batys (mirrors DMP trays logic)
+                        _eg_all_batys = _get_batys_for_archive(_eg_resolved)
+                        _eg_arch_bz = str(_dm2000_get_value(
+                            _eg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                        ) or "").strip()
+                        _eg_arch_bz_gs = _parse_bz_groups(_eg_arch_bz)
+                        if _dm2k_eg["trays"]:
+                            _eg_batys = [
+                                b for b in _dm2k_eg["trays"]
+                                if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                            ]
+                        elif len(_eg_arch_bz_gs) <= 1:
+                            # Per-grade archive: the archive covers only this one group
+                            _eg_batys = _eg_all_batys
+                        else:
+                            # Composite archive: positional split by sorted chuyen index
+                            _eg_bz_sorted = sorted(
+                                _eg_arch_bz_gs,
+                                key=lambda g: (
+                                    int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
+                                    g.get("chuyen", ""),
+                                ),
+                            )
+                            _eg_chuyen_str = str(_dm2k_eg["chuyen"] or "").strip()
+                            _eg_g_idx = next(
+                                (i for i, bg in enumerate(_eg_bz_sorted)
+                                 if str(bg.get("chuyen", "")) == _eg_chuyen_str),
+                                0,
+                            )
+                            _eg_split = _DMP_TRAY_ASSIGNMENT.get(
+                                len(_eg_arch_bz_gs), [_eg_all_batys]
+                            )
+                            _eg_batys = (
+                                _eg_split[_eg_g_idx] if _eg_g_idx < len(_eg_split) else _eg_all_batys
+                            )
+                        if not _eg_batys:
+                            continue
+                        # Step 4: compute and write (mirrors DMP _dmp_compute_group_perf + groups write)
+                        _eg_tav = _get_tav_for_batteries(_eg_resolved, _eg_batys)
+                        _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
+                        _eg_perf["hfsj_unit"] = "hour"
+                        _eg_sheet = (
+                            entry.model.strip()
+                            if _dm2k_model_up in _dm2k_no_ch
+                            else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
+                        )
+                        _eg_fdfs_label = _eg_fdfs or _dm2k_eg["loai"]
+                        groups.setdefault(_eg_sheet, {}).setdefault(
+                            (_eg_row_label, _dm2k_eg["loai"]), {}
+                        )[_eg_fdfs_label] = _eg_perf
+                continue  # per-group DMP-mirroring done; skip single-archive + DMP paths
+
+            # ── No explicit groups: single-archive path (unchanged) ─────────────────────────
             # Read archive metadata from ls_jb_cs.
             # Primary lookup: by bz/remarks column (the remark text the user enters).
             # Fallback lookups: by cdid then by archname for backward compatibility.
@@ -5212,8 +5379,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             except pyodbc.Error:
                 pass
             if not _arch_rows:
-                # Escape Access SQL LIKE wildcards so a remark containing % or _ is treated literally
-                _bz_escaped = _dm2k_arch.replace("%", "[%]").replace("_", "[_]")
+                _bz_escaped = _escape_sql_wildcards(_dm2k_arch)
                 _bz_like = f"%{_bz_escaped}%"
                 try:
                     _arch_rows = _read_dm2000_ls(
@@ -5235,280 +5401,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )
                 except pyodbc.Error:
                     pass
-            # Per-group token fallback — triggered when all standard searches found
-            # no archives but the entry has explicit production-line groups defined.
-            # DM2000 may create ONE archive per grade with its own specific bz
-            # (e.g. bz="LR6 UDP501") rather than the composite remark the caller
-            # configured (e.g. "LR6 UDP501 HP503").  Those per-grade archives are
-            # invisible to bz-exact / bz-LIKE / cdid / archname queries that use
-            # the full composite string.  We therefore search each group's token
-            # individually (UDP501, HP503) and process each matched archive against
-            # the group whose token was used to find it.
-            _dm2k_per_grp_pairs: list[tuple[dict, Any]] = []  # (arch_row, group)
-            if not _arch_rows and entry.groups:
-                for _pgt_grp in entry.groups:
-                    _pgt_token = _group_to_bz_token(_pgt_grp.loai, _pgt_grp.chuyen)
-                    if not _pgt_token:
-                        continue
-                    _pgt_esc = _pgt_token.replace("%", "[%]").replace("_", "[_]")
-                    _pgt_rows: list[dict] = []
-                    try:
-                        _pgt_rows = _read_dm2000_ls(
-                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_pgt_esc}%",)
-                        )
-                    except pyodbc.Error:
-                        pass
-                    for _pgt_row in _pgt_rows:
-                        _dm2k_per_grp_pairs.append((_pgt_row, _pgt_grp))
-            if _dm2k_per_grp_pairs:
-                _dm2k_pgm = entry.model.strip().upper()
-                _dm2k_pgm_no_chuyen = {"LR61", "9V", "6LR61"}
-                for _pgt_a, _pgt_grp in _dm2k_per_grp_pairs:
-                    _pgt_resolved = (
-                        str(_dm2000_get_value(_pgt_a, "cdid", "archname") or _dm2k_arch).strip()
-                        or _dm2k_arch
-                    )
-                    _pgt_fdfs_raw = str(_dm2000_get_value(_pgt_a, "fdfs") or "").strip()
-                    _pgt_load_res = str(_dm2000_get_value(
-                        _pgt_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
-                    ) or "").strip()
-                    _pgt_ep_raw = _dm2000_get_value(
-                        _pgt_a,
-                        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
-                        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
-                        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-                    )
-                    _pgt_ep_str = str(_pgt_ep_raw or "").strip()
-                    _pgt_fdfs = _build_dm2000_condition_label(
-                        _pgt_fdfs_raw, _pgt_load_res, _pgt_ep_str, _dm2k_arch,
-                    )
-                    _pgt_startdate = _dm2000_get_value(_pgt_a, "startdate", "fdrq")
-                    _pgt_fdrq = _to_date(_pgt_startdate) if _pgt_startdate else ""
-                    if entry.special_type in _SPECIAL_TYPE_LABEL:
-                        _pgt_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                    elif _pgt_fdrq:
-                        _pgt_row_label = _pgt_fdrq
-                    elif entry.report_date:
-                        _pgt_row_label = _to_date(entry.report_date) or entry.report_date
-                    else:
-                        _pgt_row_label = _dm2k_arch
-                    _pgt_all_batys = _get_batys_for_archive(_pgt_resolved)
-                    # Determine tray assignment from the archive's own bz remark:
-                    # per-grade archives (single group in bz) → use ALL batteries;
-                    # composite archives (multiple groups in bz) → positional split.
-                    _pgt_a_bz_raw = str(_dm2000_get_value(
-                        _pgt_a, "remarks", "remark", "bz", "note", "memo", "bzh",
-                    ) or "").strip()
-                    _pgt_a_bz_groups = _parse_bz_groups(_pgt_a_bz_raw)
-                    if _pgt_grp.trays:
-                        _pgt_batys = [b for b in _pgt_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                    elif len(_pgt_a_bz_groups) <= 1:
-                        # Per-grade archive: the archive covers exactly this one group.
-                        _pgt_batys = _pgt_all_batys
-                    else:
-                        # Composite archive: determine which group index this is.
-                        _pgt_bz_sorted = sorted(
-                            _pgt_a_bz_groups,
-                            key=lambda g: (int(g["chuyen"]) if str(g["chuyen"]).isdigit() else 0, g["chuyen"]),
-                        )
-                        _pgt_g_idx = next(
-                            (i for i, bg in enumerate(_pgt_bz_sorted)
-                             if str(bg.get("chuyen") or "") == str(_pgt_grp.chuyen or "").strip()),
-                            0,
-                        )
-                        _pgt_auto = _DMP_TRAY_ASSIGNMENT.get(len(_pgt_a_bz_groups), [_pgt_all_batys])
-                        _pgt_batys = (
-                            _pgt_auto[_pgt_g_idx] if _pgt_g_idx < len(_pgt_auto) else _pgt_all_batys
-                        )
-                    if not _pgt_batys:
-                        continue
-                    _pgt_tav = _get_tav_for_batteries(_pgt_resolved, _pgt_batys)
-                    _pgt_perf = _compute_perf_values(_pgt_ep_str, _pgt_tav, _pgt_batys)
-                    _pgt_perf["hfsj_unit"] = "hour"
-                    _pgt_sheet = (
-                        entry.model.strip()
-                        if _dm2k_pgm in _dm2k_pgm_no_chuyen
-                        else f"{entry.model.strip()} {str(_pgt_grp.chuyen or '').strip()}"
-                    )
-                    _pgt_fdfs_label = _pgt_fdfs or _pgt_grp.loai
-                    groups.setdefault(_pgt_sheet, {}).setdefault(
-                        (_pgt_row_label, _pgt_grp.loai), {}
-                    )[_pgt_fdfs_label] = _pgt_perf
-                continue  # per-group archives processed; skip DMP path
             if not _arch_rows:
                 if skip_not_found:
                     continue
                 _arch_meta: dict = {}
                 _dm2k_resolved = _dm2k_arch
             else:
-                # When multiple archives match and at least one can be paired with a
-                # group by production-line (chuyen), process every archive separately
-                # for its matching group so that:
-                #   • each group reads data from its own archive (correct grade/line),
-                #   • all discharge conditions across all archives are collected.
-                # _pair_dm2000_archives_to_groups handles the case where archives share
-                # the same manufacturer field (e.g. both "501-502") and chuyen matching
-                # is therefore ambiguous — it falls back to positional sort by min battery.
-                _dm2k_multi = len(_arch_rows) > 1 and len(entry.groups) > 0 and any(
-                    _dm2000_archive_matches_chuyen(a, g.chuyen)
-                    for a in _arch_rows for g in entry.groups
-                )
-                if _dm2k_multi:
-                    _dm2k_model_upper_m = entry.model.strip().upper()
-                    _dm2k_no_chuyen_m = {"LR61", "9V", "6LR61"}
-                    # When every archive matches every group the archives share the same
-                    # remark ("LR6 UDP501 HP503") and represent **different test dates**
-                    # — each archive covers ALL production lines.  Process each archive
-                    # with all groups via _parse_bz_groups + _DMP_TRAY_ASSIGNMENT (the
-                    # same logic the single-archive path already applies correctly).
-                    # Using 1-to-1 positional pairing in this case is wrong: it assigns
-                    # different-date archives to different groups, producing incorrect
-                    # averages (all-battery mix) and silently dropping some groups.
-                    _dm2k_all_match_all = _dm2000_all_archives_match_all_groups(
-                        _arch_rows, entry.groups
-                    )
-                    if _dm2k_all_match_all:
-                        for _dm2k_a in _arch_rows:
-                            _dm2k_a_resolved = (
-                                str(_dm2000_get_value(_dm2k_a, "cdid", "archname") or _dm2k_arch).strip()
-                                or _dm2k_arch
-                            )
-                            _dm2k_a_fdfs_raw = str(_dm2000_get_value(_dm2k_a, "fdfs") or "").strip()
-                            _dm2k_a_load_res = str(_dm2000_get_value(
-                                _dm2k_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
-                            ) or "").strip()
-                            _dm2k_a_ep_raw = _dm2000_get_value(
-                                _dm2k_a,
-                                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
-                                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
-                                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-                            )
-                            _dm2k_a_ep_str = str(_dm2k_a_ep_raw or "").strip()
-                            _dm2k_a_fdfs = _build_dm2000_condition_label(
-                                _dm2k_a_fdfs_raw, _dm2k_a_load_res, _dm2k_a_ep_str, _dm2k_arch,
-                            )
-                            _dm2k_a_startdate = _dm2000_get_value(_dm2k_a, "startdate", "fdrq")
-                            _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
-                            if entry.special_type in _SPECIAL_TYPE_LABEL:
-                                _dm2k_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                            elif _dm2k_a_fdrq:
-                                _dm2k_a_row_label = _dm2k_a_fdrq
-                            elif entry.report_date:
-                                _dm2k_a_row_label = _to_date(entry.report_date) or entry.report_date
-                            else:
-                                _dm2k_a_row_label = _dm2k_arch
-                            _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
-                            _dm2k_a_bz_raw = str(_dm2000_get_value(
-                                _dm2k_a, "remarks", "remark", "bz", "note", "memo", "bzh",
-                            ) or "").strip()
-                            _dm2k_a_bz_groups = _parse_bz_groups(_dm2k_a_bz_raw)
-                            _dm2k_a_eff_groups = [
-                                {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
-                                for grp in entry.groups
-                            ]
-                            _dm2k_a_n = len(_dm2k_a_eff_groups)
-                            if len(_dm2k_a_bz_groups) > len(_dm2k_a_eff_groups) and not any(
-                                g["trays"] for g in _dm2k_a_eff_groups
-                            ):
-                                _dm2k_a_eff_groups = [
-                                    {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
-                                    for g in _dm2k_a_bz_groups
-                                ]
-                            _dm2k_a_eff_groups = _sort_eff_groups_for_tray_assignment(
-                                _dm2k_a_eff_groups
-                            )
-                            _dm2k_a_n = len(_dm2k_a_eff_groups)
-                            _dm2k_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
-                                _dm2k_a_n, [_dm2k_a_all_batys]
-                            )
-                            for _dm2k_a_g_idx, _dm2k_a_eff_grp in enumerate(_dm2k_a_eff_groups):
-                                _dm2k_a_grp_trays = _dm2k_a_eff_grp.get("trays") or []
-                                if _dm2k_a_grp_trays:
-                                    _dm2k_a_batys = [
-                                        b for b in _dm2k_a_grp_trays
-                                        if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
-                                    ]
-                                else:
-                                    _dm2k_a_batys = (
-                                        _dm2k_a_auto_trays[_dm2k_a_g_idx]
-                                        if _dm2k_a_g_idx < len(_dm2k_a_auto_trays)
-                                        else _dm2k_a_all_batys
-                                    )
-                                if not _dm2k_a_batys:
-                                    continue
-                                _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
-                                _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
-                                _dm2k_a_perf["hfsj_unit"] = "hour"
-                                _dm2k_a_grp_chuyen = _dm2k_a_eff_grp.get("chuyen") or ""
-                                _dm2k_a_grp_loai = _dm2k_a_eff_grp.get("loai") or ""
-                                _dm2k_a_sheet_key = (
-                                    entry.model.strip()
-                                    if _dm2k_model_upper_m in _dm2k_no_chuyen_m
-                                    else f"{entry.model.strip()} {_dm2k_a_grp_chuyen.strip()}"
-                                )
-                                _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_a_grp_loai
-                                groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
-                                    (_dm2k_a_row_label, _dm2k_a_grp_loai), {}
-                                )[_dm2k_a_fdfs_label] = _dm2k_a_perf
-                        continue  # all archives × all groups processed; skip DMP path
-                    _dm2k_ai_gi_pairs = _pair_dm2000_archives_to_groups(_arch_rows, entry.groups)
-                    _dm2k_ai_to_gi = dict(_dm2k_ai_gi_pairs)
-                    for _dm2k_ai, _dm2k_a in enumerate(_arch_rows):
-                        _dm2k_gi = _dm2k_ai_to_gi.get(_dm2k_ai)
-                        if _dm2k_gi is None:
-                            continue
-                        _dm2k_grp = entry.groups[_dm2k_gi]
-                        _dm2k_a_resolved = (
-                            str(_dm2000_get_value(_dm2k_a, "cdid", "archname") or _dm2k_arch).strip()
-                            or _dm2k_arch
-                        )
-                        _dm2k_a_fdfs_raw = str(_dm2000_get_value(_dm2k_a, "fdfs") or "").strip()
-                        _dm2k_a_load_res = str(_dm2000_get_value(
-                            _dm2k_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
-                        ) or "").strip()
-                        _dm2k_a_ep_raw = _dm2000_get_value(
-                            _dm2k_a,
-                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
-                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
-                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-                        )
-                        _dm2k_a_ep_str = str(_dm2k_a_ep_raw or "").strip()
-                        _dm2k_a_fdfs = _build_dm2000_condition_label(
-                            _dm2k_a_fdfs_raw, _dm2k_a_load_res, _dm2k_a_ep_str, _dm2k_arch,
-                        )
-                        _dm2k_a_startdate = _dm2000_get_value(_dm2k_a, "startdate", "fdrq")
-                        _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
-                        if entry.special_type in _SPECIAL_TYPE_LABEL:
-                            _dm2k_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                        elif _dm2k_a_fdrq:
-                            _dm2k_a_row_label = _dm2k_a_fdrq
-                        elif entry.report_date:
-                            _dm2k_a_row_label = _to_date(entry.report_date) or entry.report_date
-                        else:
-                            _dm2k_a_row_label = _dm2k_arch
-                        _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
-                        _dm2k_a_batys = (
-                            [b for b in _dm2k_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                            if _dm2k_grp.trays else _dm2k_a_all_batys
-                        )
-                        if not _dm2k_a_batys:
-                            continue
-                        _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
-                        _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
-                        _dm2k_a_perf["hfsj_unit"] = "hour"
-                        _dm2k_a_sheet_key = (
-                            entry.model.strip()
-                            if _dm2k_model_upper_m in _dm2k_no_chuyen_m
-                            else f"{entry.model.strip()} {_dm2k_grp.chuyen.strip()}"
-                        )
-                        _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_grp.loai
-                        groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
-                            (_dm2k_a_row_label, _dm2k_grp.loai), {}
-                        )[_dm2k_a_fdfs_label] = _dm2k_a_perf
-                    continue  # all archives processed; skip DMP path
-
                 _arch_meta = _arch_rows[0]
-                # Resolve the actual cdid so battery/TAV queries use the correct key
                 _dm2k_resolved = (
                     str(_dm2000_get_value(_arch_meta, "cdid", "archname") or _dm2k_arch).strip()
                     or _dm2k_arch
@@ -5749,277 +5648,172 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # either a DMP batch or a DM2000 archive transparently.
             if entry.raw_remark and entry.raw_remark.strip():
                 _fb_remark = entry.raw_remark.strip()
-                _fb_arch_rows: list[dict] = []
-                try:
-                    _fb_arch_rows = _read_dm2000_ls(
-                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
-                    )
-                except pyodbc.Error:
-                    pass
-                if not _fb_arch_rows:
-                    _fb_escaped = _fb_remark.replace("%", "[%]").replace("_", "[_]")
-                    try:
-                        _fb_arch_rows = _read_dm2000_ls(
-                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
-                            (f"%{_fb_escaped}%",),
-                        )
-                    except pyodbc.Error:
-                        pass
-                # Per-group token fallback for _fb_ path — same logic as in the
-                # dm2000_archname path above.  When the composite remark text finds no
-                # archives, search each group's individual token (UDP501, HP503, …).
-                _fb_per_grp_pairs: list[tuple[dict, Any]] = []
-                if not _fb_arch_rows and entry.groups:
-                    for _fbpgt_grp in entry.groups:
-                        _fbpgt_token = _group_to_bz_token(_fbpgt_grp.loai, _fbpgt_grp.chuyen)
-                        if not _fbpgt_token:
+                # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
+                # Same structure as the dm2000_archname per-group path above.
+                # For each group: search archives by bz token → determine batys → compute perf.
+                if entry.groups:
+                    _fb_model_up = entry.model.strip().upper()
+                    _fb_no_ch_m = {"LR61", "9V", "6LR61"}
+                    _fb_loai_map: dict[str, str] = {
+                        str(_rg["chuyen"]): _rg["loai"]
+                        for _rg in _parse_bz_groups(_fb_remark)
+                        if _rg.get("chuyen")
+                    }
+                    _fb_eff_gs = [
+                        {
+                            "loai": _fb_loai_map.get(str(grp.chuyen or "").strip(), grp.loai),
+                            "chuyen": grp.chuyen,
+                            "trays": list(grp.trays or []),
+                        }
+                        for grp in entry.groups
+                    ]
+                    _fb_eff_gs = _sort_eff_groups_for_tray_assignment(_fb_eff_gs)
+                    def _fb_search_archname(key: str) -> list[dict]:
+                        for _sql2, _par2 in [
+                            ("SELECT * FROM ls_jb_cs WHERE bz = ?", (key,)),
+                            ("SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
+                             (f"%{_escape_sql_wildcards(key)}%",)),
+                            ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (key,)),
+                            ("SELECT * FROM ls_jb_cs WHERE archname = ?", (key,)),
+                        ]:
+                            try:
+                                _r2 = _read_dm2000_ls(_sql2, _par2)
+                                if _r2:
+                                    return _r2
+                            except pyodbc.Error:
+                                pass
+                        return []
+                    _fb_seen_pairs: set[tuple] = set()
+                    for _fb_eg in _fb_eff_gs:
+                        _feg_token = _group_to_bz_token(_fb_eg["loai"], _fb_eg["chuyen"])
+                        _feg_rows: list[dict] = []
+                        if _feg_token:
+                            _feg_esc = _escape_sql_wildcards(_feg_token)
+                            try:
+                                _feg_rows = _read_dm2000_ls(
+                                    "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_feg_esc}%",)
+                                )
+                            except pyodbc.Error:
+                                pass
+                        if not _feg_rows:
+                            _feg_rows = _fb_search_archname(_fb_remark)
+                        if not _feg_rows:
                             continue
-                        _fbpgt_esc = _fbpgt_token.replace("%", "[%]").replace("_", "[_]")
-                        _fbpgt_rows: list[dict] = []
-                        try:
-                            _fbpgt_rows = _read_dm2000_ls(
-                                "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fbpgt_esc}%",)
-                            )
-                        except pyodbc.Error:
-                            pass
-                        for _fbpgt_row in _fbpgt_rows:
-                            _fb_per_grp_pairs.append((_fbpgt_row, _fbpgt_grp))
-                if _fb_per_grp_pairs:
-                    _fb_pgm = entry.model.strip().upper()
-                    _fb_pgm_no_chuyen = {"LR61", "9V", "6LR61"}
-                    for _fbpgt_a, _fbpgt_grp in _fb_per_grp_pairs:
-                        _fbpgt_resolved = (
-                            str(_dm2000_get_value(_fbpgt_a, "cdid", "archname") or _fb_remark).strip()
-                            or _fb_remark
-                        )
-                        _fbpgt_fdfs_raw = str(_dm2000_get_value(_fbpgt_a, "fdfs") or "").strip()
-                        _fbpgt_load_res = str(_dm2000_get_value(
-                            _fbpgt_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
-                        ) or "").strip()
-                        _fbpgt_ep_raw = _dm2000_get_value(
-                            _fbpgt_a,
-                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
-                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
-                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-                        )
-                        _fbpgt_ep_str = str(_fbpgt_ep_raw or "").strip()
-                        _fbpgt_fdfs = _build_dm2000_condition_label(
-                            _fbpgt_fdfs_raw, _fbpgt_load_res, _fbpgt_ep_str, _fb_remark,
-                        )
-                        _fbpgt_startdate = _dm2000_get_value(_fbpgt_a, "startdate", "fdrq")
-                        _fbpgt_fdrq = _to_date(_fbpgt_startdate) if _fbpgt_startdate else ""
-                        if entry.special_type in _SPECIAL_TYPE_LABEL:
-                            _fbpgt_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                        elif _fbpgt_fdrq:
-                            _fbpgt_row_label = _fbpgt_fdrq
-                        elif entry.report_date:
-                            _fbpgt_row_label = _to_date(entry.report_date) or entry.report_date
-                        else:
-                            _fbpgt_row_label = _fb_remark
-                        _fbpgt_all_batys = _get_batys_for_archive(_fbpgt_resolved)
-                        _fbpgt_a_bz_raw = str(_dm2000_get_value(
-                            _fbpgt_a, "remarks", "remark", "bz", "note", "memo", "bzh",
-                        ) or "").strip()
-                        _fbpgt_a_bz_groups = _parse_bz_groups(_fbpgt_a_bz_raw)
-                        if _fbpgt_grp.trays:
-                            _fbpgt_batys = [b for b in _fbpgt_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                        elif len(_fbpgt_a_bz_groups) <= 1:
-                            _fbpgt_batys = _fbpgt_all_batys
-                        else:
-                            _fbpgt_bz_sorted = sorted(
-                                _fbpgt_a_bz_groups,
-                                key=lambda g: (int(g["chuyen"]) if str(g["chuyen"]).isdigit() else 0, g["chuyen"]),
-                            )
-                            _fbpgt_g_idx = next(
-                                (i for i, bg in enumerate(_fbpgt_bz_sorted)
-                                 if str(bg.get("chuyen") or "") == str(_fbpgt_grp.chuyen or "").strip()),
-                                0,
-                            )
-                            _fbpgt_auto = _DMP_TRAY_ASSIGNMENT.get(len(_fbpgt_a_bz_groups), [_fbpgt_all_batys])
-                            _fbpgt_batys = (
-                                _fbpgt_auto[_fbpgt_g_idx] if _fbpgt_g_idx < len(_fbpgt_auto) else _fbpgt_all_batys
-                            )
-                        if not _fbpgt_batys:
-                            continue
-                        _fbpgt_tav = _get_tav_for_batteries(_fbpgt_resolved, _fbpgt_batys)
-                        _fbpgt_perf = _compute_perf_values(_fbpgt_ep_str, _fbpgt_tav, _fbpgt_batys)
-                        _fbpgt_perf["hfsj_unit"] = "hour"
-                        _fbpgt_sheet = (
-                            entry.model.strip()
-                            if _fb_pgm in _fb_pgm_no_chuyen
-                            else f"{entry.model.strip()} {str(_fbpgt_grp.chuyen or '').strip()}"
-                        )
-                        _fbpgt_fdfs_label = _fbpgt_fdfs or _fbpgt_grp.loai
-                        groups.setdefault(_fbpgt_sheet, {}).setdefault(
-                            (_fbpgt_row_label, _fbpgt_grp.loai), {}
-                        )[_fbpgt_fdfs_label] = _fbpgt_perf
-                    continue  # per-group archives processed; skip rest of DMP path
-                if _fb_arch_rows:
-                    # When multiple archives are found and at least one can be paired
-                    # with a group by production-line (chuyen), process every archive
-                    # for its matching group so that:
-                    #   • each group reads its own archive (correct grade/manufacturer),
-                    #   • all discharge conditions across archives are collected.
-                    # _pair_dm2000_archives_to_groups handles the ambiguous case where
-                    # archives share the same manufacturer (e.g. both "501-502") so
-                    # chuyen matching alone cannot distinguish them — it falls back to
-                    # positional sort by min battery number.
-                    _fb_multi = len(_fb_arch_rows) > 1 and len(entry.groups) > 0 and any(
-                        _dm2000_archive_matches_chuyen(a, g.chuyen)
-                        for a in _fb_arch_rows for g in entry.groups
-                    )
-                    if _fb_multi:
-                        _fb_model_upper_m = entry.model.strip().upper()
-                        _fb_no_chuyen_m = {"LR61", "9V", "6LR61"}
-                        # When every archive matches every group the archives share the
-                        # same remark and represent different test dates — each archive
-                        # covers ALL production lines.  Process each archive with all
-                        # groups via _parse_bz_groups + _DMP_TRAY_ASSIGNMENT (same
-                        # logic the single-archive path applies correctly).
-                        _fb_all_match_all = _dm2000_all_archives_match_all_groups(
-                            _fb_arch_rows, entry.groups
-                        )
-                        if _fb_all_match_all:
-                            for _fb_a in _fb_arch_rows:
-                                _fb_a_resolved = (
-                                    str(_dm2000_get_value(_fb_a, "cdid", "archname") or _fb_remark).strip()
-                                    or _fb_remark
-                                )
-                                _fb_a_fdfs_raw = str(_dm2000_get_value(_fb_a, "fdfs") or "").strip()
-                                _fb_a_load_res = str(_dm2000_get_value(
-                                    _fb_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
-                                ) or "").strip()
-                                _fb_a_ep_raw = _dm2000_get_value(
-                                    _fb_a,
-                                    "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
-                                    "endpoint_v", "vcut", "cutoffv", "cutoff_v",
-                                    "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
-                                )
-                                _fb_a_ep_str = str(_fb_a_ep_raw or "").strip()
-                                _fb_a_fdfs = _build_dm2000_condition_label(
-                                    _fb_a_fdfs_raw, _fb_a_load_res, _fb_a_ep_str, _fb_remark,
-                                )
-                                _fb_a_startdate = _dm2000_get_value(_fb_a, "startdate", "fdrq")
-                                _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
-                                if entry.special_type in _SPECIAL_TYPE_LABEL:
-                                    _fb_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                                elif _fb_a_fdrq:
-                                    _fb_a_row_label = _fb_a_fdrq
-                                elif entry.report_date:
-                                    _fb_a_row_label = _to_date(entry.report_date) or entry.report_date
-                                else:
-                                    _fb_a_row_label = _fb_remark
-                                _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
-                                _fb_a_bz_raw = str(_dm2000_get_value(
-                                    _fb_a, "remarks", "remark", "bz", "note", "memo", "bzh",
-                                ) or "").strip()
-                                _fb_a_bz_groups = _parse_bz_groups(_fb_a_bz_raw)
-                                _fb_a_eff_groups = [
-                                    {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
-                                    for grp in entry.groups
-                                ]
-                                _fb_a_n = len(_fb_a_eff_groups)
-                                if len(_fb_a_bz_groups) > len(_fb_a_eff_groups) and not any(
-                                    g["trays"] for g in _fb_a_eff_groups
-                                ):
-                                    _fb_a_eff_groups = [
-                                        {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
-                                        for g in _fb_a_bz_groups
-                                    ]
-                                _fb_a_eff_groups = _sort_eff_groups_for_tray_assignment(
-                                    _fb_a_eff_groups
-                                )
-                                _fb_a_n = len(_fb_a_eff_groups)
-                                _fb_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
-                                    _fb_a_n, [_fb_a_all_batys]
-                                )
-                                for _fb_a_g_idx, _fb_a_eff_grp in enumerate(_fb_a_eff_groups):
-                                    _fb_a_grp_trays = _fb_a_eff_grp.get("trays") or []
-                                    if _fb_a_grp_trays:
-                                        _fb_a_batys = [
-                                            b for b in _fb_a_grp_trays
-                                            if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
-                                        ]
-                                    else:
-                                        _fb_a_batys = (
-                                            _fb_a_auto_trays[_fb_a_g_idx]
-                                            if _fb_a_g_idx < len(_fb_a_auto_trays)
-                                            else _fb_a_all_batys
-                                        )
-                                    if not _fb_a_batys:
-                                        continue
-                                    _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
-                                    _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
-                                    _fb_a_perf["hfsj_unit"] = "hour"
-                                    _fb_a_grp_chuyen = _fb_a_eff_grp.get("chuyen") or ""
-                                    _fb_a_grp_loai = _fb_a_eff_grp.get("loai") or ""
-                                    _fb_a_sheet = (
-                                        entry.model.strip()
-                                        if _fb_model_upper_m in _fb_no_chuyen_m
-                                        else f"{entry.model.strip()} {_fb_a_grp_chuyen.strip()}"
-                                    )
-                                    _fb_a_fdfs_label = _fb_a_fdfs or _fb_a_grp_loai
-                                    groups.setdefault(_fb_a_sheet, {}).setdefault(
-                                        (_fb_a_row_label, _fb_a_grp_loai), {}
-                                    )[_fb_a_fdfs_label] = _fb_a_perf
-                            continue  # all archives × all groups processed; skip DMP path
-                        _fb_ai_gi_pairs = _pair_dm2000_archives_to_groups(_fb_arch_rows, entry.groups)
-                        _fb_ai_to_gi = dict(_fb_ai_gi_pairs)
-                        for _fb_ai, _fb_a in enumerate(_fb_arch_rows):
-                            _fb_gi = _fb_ai_to_gi.get(_fb_ai)
-                            if _fb_gi is None:
-                                continue
-                            _fb_grp = entry.groups[_fb_gi]
-                            _fb_a_resolved = (
-                                str(_dm2000_get_value(_fb_a, "cdid", "archname") or _fb_remark).strip()
+                        for _feg_arch in _feg_rows:
+                            _feg_resolved = (
+                                str(_dm2000_get_value(_feg_arch, "cdid", "archname") or _fb_remark).strip()
                                 or _fb_remark
                             )
-                            _fb_a_fdfs_raw = str(_dm2000_get_value(_fb_a, "fdfs") or "").strip()
-                            _fb_a_load_res = str(_dm2000_get_value(
-                                _fb_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                            _feg_dedup = (_feg_resolved, str(_fb_eg["chuyen"] or ""))
+                            if _feg_dedup in _fb_seen_pairs:
+                                continue
+                            _fb_seen_pairs.add(_feg_dedup)
+                            _feg_fdfs_raw = str(_dm2000_get_value(_feg_arch, "fdfs") or "").strip()
+                            _feg_load_res = str(_dm2000_get_value(
+                                _feg_arch, "load_resistance", "fzdz", "fzlkdz", "dw",
+                                "fddl", "fdz", "resistance", "load_r", "r_ohm",
                             ) or "").strip()
-                            _fb_a_ep_raw = _dm2000_get_value(
-                                _fb_a,
+                            _feg_ep_raw = _dm2000_get_value(
+                                _feg_arch,
                                 "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
                                 "endpoint_v", "vcut", "cutoffv", "cutoff_v",
                                 "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
                             )
-                            _fb_a_ep_str = str(_fb_a_ep_raw or "").strip()
-                            _fb_a_fdfs = _build_dm2000_condition_label(
-                                _fb_a_fdfs_raw, _fb_a_load_res, _fb_a_ep_str, _fb_remark,
+                            _feg_ep_str = str(_feg_ep_raw or "").strip()
+                            _feg_fdfs = _build_dm2000_condition_label(
+                                _feg_fdfs_raw, _feg_load_res, _feg_ep_str, _fb_remark,
                             )
-                            _fb_a_startdate = _dm2000_get_value(_fb_a, "startdate", "fdrq")
-                            _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
+                            _feg_startdate = _dm2000_get_value(_feg_arch, "startdate", "fdrq")
+                            _feg_fdrq = _to_date(_feg_startdate) if _feg_startdate else ""
                             if entry.special_type in _SPECIAL_TYPE_LABEL:
-                                _fb_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                            elif _fb_a_fdrq:
-                                _fb_a_row_label = _fb_a_fdrq
+                                _feg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                            elif _feg_fdrq:
+                                _feg_row_label = _feg_fdrq
                             elif entry.report_date:
-                                _fb_a_row_label = _to_date(entry.report_date) or entry.report_date
+                                _feg_row_label = _to_date(entry.report_date) or entry.report_date
                             else:
-                                _fb_a_row_label = _fb_remark
-                            _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
-                            _fb_a_batys = (
-                                [b for b in _fb_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
-                                if _fb_grp.trays else _fb_a_all_batys
-                            )
-                            if not _fb_a_batys:
+                                _feg_row_label = _fb_remark
+                            _feg_all_batys = _get_batys_for_archive(_feg_resolved)
+                            _feg_arch_bz = str(_dm2000_get_value(
+                                _feg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                            ) or "").strip()
+                            _feg_arch_bz_gs = _parse_bz_groups(_feg_arch_bz)
+                            if _fb_eg["trays"]:
+                                _feg_batys = [
+                                    b for b in _fb_eg["trays"]
+                                    if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                                ]
+                            elif len(_feg_arch_bz_gs) <= 1:
+                                _feg_batys = _feg_all_batys
+                            else:
+                                _feg_bz_sorted = sorted(
+                                    _feg_arch_bz_gs,
+                                    key=lambda g: (
+                                        int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
+                                        g.get("chuyen", ""),
+                                    ),
+                                )
+                                _feg_chuyen_str = str(_fb_eg["chuyen"] or "").strip()
+                                _feg_g_idx = next(
+                                    (i for i, bg in enumerate(_feg_bz_sorted)
+                                     if str(bg.get("chuyen", "")) == _feg_chuyen_str),
+                                    0,
+                                )
+                                _feg_split = _DMP_TRAY_ASSIGNMENT.get(
+                                    len(_feg_arch_bz_gs), [_feg_all_batys]
+                                )
+                                _feg_batys = (
+                                    _feg_split[_feg_g_idx]
+                                    if _feg_g_idx < len(_feg_split) else _feg_all_batys
+                                )
+                            if not _feg_batys:
                                 continue
-                            _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
-                            _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
-                            _fb_a_perf["hfsj_unit"] = "hour"
-                            _fb_a_sheet = (
+                            _feg_tav = _get_tav_for_batteries(_feg_resolved, _feg_batys)
+                            _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
+                            _feg_perf["hfsj_unit"] = "hour"
+                            _feg_sheet = (
                                 entry.model.strip()
-                                if _fb_model_upper_m in _fb_no_chuyen_m
-                                else f"{entry.model.strip()} {_fb_grp.chuyen.strip()}"
+                                if _fb_model_up in _fb_no_ch_m
+                                else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
-                            _fb_a_fdfs_label = _fb_a_fdfs or _fb_grp.loai
-                            groups.setdefault(_fb_a_sheet, {}).setdefault(
-                                (_fb_a_row_label, _fb_grp.loai), {}
-                            )[_fb_a_fdfs_label] = _fb_a_perf
-                        continue  # DM2000 path handled; skip rest of DMP path
+                            _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
+                            groups.setdefault(_feg_sheet, {}).setdefault(
+                                (_feg_row_label, _fb_eg["loai"]), {}
+                            )[_feg_fdfs_label] = _feg_perf
+                    continue  # _fb_ per-group DMP-mirroring done; skip rest of DMP path
 
-                    _fb_meta = _fb_arch_rows[0]
+                # No explicit groups: single-archive path
+                _fb_arch_rows2: list[dict] = []
+                try:
+                    _fb_arch_rows2 = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
+                    )
+                except pyodbc.Error:
+                    pass
+                if not _fb_arch_rows2:
+                    _fb_esc2 = _escape_sql_wildcards(_fb_remark)
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fb_esc2}%",)
+                        )
+                    except pyodbc.Error:
+                        pass
+                if not _fb_arch_rows2:
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_fb_remark,)
+                        )
+                    except pyodbc.Error:
+                        pass
+                if not _fb_arch_rows2:
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE archname = ?", (_fb_remark,)
+                        )
+                    except pyodbc.Error:
+                        pass
+                if _fb_arch_rows2:
+                    _fb_meta = _fb_arch_rows2[0]
                     _fb_resolved = (
                         str(_dm2000_get_value(_fb_meta, "cdid", "archname") or _fb_remark).strip()
                         or _fb_remark

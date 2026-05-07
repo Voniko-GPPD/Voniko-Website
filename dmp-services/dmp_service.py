@@ -5003,6 +5003,40 @@ def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -
     return True
 
 
+def _dm2000_archive_matches_loai(arch_meta: dict, loai: str) -> bool:
+    """Return True if the archive's battery-type field (``dcxh``) matches *loai*.
+
+    DM2000 stores the battery type/grade in the ``dcxh`` column of ``ls_jb_cs``
+    (e.g. ``"LR6UD-UD+"``, ``"LR6HP"``, ``"LR6UD-UD"``).  This is used as a
+    **secondary** pairing strategy when two archives share an identical remark
+    (``bz``) and therefore cannot be distinguished by
+    :func:`_dm2000_archive_matches_chuyen` alone.
+
+    Matching rules (case-insensitive):
+
+    * ``loai="UD+"`` — ``dcxh`` must contain ``"UD+"``
+    * ``loai="HP"``  — ``dcxh`` must contain ``"HP"`` but **not** ``"UDP"``
+      (to avoid matching ``"LR6UDP-UD+"`` as HP)
+    * ``loai="UD"``  — ``dcxh`` must contain ``"UD"`` but **not** ``"+"``
+    * other loai     — ``dcxh`` must contain the loai string verbatim
+    """
+    loai = str(loai or "").strip()
+    if not loai:
+        return False
+    dcxh = str(_dm2000_get_value(arch_meta, "dcxh", "baty") or "").strip()
+    if not dcxh:
+        return False
+    dcxh_upper = dcxh.upper()
+    loai_upper = loai.upper()
+    if loai_upper == "UD+":
+        return "UD+" in dcxh_upper
+    if loai_upper == "HP":
+        return "HP" in dcxh_upper and "UDP" not in dcxh_upper
+    if loai_upper == "UD":
+        return "UD" in dcxh_upper and "+" not in dcxh_upper
+    return loai_upper in dcxh_upper
+
+
 def _pair_dm2000_archives_to_groups(
     arch_rows: list[dict],
     groups: list,
@@ -5015,19 +5049,27 @@ def _pair_dm2000_archives_to_groups(
     exactly one archive.  Used when manufacturers differ between archives (e.g.
     ``"501"`` vs ``"503"``).
 
-    **Strategy 2 — positional fallback** (ambiguous case):
-    When the chuyen-based mapping is ambiguous — e.g. both archives share the
-    same manufacturer field (``"501-502"``), so both match the first group and
-    neither matches the second — sort archives by their minimum battery number
-    (ascending) and pair them with groups in declaration order.  This correctly
-    assigns the archive whose channels start at 1 (batteries 1-4, UD+) to
-    group 0 and the archive whose channels start at 6 (batteries 6-9, HP) to
-    group 1.
+    **Strategy 2 — bijective loai (battery-type) matching**:
+    When chuyen matching is ambiguous (both archives share the same remark
+    ``"LR6 UDP501 HP503"`` so both match both groups), try to distinguish
+    archives by their ``dcxh`` battery-type field (e.g. ``"LR6UD-UD+"`` vs
+    ``"LR6HP"``).  Used for the common scenario where DM2000 creates one archive
+    per grade on separate channels (each archive starting from channel 1), with
+    both archives carrying the same composite remark.
+
+    **Strategy 3 — positional fallback**:
+    When both chuyen and loai matching are ambiguous — e.g. both archives share
+    the same manufacturer field (``"501-502"``), so both match all groups —
+    sort archives by their minimum battery number (ascending) and pair them with
+    chuyen-sorted groups.  This correctly assigns the archive whose channels
+    start at 1 (batteries 1-4) to the group with the lower production-line
+    number and the archive whose channels start at 6 (batteries 6-9) to the
+    higher-numbered group.
     """
     n_archs = len(arch_rows)
     n_grps = len(groups)
 
-    # Build per-archive match lists via chuyen
+    # ── Strategy 1: bijective by chuyen ───────────────────────────────────────
     arch_to_grp: dict[int, int] = {}   # ai → gi  (only when the match is unique)
     grp_to_archs: dict[int, list[int]] = {}
     for ai, a in enumerate(arch_rows):
@@ -5050,7 +5092,33 @@ def _pair_dm2000_archives_to_groups(
     if is_bijective:
         return list(arch_to_grp.items())
 
-    # Positional fallback — sort archives by min battery number then pair.
+    # ── Strategy 2: bijective by loai (dcxh battery-type field) ───────────────
+    # Handles the scenario where each archive covers a single grade but both
+    # archives carry the same composite remark (e.g. "LR6 UDP501 HP503") so
+    # Strategy 1 cannot distinguish them.  The dcxh field is grade-specific
+    # (e.g. "LR6UD-UD+" vs "LR6HP") and gives an unambiguous 1-to-1 mapping.
+    arch_to_grp_loai: dict[int, int] = {}
+    grp_to_archs_loai: dict[int, list[int]] = {}
+    for ai, a in enumerate(arch_rows):
+        loai_matches = [
+            gi for gi, g in enumerate(groups)
+            if _dm2000_archive_matches_loai(a, getattr(g, "loai", None))
+        ]
+        if len(loai_matches) == 1:
+            arch_to_grp_loai[ai] = loai_matches[0]
+            grp_to_archs_loai.setdefault(loai_matches[0], []).append(ai)
+
+    is_bijective_loai = (
+        len(arch_to_grp_loai) == n_archs
+        and all(len(v) == 1 for v in grp_to_archs_loai.values())
+        and len(grp_to_archs_loai) == min(n_archs, n_grps)
+    )
+
+    if is_bijective_loai:
+        return list(arch_to_grp_loai.items())
+
+    # ── Strategy 3: positional fallback ───────────────────────────────────────
+    # Sort archives by min battery number then pair.
     # Archives with no battery data sort last (using MAX_BATTERY_NUMBER + 1).
     _NO_BATTERY_SORT_VALUE = MAX_BATTERY_NUMBER + 1
 

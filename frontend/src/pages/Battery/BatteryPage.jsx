@@ -329,6 +329,8 @@ export default function BatteryPage() {
   // Flag: when handleLoadOrder sends a clear_session to reset the backend, ignore the resulting
   // session_cleared broadcast so the snapshot records we just loaded are not wiped.
   const ignoreClearedRef = useRef(false);
+  // Flag: whether the station has been auto-restored from localStorage on this page load
+  const stationRestoredRef = useRef(false);
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -336,18 +338,37 @@ export default function BatteryPage() {
   const productLineRef = useRef(productLine);
   useEffect(() => { productLineRef.current = productLine; }, [productLine]);
 
-  // Poll station list every 30s
+  // Poll station list every 30s; on first load, restore last-used station from localStorage
   useEffect(() => {
-    const fetchStations = async () => {
+    const fetchStations = async (isFirst = false) => {
       setStationsLoading(true);
       try {
         const res = await getStations();
-        setStations(res.data.stations || []);
+        const stList = res.data.stations || [];
+        setStations(stList);
+        // Auto-restore the station that was selected before a page reload
+        if (isFirst && !stationRestoredRef.current && !selectedStationRef.current) {
+          stationRestoredRef.current = true;
+          const savedId = localStorage.getItem('battery_selected_station');
+          if (savedId) {
+            const found = stList.find((s) => s.id === savedId);
+            if (found) {
+              selectedStationRef.current = found;
+              setSelectedStation(found);
+              // If WS is already open, fetch ports and status immediately;
+              // otherwise ws.onopen will send get_ports + get_status automatically.
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ action: 'get_ports', stationId: found.id }));
+                wsRef.current.send(JSON.stringify({ action: 'get_status', stationId: found.id }));
+              }
+            }
+          }
+        }
       } catch (_) { }
       finally { setStationsLoading(false); }
     };
-    fetchStations();
-    const interval = setInterval(fetchStations, 30_000);
+    fetchStations(true);
+    const interval = setInterval(() => fetchStations(false), 30_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -692,9 +713,10 @@ export default function BatteryPage() {
 
     ws.onopen = () => {
       retryCountRef.current = 0;
-      // Only fetch ports if a station is already selected
+      // Only fetch ports and status if a station is already selected
       if (selectedStationRef.current?.id) {
         ws.send(JSON.stringify({ action: 'get_ports', stationId: selectedStationRef.current.id }));
+        ws.send(JSON.stringify({ action: 'get_status', stationId: selectedStationRef.current.id }));
       }
       if (pendingNewSessionRef.current) {
         try {
@@ -1933,6 +1955,12 @@ export default function BatteryPage() {
                   setStationOccupied(false);
                   setPorts([]);
                   setPort('');
+                  // Persist selection so it survives page reloads
+                  if (s) {
+                    localStorage.setItem('battery_selected_station', s.id);
+                  } else {
+                    localStorage.removeItem('battery_selected_station');
+                  }
                   if (s) {
                     // Load ports and subscribe to current station state
                     sendMsg({ action: 'get_ports' });
@@ -3204,6 +3232,8 @@ export default function BatteryPage() {
             }
           }}>{t('batteryNewSession')}</Button>,
           <Button key="continue" type="primary" onClick={() => {
+            // Resume from where we left off: next battery ID = number of saved records + 1
+            startIdRef.current = (savedSessionInfo?.records?.length ?? 0) + 1;
             setResumeModalVisible(false);
           }}>{t('batteryContinueSession')}</Button>,
         ]}

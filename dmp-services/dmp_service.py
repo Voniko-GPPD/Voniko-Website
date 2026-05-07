@@ -4915,6 +4915,24 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     return groups
 
 
+def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -> bool:
+    """Return True when every archive matches every group's chuyen.
+
+    This signals the "same-bz, different-dates" scenario: multiple archives
+    share an identical remark (e.g. "LR6 UDP501 HP503") and therefore each
+    archive covers ALL production lines.  In this case each archive must be
+    processed with all groups independently (using *_parse_bz_groups* +
+    *_DMP_TRAY_ASSIGNMENT* battery splits) rather than a 1-archive-per-group
+    positional pairing.
+    """
+    if not arch_rows or not groups:
+        return False
+    return all(
+        all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in groups)
+        for a in arch_rows
+    )
+
+
 def _pair_dm2000_archives_to_groups(
     arch_rows: list[dict],
     groups: list,
@@ -5072,12 +5090,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # Using 1-to-1 positional pairing in this case is wrong: it assigns
                     # different-date archives to different groups, producing incorrect
                     # averages (all-battery mix) and silently dropping some groups.
-                    _dm2k_all_match_all = (
-                        len(entry.groups) > 0
-                        and all(
-                            all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in entry.groups)
-                            for a in _arch_rows
-                        )
+                    _dm2k_all_match_all = _dm2000_all_archives_match_all_groups(
+                        _arch_rows, entry.groups
                     )
                     if _dm2k_all_match_all:
                         for _dm2k_a in _arch_rows:
@@ -5472,12 +5486,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         # covers ALL production lines.  Process each archive with all
                         # groups via _parse_bz_groups + _DMP_TRAY_ASSIGNMENT (same
                         # logic the single-archive path applies correctly).
-                        _fb_all_match_all = (
-                            len(entry.groups) > 0
-                            and all(
-                                all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in entry.groups)
-                                for a in _fb_arch_rows
-                            )
+                        _fb_all_match_all = _dm2000_all_archives_match_all_groups(
+                            _fb_arch_rows, entry.groups
                         )
                         if _fb_all_match_all:
                             for _fb_a in _fb_arch_rows:

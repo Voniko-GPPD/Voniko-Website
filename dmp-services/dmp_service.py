@@ -4627,7 +4627,7 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
 }
 
 def _sort_eff_groups_for_tray_assignment(
-    eff_groups: list[dict], bz_groups: list[dict]  # noqa: ARG001 – bz_groups kept for call-site compat
+    eff_groups: list[dict], bz_groups: list[dict]  # noqa: ARG001 – bz_groups kept for call-site compatibility
 ) -> list[dict]:
     """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
 
@@ -5889,9 +5889,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             for i, grp in enumerate(entry.groups)
         ]
-        # Pass [] so the sort is always applied (bz_groups non-empty would
-        # suppress it, but raw_remark is descriptive metadata, not a physical
-        # tray-layout encoding like a DM2000 archive BZ field).
+        # bz_groups (second arg) is no longer used inside the function;
+        # pass [] to keep the call site clear.
         _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(
             _dmp_eff_groups, []
         )

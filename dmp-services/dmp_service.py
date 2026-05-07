@@ -4627,25 +4627,33 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
 }
 
 def _sort_eff_groups_for_tray_assignment(
-    eff_groups: list[dict], bz_groups: list[dict]
+    eff_groups: list[dict], bz_groups: list[dict]  # noqa: ARG001 – bz_groups kept for call-site compat
 ) -> list[dict]:
-    """Sort eff_groups by production-line (chuyen) number when no explicit ordering is available.
+    """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
 
-    When the archive remark (*bz_groups*) is empty and no group has explicit
-    tray assignments, the positional *_DMP_TRAY_ASSIGNMENT* is the sole
-    mechanism for deciding which physical battery slots each group reads.
+    The positional *_DMP_TRAY_ASSIGNMENT* table maps group index → physical
+    tray slots (group 0 → [1-4], group 1 → [6-9], …).  The only way to
+    guarantee the right batteries are read for each production-line group is to
+    always sort groups by **chuyen number** (ascending) before the positional
+    assignment runs:
 
-    The correct sort key is the **chuyen (production-line) number**: lower
-    line numbers correspond to lower physical tray slots on the machine
-    (e.g. line 501 → trays 1-4, line 503 → trays 6-9).  Sorting by battery
-    grade (loai) instead would break cases where HP batteries occupy the
-    lower-numbered line (e.g. remark "HP501 UDP503"), swapping the tray
-    assignment and producing wrong results and uniform-rate values.
+      • lower chuyen number  →  lower physical tray slots
+      • chuyen 501 → index 0 → trays 1-4
+      • chuyen 503 → index 1 → trays 6-9
 
-    When *bz_groups* is non-empty the archive remark already encodes the
-    physical layout, so the original order is preserved.
+    Sorting by battery grade (loai) was wrong: a remark like "HP501 UDP503"
+    puts HP on the lower-numbered line, so "UD/UD+ before HP" ordering would
+    swap the tray assignment.
+
+    The sort is **always applied** (regardless of whether *bz_groups* is
+    non-empty).  The archive remark encodes group *identity* (loai + chuyen),
+    not tray position — position is solely determined by *_DMP_TRAY_ASSIGNMENT*
+    and therefore always requires chuyen-ordered groups.
+
+    When every group already has explicit trays the positional assignment is
+    bypassed, so the sort has no effect and is skipped for efficiency.
     """
-    if bz_groups or any(g.get("trays") for g in eff_groups):
+    if any(g.get("trays") for g in eff_groups):
         return eff_groups
 
     def _chuyen_sort_key(g: dict) -> tuple:
@@ -5052,7 +5060,22 @@ def _pair_dm2000_archives_to_groups(
         return (min(batys) if batys else _NO_BATTERY_SORT_VALUE, cdid, ai)
 
     sorted_ais = sorted(range(n_archs), key=_min_battery_key)
-    return [(sorted_ais[i], i) for i in range(min(len(sorted_ais), n_grps))]
+
+    # Sort groups by chuyen number so the archive with the lowest min battery
+    # is paired with the group whose production-line number is also lowest.
+    # This is essential when entry.groups is stored in reverse or arbitrary
+    # order (e.g. [HP 503, UD+ 501]): without this sort the archive with
+    # batteries 1-4 (UD+ data) would be paired with group HP 503 and the
+    # wrong data would appear on each production-line sheet.
+    def _grp_chuyen_key(gi: int) -> tuple:
+        c = str(getattr(groups[gi], "chuyen", None) or "")
+        try:
+            return (0, int(c), c)
+        except (ValueError, TypeError):
+            return (1, 0, c)
+
+    sorted_gis = sorted(range(n_grps), key=_grp_chuyen_key)
+    return [(sorted_ais[i], sorted_gis[i]) for i in range(min(len(sorted_ais), n_grps))]
 
 
 def _compute_dmp_perf_groups(  # noqa: C901

@@ -4961,6 +4961,31 @@ def _escape_sql_wildcards(s: str) -> str:
     return s.replace("%", "[%]").replace("_", "[_]")
 
 
+def _bz_token_is_whole_word(bz: str, token: str) -> bool:
+    """Return True when *token* appears as a whole whitespace-delimited word in *bz*.
+
+    Performs a case-insensitive match.  This is necessary because a broad SQL
+    ``LIKE '%UD501%'`` would also match archives whose bz field contains
+    ``'UDP501'`` (a UD+ line), since ``'UDP501'`` contains ``'UD501'`` as a
+    substring.  Checking word-boundary membership in Python after the database
+    query eliminates these false positives.
+
+    Examples::
+
+        _bz_token_is_whole_word("LR6 UD501 HP503", "UD501")  # True
+        _bz_token_is_whole_word("LR6 UDP501 HP503", "UD501") # False — "UD501" only in "UDP501"
+        _bz_token_is_whole_word("LR6 UDP501 HP503", "UDP501")# True
+        _bz_token_is_whole_word("UD501", "UD501")             # True  — exact match
+        _bz_token_is_whole_word("LR6 UD501", "UD501")         # True  — token at end
+    """
+    if not bz or not token:
+        return False
+    # Pad with spaces so every token is surrounded by spaces, allowing a single
+    # " {token} " membership test to cover leading, trailing and middle positions.
+    padded = f" {bz.strip().upper()} "
+    return f" {token.strip().upper()} " in padded
+
+
 def _group_to_bz_token(loai: str, chuyen: str) -> str:
     """Return the bz search token for a production-line group — inverse of *_parse_bz_groups*.
 
@@ -5278,6 +5303,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             )
                         except pyodbc.Error:
                             pass
+                        # Post-filter: ensure the token is a whole word in bz so that
+                        # e.g. "UD501" does not match archives whose bz contains "UDP501".
+                        if _eg_rows and _eg_token:
+                            _eg_rows = [
+                                _r for _r in _eg_rows
+                                if _bz_token_is_whole_word(
+                                    str(_dm2000_get_value(_r, "remarks", "remark", "bz", "note", "memo", "bzh") or ""),
+                                    _eg_token,
+                                )
+                            ]
                     if not _eg_rows:
                         _eg_rows = _dm2k_search_archname(_dm2k_arch)
                     if not _eg_rows:
@@ -5698,6 +5733,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 )
                             except pyodbc.Error:
                                 pass
+                            # Post-filter: ensure the token is a whole word in bz so that
+                            # e.g. "UD501" does not match archives whose bz contains "UDP501".
+                            if _feg_rows and _feg_token:
+                                _feg_rows = [
+                                    _r for _r in _feg_rows
+                                    if _bz_token_is_whole_word(
+                                        str(_dm2000_get_value(_r, "remarks", "remark", "bz", "note", "memo", "bzh") or ""),
+                                        _feg_token,
+                                    )
+                                ]
                         if not _feg_rows:
                             _feg_rows = _fb_search_archname(_fb_remark)
                         if not _feg_rows:

@@ -529,6 +529,16 @@ export default function BatteryPage() {
           setConnected(false);
           setIsOperator(false);
           setStationOccupied(true);
+          // Clear any stale chart/session data from localStorage so the viewer
+          // only sees live readings from the current test (not old session data).
+          setChartData([]);
+          setChartDataOCV([]);
+          setChartDataCCV([]);
+          setChartSeriesByBattery({});
+          setReadingsByBattery({});
+          setRecords([]);
+          // Request a fresh status so records and running state are up-to-date
+          sendMsg({ action: 'get_status' });
           notification.info({ message: t('batteryStationOccupied'), description: t('batteryViewOnlyDesc') });
         } else {
           setConnected(false);
@@ -692,6 +702,15 @@ export default function BatteryPage() {
         autoRestartAfterRetestRef.current = false;
         retestCountMapRef.current = {};
         notification.success({ message: t('batterySessionCleared') });
+        break;
+
+      case 'session_auto_saved':
+        // Operator disconnected unexpectedly; server stopped the test and auto-saved the
+        // session to history. Refresh the local order-history list so any user can load it.
+        getOrderHistory().then((res) => {
+          setOrderHistory(dedupeOrderHistory(res.data.items || []));
+        }).catch(() => {});
+        notification.info({ message: t('batteryAutoSavedToHistory') });
         break;
 
       case 'error':

@@ -4951,9 +4951,12 @@ def _parse_bz_groups(bz: str) -> list[dict]:
 def _escape_sql_wildcards(s: str) -> str:
     """Escape Access SQL LIKE wildcard characters in *s* so they are treated literally.
 
-    Access uses ``%`` and ``_`` as wildcards in ``LIKE`` patterns.  Wrapping
-    each in square brackets (``[%]``, ``[_]``) causes Access to match them as
-    literal characters rather than wildcards.
+    The application connects to Access databases using pyodbc with ANSI-92
+    query mode (``ANSI-92``), which means LIKE patterns use ``%`` (any
+    sequence of characters) and ``_`` (any single character) as wildcards —
+    the same convention as standard SQL, NOT the native Access ``*``/``?``
+    wildcards.  Wrapping each in square brackets (``[%]``, ``[_]``) causes
+    Access to match them as literal characters rather than wildcards.
     """
     return s.replace("%", "[%]").replace("_", "[_]")
 

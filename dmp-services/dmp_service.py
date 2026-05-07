@@ -5064,6 +5064,102 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _dm2k_multi:
                     _dm2k_model_upper_m = entry.model.strip().upper()
                     _dm2k_no_chuyen_m = {"LR61", "9V", "6LR61"}
+                    # When every archive matches every group the archives share the same
+                    # remark ("LR6 UDP501 HP503") and represent **different test dates**
+                    # — each archive covers ALL production lines.  Process each archive
+                    # with all groups via _parse_bz_groups + _DMP_TRAY_ASSIGNMENT (the
+                    # same logic the single-archive path already applies correctly).
+                    # Using 1-to-1 positional pairing in this case is wrong: it assigns
+                    # different-date archives to different groups, producing incorrect
+                    # averages (all-battery mix) and silently dropping some groups.
+                    _dm2k_all_match_all = (
+                        len(entry.groups) > 0
+                        and all(
+                            all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in entry.groups)
+                            for a in _arch_rows
+                        )
+                    )
+                    if _dm2k_all_match_all:
+                        for _dm2k_a in _arch_rows:
+                            _dm2k_a_resolved = (
+                                str(_dm2000_get_value(_dm2k_a, "cdid", "archname") or _dm2k_arch).strip()
+                                or _dm2k_arch
+                            )
+                            _dm2k_a_fdfs_raw = str(_dm2000_get_value(_dm2k_a, "fdfs") or "").strip()
+                            _dm2k_a_load_res = str(_dm2000_get_value(
+                                _dm2k_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                            ) or "").strip()
+                            _dm2k_a_ep_raw = _dm2000_get_value(
+                                _dm2k_a,
+                                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                            )
+                            _dm2k_a_ep_str = str(_dm2k_a_ep_raw or "").strip()
+                            _dm2k_a_fdfs = _build_dm2000_condition_label(
+                                _dm2k_a_fdfs_raw, _dm2k_a_load_res, _dm2k_a_ep_str, _dm2k_arch,
+                            )
+                            _dm2k_a_startdate = _dm2000_get_value(_dm2k_a, "startdate", "fdrq")
+                            _dm2k_a_fdrq = _to_date(_dm2k_a_startdate) if _dm2k_a_startdate else ""
+                            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                                _dm2k_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                            elif _dm2k_a_fdrq:
+                                _dm2k_a_row_label = _dm2k_a_fdrq
+                            elif entry.report_date:
+                                _dm2k_a_row_label = _to_date(entry.report_date) or entry.report_date
+                            else:
+                                _dm2k_a_row_label = _dm2k_arch
+                            _dm2k_a_all_batys = _get_batys_for_archive(_dm2k_a_resolved)
+                            _dm2k_a_bz_raw = str(_dm2000_get_value(
+                                _dm2k_a, "remarks", "remark", "bz", "note", "memo", "bzh",
+                            ) or "").strip()
+                            _dm2k_a_bz_groups = _parse_bz_groups(_dm2k_a_bz_raw)
+                            _dm2k_a_eff_groups = [
+                                {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                                for grp in entry.groups
+                            ]
+                            _dm2k_a_n = len(_dm2k_a_eff_groups)
+                            if len(_dm2k_a_bz_groups) > len(_dm2k_a_eff_groups) and not any(
+                                g["trays"] for g in _dm2k_a_eff_groups
+                            ):
+                                _dm2k_a_eff_groups = [
+                                    {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                                    for g in _dm2k_a_bz_groups
+                                ]
+                                _dm2k_a_n = len(_dm2k_a_eff_groups)
+                            _dm2k_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
+                                _dm2k_a_n, [_dm2k_a_all_batys]
+                            )
+                            for _dm2k_a_g_idx, _dm2k_a_eff_grp in enumerate(_dm2k_a_eff_groups):
+                                _dm2k_a_grp_trays = _dm2k_a_eff_grp.get("trays") or []
+                                if _dm2k_a_grp_trays:
+                                    _dm2k_a_batys = [
+                                        b for b in _dm2k_a_grp_trays
+                                        if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                                    ]
+                                else:
+                                    _dm2k_a_batys = (
+                                        _dm2k_a_auto_trays[_dm2k_a_g_idx]
+                                        if _dm2k_a_g_idx < len(_dm2k_a_auto_trays)
+                                        else _dm2k_a_all_batys
+                                    )
+                                if not _dm2k_a_batys:
+                                    continue
+                                _dm2k_a_tav = _get_tav_for_batteries(_dm2k_a_resolved, _dm2k_a_batys)
+                                _dm2k_a_perf = _compute_perf_values(_dm2k_a_ep_str, _dm2k_a_tav, _dm2k_a_batys)
+                                _dm2k_a_perf["hfsj_unit"] = "hour"
+                                _dm2k_a_grp_chuyen = _dm2k_a_eff_grp.get("chuyen") or ""
+                                _dm2k_a_grp_loai = _dm2k_a_eff_grp.get("loai") or ""
+                                _dm2k_a_sheet_key = (
+                                    entry.model.strip()
+                                    if _dm2k_model_upper_m in _dm2k_no_chuyen_m
+                                    else f"{entry.model.strip()} {_dm2k_a_grp_chuyen.strip()}"
+                                )
+                                _dm2k_a_fdfs_label = _dm2k_a_fdfs or _dm2k_a_grp_loai
+                                groups.setdefault(_dm2k_a_sheet_key, {}).setdefault(
+                                    (_dm2k_a_row_label, _dm2k_a_grp_loai), {}
+                                )[_dm2k_a_fdfs_label] = _dm2k_a_perf
+                        continue  # all archives × all groups processed; skip DMP path
                     _dm2k_ai_gi_pairs = _pair_dm2000_archives_to_groups(_arch_rows, entry.groups)
                     _dm2k_ai_to_gi = dict(_dm2k_ai_gi_pairs)
                     for _dm2k_ai, _dm2k_a in enumerate(_arch_rows):
@@ -5371,6 +5467,99 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     if _fb_multi:
                         _fb_model_upper_m = entry.model.strip().upper()
                         _fb_no_chuyen_m = {"LR61", "9V", "6LR61"}
+                        # When every archive matches every group the archives share the
+                        # same remark and represent different test dates — each archive
+                        # covers ALL production lines.  Process each archive with all
+                        # groups via _parse_bz_groups + _DMP_TRAY_ASSIGNMENT (same
+                        # logic the single-archive path applies correctly).
+                        _fb_all_match_all = (
+                            len(entry.groups) > 0
+                            and all(
+                                all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in entry.groups)
+                                for a in _fb_arch_rows
+                            )
+                        )
+                        if _fb_all_match_all:
+                            for _fb_a in _fb_arch_rows:
+                                _fb_a_resolved = (
+                                    str(_dm2000_get_value(_fb_a, "cdid", "archname") or _fb_remark).strip()
+                                    or _fb_remark
+                                )
+                                _fb_a_fdfs_raw = str(_dm2000_get_value(_fb_a, "fdfs") or "").strip()
+                                _fb_a_load_res = str(_dm2000_get_value(
+                                    _fb_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                                ) or "").strip()
+                                _fb_a_ep_raw = _dm2000_get_value(
+                                    _fb_a,
+                                    "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                                    "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                                    "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                                )
+                                _fb_a_ep_str = str(_fb_a_ep_raw or "").strip()
+                                _fb_a_fdfs = _build_dm2000_condition_label(
+                                    _fb_a_fdfs_raw, _fb_a_load_res, _fb_a_ep_str, _fb_remark,
+                                )
+                                _fb_a_startdate = _dm2000_get_value(_fb_a, "startdate", "fdrq")
+                                _fb_a_fdrq = _to_date(_fb_a_startdate) if _fb_a_startdate else ""
+                                if entry.special_type in _SPECIAL_TYPE_LABEL:
+                                    _fb_a_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                                elif _fb_a_fdrq:
+                                    _fb_a_row_label = _fb_a_fdrq
+                                elif entry.report_date:
+                                    _fb_a_row_label = _to_date(entry.report_date) or entry.report_date
+                                else:
+                                    _fb_a_row_label = _fb_remark
+                                _fb_a_all_batys = _get_batys_for_archive(_fb_a_resolved)
+                                _fb_a_bz_raw = str(_dm2000_get_value(
+                                    _fb_a, "remarks", "remark", "bz", "note", "memo", "bzh",
+                                ) or "").strip()
+                                _fb_a_bz_groups = _parse_bz_groups(_fb_a_bz_raw)
+                                _fb_a_eff_groups = [
+                                    {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                                    for grp in entry.groups
+                                ]
+                                _fb_a_n = len(_fb_a_eff_groups)
+                                if len(_fb_a_bz_groups) > len(_fb_a_eff_groups) and not any(
+                                    g["trays"] for g in _fb_a_eff_groups
+                                ):
+                                    _fb_a_eff_groups = [
+                                        {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                                        for g in _fb_a_bz_groups
+                                    ]
+                                    _fb_a_n = len(_fb_a_eff_groups)
+                                _fb_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
+                                    _fb_a_n, [_fb_a_all_batys]
+                                )
+                                for _fb_a_g_idx, _fb_a_eff_grp in enumerate(_fb_a_eff_groups):
+                                    _fb_a_grp_trays = _fb_a_eff_grp.get("trays") or []
+                                    if _fb_a_grp_trays:
+                                        _fb_a_batys = [
+                                            b for b in _fb_a_grp_trays
+                                            if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                                        ]
+                                    else:
+                                        _fb_a_batys = (
+                                            _fb_a_auto_trays[_fb_a_g_idx]
+                                            if _fb_a_g_idx < len(_fb_a_auto_trays)
+                                            else _fb_a_all_batys
+                                        )
+                                    if not _fb_a_batys:
+                                        continue
+                                    _fb_a_tav = _get_tav_for_batteries(_fb_a_resolved, _fb_a_batys)
+                                    _fb_a_perf = _compute_perf_values(_fb_a_ep_str, _fb_a_tav, _fb_a_batys)
+                                    _fb_a_perf["hfsj_unit"] = "hour"
+                                    _fb_a_grp_chuyen = _fb_a_eff_grp.get("chuyen") or ""
+                                    _fb_a_grp_loai = _fb_a_eff_grp.get("loai") or ""
+                                    _fb_a_sheet = (
+                                        entry.model.strip()
+                                        if _fb_model_upper_m in _fb_no_chuyen_m
+                                        else f"{entry.model.strip()} {_fb_a_grp_chuyen.strip()}"
+                                    )
+                                    _fb_a_fdfs_label = _fb_a_fdfs or _fb_a_grp_loai
+                                    groups.setdefault(_fb_a_sheet, {}).setdefault(
+                                        (_fb_a_row_label, _fb_a_grp_loai), {}
+                                    )[_fb_a_fdfs_label] = _fb_a_perf
+                            continue  # all archives × all groups processed; skip DMP path
                         _fb_ai_gi_pairs = _pair_dm2000_archives_to_groups(_fb_arch_rows, entry.groups)
                         _fb_ai_to_gi = dict(_fb_ai_gi_pairs)
                         for _fb_ai, _fb_a in enumerate(_fb_arch_rows):

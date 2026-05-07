@@ -163,6 +163,11 @@ export default function BatteryPage() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
 
+  // Operator / viewer state — true when this client is the active operator for the selected station
+  const [isOperator, setIsOperator] = useState(false);
+  // true when another client has already claimed the operator role for the selected station
+  const [stationOccupied, setStationOccupied] = useState(false);
+
   // Test state
   const [running, setRunning] = useState(false);
 
@@ -473,11 +478,25 @@ export default function BatteryPage() {
         setPorts(msg.ports || []);
         break;
 
+      case 'station_state':
+        setStationOccupied(msg.occupied || false);
+        if (msg.isOperator !== undefined) {
+          setIsOperator(msg.isOperator);
+        }
+        break;
+
       case 'connect_result':
         setConnecting(false);
         if (msg.ok) {
           setConnected(true);
+          setIsOperator(true);
           notification.success({ message: t('batteryConnectSuccess'), description: msg.message });
+        } else if (msg.occupied) {
+          // Station already has an active operator — enter view-only mode
+          setConnected(false);
+          setIsOperator(false);
+          setStationOccupied(true);
+          notification.info({ message: t('batteryStationOccupied'), description: t('batteryViewOnlyDesc') });
         } else {
           setConnected(false);
           notification.error({ message: t('batteryConnectFailed'), description: msg.message });
@@ -487,6 +506,7 @@ export default function BatteryPage() {
       case 'disconnected':
         setConnected(false);
         setRunning(false);
+        setIsOperator(false);
         setStatusText('Waiting...');
         setStatusColor('#ffffff');
         break;
@@ -612,6 +632,10 @@ export default function BatteryPage() {
           setStatusText(text);
           setStatusColor(getStatusColor(text));
           if (msg.data.records) setRecords(msg.data.records);
+          // Sync running state so viewers joining a test in progress see the correct UI
+          if (msg.data.running !== undefined) {
+            setRunning(!!msg.data.running);
+          }
         }
         break;
 
@@ -1290,7 +1314,7 @@ export default function BatteryPage() {
         const recordIdx = records.findIndex(r => r.id === record.id);
         return (
           <Space size={4}>
-            <Button size="small" onClick={() => handleRetest(record)} disabled={!connected || running}>
+            <Button size="small" onClick={() => handleRetest(record)} disabled={!connected || !isOperator || running}>
               {t('batteryRetest')}
             </Button>
             <Button
@@ -1609,7 +1633,7 @@ export default function BatteryPage() {
           <Button
             size="small"
             type={loadedSnapshotId === snapshot._snapshotId ? 'primary' : 'default'}
-            disabled={!selectedStation || !connected}
+            disabled={!selectedStation || !connected || !isOperator}
             onClick={() => handleLoadOrder(snapshot)}
           >
             {loadedSnapshotId === snapshot._snapshotId ? t('batteryHistoryViewing') : t('batteryHistoryLoad')}
@@ -1637,7 +1661,7 @@ export default function BatteryPage() {
         </Space>
       ),
     },
-  ]), [t, loadedSnapshotId, selectedStation, connected, handleLoadOrder, handleDeleteOrderSnapshot, handleExportOrderSnapshot]);
+  ]), [t, loadedSnapshotId, selectedStation, connected, isOperator, handleLoadOrder, handleDeleteOrderSnapshot, handleExportOrderSnapshot]);
 
   const buildMiniChartOption = React.useCallback((batteryId) => {
     const readings = readingsByBattery[batteryId] || [];
@@ -1838,7 +1862,7 @@ export default function BatteryPage() {
     ),
     [orderId, orderHistory, loadedSnapshotId]);
 
-  const canStart = connected && !running && orderId.trim() !== '' &&
+  const canStart = connected && isOperator && !running && orderId.trim() !== '' &&
     !(records.length === 0 && isDuplicateOrderId) &&
     testDate !== null && ocvMin != null && ocvMax != null && ccvMin != null && ccvMax != null;
 
@@ -1871,13 +1895,20 @@ export default function BatteryPage() {
                 value={selectedStation?.id}
                 onChange={(id) => {
                   const s = stations.find((st) => st.id === id);
+                  // Update the ref immediately so sendMsg uses the correct stationId
+                  selectedStationRef.current = s || null;
                   setSelectedStation(s || null);
                   setConnected(false);
                   setRunning(false);
+                  setIsOperator(false);
+                  setStationOccupied(false);
                   setPorts([]);
                   setPort('');
-                  // Load ports for newly selected station
-                  if (s) sendMsg({ action: 'get_ports', stationId: s.id });
+                  if (s) {
+                    // Load ports and subscribe to current station state
+                    sendMsg({ action: 'get_ports' });
+                    sendMsg({ action: 'get_status' });
+                  }
                 }}
                 loading={stationsLoading}
                 notFoundContent={
@@ -1913,6 +1944,14 @@ export default function BatteryPage() {
           {!selectedStation && stations.length > 0 && (
             <div style={{ marginTop: 8, color: '#faad14', fontSize: 12 }}>
               ⚠ Vui lòng chọn trạm trước khi kết nối thiết bị
+            </div>
+          )}
+          {selectedStation && stationOccupied && !isOperator && (
+            <div style={{ marginTop: 8, padding: '6px 12px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ad6800' }}>
+              <span>👁</span>
+              <strong>{t('batteryViewOnly')}</strong>
+              <span>—</span>
+              <span>{t('batteryViewOnlyDesc')}</span>
             </div>
           )}
         </Card>
@@ -1999,20 +2038,27 @@ export default function BatteryPage() {
                   </Row>
 
                   {!connected ? (
-                    <Button
-                      type="primary"
-                      icon={<ApiOutlined />}
-                      onClick={handleConnect}
-                      loading={connecting}
-                      block
-                    >
-                      {connecting ? t('batteryConnecting') : t('batteryConnect')}
-                    </Button>
+                    stationOccupied && !isOperator ? (
+                      <Button block disabled icon={<ApiOutlined />}>
+                        {t('batteryStationOccupied')}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="primary"
+                        icon={<ApiOutlined />}
+                        onClick={handleConnect}
+                        loading={connecting}
+                        block
+                      >
+                        {connecting ? t('batteryConnecting') : t('batteryConnect')}
+                      </Button>
+                    )
                   ) : (
                     <Button
                       danger
                       icon={<DisconnectOutlined />}
                       onClick={handleDisconnect}
+                      disabled={!isOperator}
                       block
                     >
                       {t('batteryDisconnect')}
@@ -2660,7 +2706,7 @@ export default function BatteryPage() {
                 size="large"
                 icon={running ? <StopOutlined /> : <PlayCircleOutlined />}
                 danger={running}
-                disabled={running ? false : !canStart}
+                disabled={running ? !isOperator : !canStart}
                 onClick={handleStartStop}
               >
                 {running ? t('batteryStop') : t('batteryStart')}
@@ -2672,7 +2718,7 @@ export default function BatteryPage() {
             <Button
               icon={<DeleteOutlined />}
               onClick={handleClearSessionRequest}
-              disabled={!connected || records.length === 0}
+              disabled={!connected || !isOperator || records.length === 0}
             >
               {t('batteryClearSession')}
             </Button>

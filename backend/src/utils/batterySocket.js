@@ -24,6 +24,10 @@ const clients = new Map();
 // Map<stationId, { abortController, connected }>
 const stationSseMap = new Map();
 
+// Map<stationId, ws> — tracks which WebSocket client is the active operator for each station.
+// Only the operator may send connect/disconnect/start/stop/clear_session.
+const stationOperatorMap = new Map();
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -43,6 +47,33 @@ function _hasClientsForStation(stationId) {
     if (state.stationId === stationId) return true;
   }
   return false;
+}
+
+/** Returns true if the station currently has a live operator connection. */
+function _isOperatorAlive(stationId) {
+  const opWs = stationOperatorMap.get(stationId);
+  return opWs != null && opWs.readyState === WebSocket.OPEN;
+}
+
+/** Returns true if the given WS connection is the active operator for the station. */
+function _isOperator(ws, stationId) {
+  return stationOperatorMap.get(stationId) === ws;
+}
+
+/**
+ * Broadcast station occupancy state to all clients of a station.
+ * Each client receives its own isOperator flag.
+ */
+function _broadcastStationState(stationId) {
+  const occupied = _isOperatorAlive(stationId);
+  const strFalse = JSON.stringify({ type: 'station_state', occupied, isOperator: false, stationId });
+  const strTrue = JSON.stringify({ type: 'station_state', occupied, isOperator: true, stationId });
+  for (const [ws, state] of clients) {
+    if (state.stationId === stationId && ws.readyState === WebSocket.OPEN) {
+      const isOp = stationOperatorMap.get(stationId) === ws;
+      try { ws.send(isOp ? strTrue : strFalse); } catch (_) {}
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,9 +102,16 @@ function initBatteryWebSocket(server) {
       const { stationId } = clients.get(ws) || {};
       clients.delete(ws);
       logger.info('Battery WS client disconnected', { total: clients.size });
-      // Stop SSE relay for this station if no clients remain
-      if (stationId && !_hasClientsForStation(stationId)) {
-        stopSseRelay(stationId);
+      if (stationId) {
+        // If the closing client was the operator, release the station
+        if (stationOperatorMap.get(stationId) === ws) {
+          stationOperatorMap.delete(stationId);
+          _broadcastStationState(stationId);
+        }
+        // Stop SSE relay for this station if no clients remain
+        if (!_hasClientsForStation(stationId)) {
+          stopSseRelay(stationId);
+        }
       }
     });
 
@@ -108,14 +146,33 @@ async function handleClientMessage(ws, msg) {
 
   // ── connect ───────────────────────────────────────────────────────────────
   if (action === 'connect') {
+    // If another client is already operating this station, reject with view-only notice
+    if (stationId && _isOperatorAlive(stationId) && !_isOperator(ws, stationId)) {
+      sendToClient(ws, {
+        type: 'connect_result',
+        ok: false,
+        occupied: true,
+        message: 'Trạm đang được sử dụng bởi máy khác. Bạn đang ở chế độ xem.',
+        stationId,
+      });
+      // Ensure SSE relay is running so this viewer receives live data
+      startSseRelay(stationId, base);
+      // Tell the viewer they are in view-only mode
+      sendToClient(ws, { type: 'station_state', occupied: true, isOperator: false, stationId });
+      return;
+    }
     try {
       const res = await axios.post(`${base}/connect`, payload || {});
+      // Mark this WS connection as the station operator
+      stationOperatorMap.set(stationId, ws);
       broadcastToStation(stationId, {
         type: 'connect_result',
         ok: true,
         message: res.data.message,
         stationId,
       });
+      // Inform all clients of the new operator status
+      _broadcastStationState(stationId);
       startSseRelay(stationId, base);
     } catch (e) {
       const detail = e.response?.data?.detail || e.message;
@@ -131,14 +188,24 @@ async function handleClientMessage(ws, msg) {
 
   // ── disconnect ────────────────────────────────────────────────────────────
   if (action === 'disconnect') {
+    if (stationId && !_isOperator(ws, stationId)) {
+      sendToClient(ws, { type: 'error', message: 'Bạn không phải người đang vận hành trạm này.', stationId });
+      return;
+    }
     try { await axios.post(`${base}/disconnect`); } catch (_) {}
+    stationOperatorMap.delete(stationId);
     stopSseRelay(stationId);
     broadcastToStation(stationId, { type: 'disconnected', stationId });
+    _broadcastStationState(stationId);
     return;
   }
 
   // ── start ─────────────────────────────────────────────────────────────────
   if (action === 'start') {
+    if (stationId && !_isOperator(ws, stationId)) {
+      sendToClient(ws, { type: 'error', message: 'Bạn không phải người đang vận hành trạm này. Chỉ máy kết nối thiết bị mới được phép bắt đầu kiểm tra.', stationId });
+      return;
+    }
     // Ensure SSE relay is running (may have stopped after page reload)
     startSseRelay(stationId, base);
     try {
@@ -178,6 +245,10 @@ async function handleClientMessage(ws, msg) {
 
   // ── stop ──────────────────────────────────────────────────────────────────
   if (action === 'stop') {
+    if (stationId && !_isOperator(ws, stationId)) {
+      sendToClient(ws, { type: 'error', message: 'Bạn không phải người đang vận hành trạm này.', stationId });
+      return;
+    }
     try {
       await axios.post(`${base}/stop`);
       broadcastToStation(stationId, { type: 'test_stopped', stationId });
@@ -211,11 +282,21 @@ async function handleClientMessage(ws, msg) {
     } catch (e) {
       sendToClient(ws, { type: 'error', message: e.message, stationId });
     }
+    // Always send current station occupancy state to this specific client
+    if (stationId) {
+      const occupied = _isOperatorAlive(stationId);
+      const isOp = _isOperator(ws, stationId);
+      sendToClient(ws, { type: 'station_state', occupied, isOperator: isOp, stationId });
+    }
     return;
   }
 
   // ── clear_session ─────────────────────────────────────────────────────────
   if (action === 'clear_session') {
+    if (stationId && !_isOperator(ws, stationId)) {
+      sendToClient(ws, { type: 'error', message: 'Bạn không phải người đang vận hành trạm này. Chỉ máy kết nối thiết bị mới được phép xóa phiên.', stationId });
+      return;
+    }
     try {
       await axios.delete(`${base}/session`);
       broadcastToStation(stationId, { type: 'session_cleared', stationId });

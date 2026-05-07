@@ -1063,6 +1063,114 @@ def _perf_normalize_date(v) -> str:
     return ""
 
 
+# Standard IEC 60086-2 discharge-test-condition template order per battery family.
+# Each entry is a condition label as it typically appears in the Excel report template.
+# Matching against actual DB labels uses _perf_fdfs_matches_template (fuzzy + bracket-norm).
+_TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
+    "LR6": [
+        "10ohm 24h/d-0.9V",
+        "1000mA 24h/d-0.9V",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
+        "3.9ohm 1h/d-0.8V",
+        "3.9ohm 4m/h 8h/d-0.9V",
+        "250mA 1h/d-0.9V",
+        "3.9ohm 24h/d-0.8V",
+        "1000mA 10s/m 1h/d-0.9V",
+        "100mA 1h/d-0.9V",
+        "50mA 1h/8h 24h/d-1V",
+        "750mA 2m/h 8h/d-1.1V",
+        "(450mW5s,45mW175s) 3h/124h-1.1V",
+        "(1ohm,0.25s.3.0ohm,19.75s),10m/h,1h/12h-1.0V",
+    ],
+    "LR03": [
+        "20ohm 24h/d-0.9V",
+        "600mA 24h/d-0.9V",
+        "5.1ohm 1h/d-0.8V",
+        "5.1ohm 4m/h 8h/d-0.9V",
+        "600mA 10s/m 1h/d-0.9V",
+        "50mA 1h/12h-0.9V",
+        "250mA 5m/h 12h/d-1.1V",
+        "100mA 1h/d-0.9V",
+        "24ohm 15s/m 8h/d-1V",
+        "3.9ohm 24h/d-0.8V",
+        "75mA 1h/12h 24h/d-0.9V",
+    ],
+    "LR61": [
+        "35mA 24h/d-0.9V",
+        "5.1ohm 5m/d-0.9V",
+        "75ohm 1h/d-0.9V",
+        "75ohm 1h/d-1.1V",
+    ],
+    "9V": [
+        "35mA 24h/d-5.4V",
+        "180ohm 4h/d-6.8V",
+        "270ohm 1h/d-5.4V",
+        "620ohm 2h/d-5.4V",
+        "620ohm+10Kohm 1s/60m.24h/d-7.5V",
+    ],
+}
+
+# Normalise bracket style so that DMP-software labels using {} are treated the
+# same as template labels that use () when doing template-order lookups.
+_BRACKET_NORM_TABLE = str.maketrans("{}", "()")
+
+
+def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
+    """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
+
+    Stricter than ``_perf_fdfs_matches_header``: the leading-token fallback is
+    intentionally omitted so that ``1000mA 10s/m 1h/d-0.9V`` does not
+    incorrectly match ``1000mA 24h/d-0.9V`` via the shared ``1000mA`` prefix.
+    Also normalises ``{}`` → ``()`` on both sides before comparing.
+    """
+    c_norm = cond.translate(_BRACKET_NORM_TABLE)
+    t_norm = tmpl.translate(_BRACKET_NORM_TABLE)
+
+    # Strip trailing unit annotation like "(h)", "(m)", "(t)"
+    _unit_re = re.compile(r"\s*\([hHmMtT]\)\s*$")
+    f = re.sub(_unit_re, "", c_norm).strip().lower()
+    h = re.sub(_unit_re, "", t_norm).strip().lower()
+    if not f or not h:
+        return False
+
+    # Exact match after normalisation
+    if f == h:
+        return True
+
+    # Whitespace-normalised match (spacing differences)
+    f_no_ws = re.sub(r'\s+', '', f)
+    h_no_ws = re.sub(r'\s+', '', h)
+    if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
+        return True
+
+    # Strip trailing endpoint-voltage suffix from one side at a time
+    _vsuf = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
+    f_no_v = re.sub(r'\s+', '', _vsuf.sub('', f))
+    h_no_v = re.sub(r'\s+', '', _vsuf.sub('', h))
+    if f_no_v and h_no_ws and f_no_v == h_no_ws:
+        return True
+    if f_no_ws and h_no_v and f_no_ws == h_no_v:
+        return True
+
+    return False
+
+
+def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
+    """Return a sort key ``(template_pos, cond)`` for a condition label.
+
+    *template_pos* is the 0-based position in the IEC template for *battery_type*,
+    or ``len(template)`` when the condition is not found (unrecognised conditions
+    are appended at the end, preserving their relative insertion order via *cond*).
+    """
+    battery_type_upper = battery_type.strip().upper()
+    template = _TEMPLATE_CONDITION_ORDER.get(battery_type_upper, [])
+    for i, tmpl_entry in enumerate(template):
+        if _perf_fdfs_matches_template(cond, tmpl_entry):
+            return (i, cond)
+    return (len(template), cond)
+
+
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     """Return True if *fdfs* label is a reasonable match for *header* text.
 
@@ -5473,20 +5581,39 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                 if lbl not in units and perf.get("hfsj_unit"):
                     units[lbl] = perf["hfsj_unit"]
 
-        # Sort conditions: "times" (DMP) first, then "hour"/"minute" (DM2000),
-        # matching the typical report template column order.  Within each unit
-        # group, sort by earliest row-label (first appearance date) so that
-        # archives tested earlier appear to the left.
+        # Sort conditions: use IEC template order for the detected battery family as
+        # the primary sort key.  Conditions not found in the template fall back to the
+        # legacy unit-type ordering (times → minute → hour) so that reports for
+        # non-standard battery types are still reasonable.
+        # Battery type is the first whitespace-separated token of the sheet key
+        # (e.g. "LR6" from "LR6 501"; "|" candidates are stripped first).
+        _sheet_key_clean = sheet_key.split("|")[0].strip()
+        _battery_type = _sheet_key_clean.split()[0] if _sheet_key_clean else ""
+        _template = _TEMPLATE_CONDITION_ORDER.get(_battery_type.upper(), [])
         _cond_first: dict[str, str] = {}
         for (row_lbl, _), rd in date_type_map.items():
             for lbl in rd:
                 if lbl not in _cond_first or row_lbl < _cond_first[lbl]:
                     _cond_first[lbl] = row_lbl
         _UNIT_ORDER = {"times": 0, "minute": 1, "hour": 2}
-        all_conditions.sort(key=lambda c: (
-            _UNIT_ORDER.get(units.get(c, "hour"), 2),
-            _cond_first.get(c, "9999-99-99"),
-        ))
+        _tmpl_len = len(_template)
+
+        def _sort_key(c: str) -> tuple:
+            tmpl_pos = _template_condition_sort_key(c, _battery_type)[0]
+            if tmpl_pos < _tmpl_len:
+                # Found in template: primary key is template position, tie-break by label.
+                # The unit-order slot is kept for tuple-length parity with the fallback branch.
+                return (0, tmpl_pos, _UNIT_ORDER.get(units.get(c, "hour"), 2), c)
+            # Not in template: sort after template conditions using unit-type then first-date.
+            # The constant 0 in slot 2 is a parity placeholder (same tuple length as above).
+            return (
+                1,
+                _UNIT_ORDER.get(units.get(c, "hour"), 2),
+                0,  # parity placeholder — slot unused when group=1
+                _cond_first.get(c, "9999-99-99"),
+            )
+
+        all_conditions.sort(key=_sort_key)
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):

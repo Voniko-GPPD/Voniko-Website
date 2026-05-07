@@ -40,6 +40,7 @@ const RETRY_DELAY_MS = 2000;
 const Y_AXIS_PADDING_RATIO = 0.1;
 const MIN_Y_AXIS_PADDING = 0.01;
 const ZOOM_MODAL_TABLE_SCROLL_Y = 'calc(80vh - 120px)';
+const LS_SELECTED_STATION = 'battery_selected_station';
 const ZOOM_CHART_DATA_ZOOM = [{ type: 'inside', filterMode: 'none' }, { type: 'slider', height: 20, bottom: 4 }];
 
 function parseStandard(str) {
@@ -349,7 +350,7 @@ export default function BatteryPage() {
         // Auto-restore the station that was selected before a page reload
         if (isFirst && !stationRestoredRef.current && !selectedStationRef.current) {
           stationRestoredRef.current = true;
-          const savedId = localStorage.getItem('battery_selected_station');
+          const savedId = localStorage.getItem(LS_SELECTED_STATION);
           if (savedId) {
             const found = stList.find((s) => s.id === savedId);
             if (found) {
@@ -1957,9 +1958,9 @@ export default function BatteryPage() {
                   setPort('');
                   // Persist selection so it survives page reloads
                   if (s) {
-                    localStorage.setItem('battery_selected_station', s.id);
+                    localStorage.setItem(LS_SELECTED_STATION, s.id);
                   } else {
-                    localStorage.removeItem('battery_selected_station');
+                    localStorage.removeItem(LS_SELECTED_STATION);
                   }
                   if (s) {
                     // Load ports and subscribe to current station state
@@ -3232,8 +3233,10 @@ export default function BatteryPage() {
             }
           }}>{t('batteryNewSession')}</Button>,
           <Button key="continue" type="primary" onClick={() => {
-            // Resume from where we left off: next battery ID = number of saved records + 1
-            startIdRef.current = (savedSessionInfo?.records?.length ?? 0) + 1;
+            // Resume from where we left off: use max battery ID from saved records + 1 to handle gaps
+            const savedRecords = savedSessionInfo?.records || [];
+            const maxId = savedRecords.length > 0 ? Math.max(...savedRecords.map((r) => r.id || 0)) : 0;
+            startIdRef.current = maxId + 1;
             setResumeModalVisible(false);
           }}>{t('batteryContinueSession')}</Button>,
         ]}

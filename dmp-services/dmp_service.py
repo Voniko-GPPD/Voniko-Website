@@ -4626,9 +4626,7 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
 
-def _sort_eff_groups_for_tray_assignment(
-    eff_groups: list[dict], bz_groups: list[dict]  # noqa: ARG001 – bz_groups kept for call-site compatibility
-) -> list[dict]:
+def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
     """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
 
     The positional *_DMP_TRAY_ASSIGNMENT* table maps group index → physical
@@ -4644,11 +4642,6 @@ def _sort_eff_groups_for_tray_assignment(
     Sorting by battery grade (loai) was wrong: a remark like "HP501 UDP503"
     puts HP on the lower-numbered line, so "UD/UD+ before HP" ordering would
     swap the tray assignment.
-
-    The sort is **always applied** (regardless of whether *bz_groups* is
-    non-empty).  The archive remark encodes group *identity* (loai + chuyen),
-    not tray position — position is solely determined by *_DMP_TRAY_ASSIGNMENT*
-    and therefore always requires chuyen-ordered groups.
 
     When every group already has explicit trays the positional assignment is
     bypassed, so the sort has no effect and is skipped for efficiency.
@@ -5422,7 +5415,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                     for g in _dm2k_a_bz_groups
                                 ]
                             _dm2k_a_eff_groups = _sort_eff_groups_for_tray_assignment(
-                                _dm2k_a_eff_groups, _dm2k_a_bz_groups
+                                _dm2k_a_eff_groups
                             )
                             _dm2k_a_n = len(_dm2k_a_eff_groups)
                             _dm2k_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
@@ -5597,7 +5590,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # UD+ group (and vice-versa) when groups were stored in the wrong
             # order (e.g. HP first because the remark said "HP503 UDP501").
             _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
-                _dm2k_eff_groups, _dm2k_bz_groups
+                _dm2k_eff_groups
             )
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
                 _dm2k_n, [_dm2k_all_batys]
@@ -5934,7 +5927,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                         for g in _fb_a_bz_groups
                                     ]
                                 _fb_a_eff_groups = _sort_eff_groups_for_tray_assignment(
-                                    _fb_a_eff_groups, _fb_a_bz_groups
+                                    _fb_a_eff_groups
                                 )
                                 _fb_a_n = len(_fb_a_eff_groups)
                                 _fb_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
@@ -6080,7 +6073,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         ]
                         _fb_n = len(_fb_eff_groups)
                     _fb_eff_groups = _sort_eff_groups_for_tray_assignment(
-                        _fb_eff_groups, _fb_bz_groups
+                        _fb_eff_groups
                     )
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
@@ -6174,11 +6167,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             for i, grp in enumerate(entry.groups)
         ]
-        # bz_groups (second arg) is no longer used inside the function;
-        # pass [] to keep the call site clear.
-        _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(
-            _dmp_eff_groups, []
-        )
+        _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups)
         n_groups = len(_dmp_eff_groups)
         auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
 

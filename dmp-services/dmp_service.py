@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -4955,6 +4955,34 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     return groups
 
 
+def _group_to_bz_token(loai: str, chuyen: str) -> str:
+    """Return the bz search token for a production-line group — inverse of *_parse_bz_groups*.
+
+    This is used to build a ``WHERE bz LIKE "%{token}%"`` query that finds
+    DM2000 archives belonging to a specific group, regardless of whether the
+    archive uses a composite remark (``"LR6 UDP501 HP503"``) or a per-grade
+    remark (``"LR6 UDP501"``).
+
+    Mapping (mirrors *_parse_bz_groups* token patterns):
+
+    * ``loai="UD+"`` → ``"UDP{chuyen}"``   e.g. ``chuyen="501"`` → ``"UDP501"``
+    * ``loai="HP"``  → ``"HP{chuyen}"``    e.g. ``chuyen="503"`` → ``"HP503"``
+    * ``loai="UD"``  → ``"UD{chuyen}"``    e.g. ``chuyen="501"`` → ``"UD501"``
+    * other          → ``chuyen`` (bare number as last resort)
+    """
+    loai_upper = str(loai or "").strip().upper()
+    chuyen_str = str(chuyen or "").strip()
+    if not chuyen_str:
+        return ""
+    if loai_upper == "UD+":
+        return f"UDP{chuyen_str}"
+    if loai_upper == "HP":
+        return f"HP{chuyen_str}"
+    if loai_upper == "UD":
+        return f"UD{chuyen_str}"
+    return chuyen_str
+
+
 def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -> bool:
     """Return True when every archive matches every group's chuyen AND all archives
     have distinct start dates.
@@ -5214,6 +5242,106 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )
                 except pyodbc.Error:
                     pass
+            # Per-group token fallback — triggered when all standard searches found
+            # no archives but the entry has explicit production-line groups defined.
+            # DM2000 may create ONE archive per grade with its own specific bz
+            # (e.g. bz="LR6 UDP501") rather than the composite remark the caller
+            # configured (e.g. "LR6 UDP501 HP503").  Those per-grade archives are
+            # invisible to bz-exact / bz-LIKE / cdid / archname queries that use
+            # the full composite string.  We therefore search each group's token
+            # individually (UDP501, HP503) and process each matched archive against
+            # the group whose token was used to find it.
+            _dm2k_per_grp_pairs: list[tuple[dict, Any]] = []  # (arch_row, group)
+            if not _arch_rows and entry.groups:
+                for _pgt_grp in entry.groups:
+                    _pgt_token = _group_to_bz_token(_pgt_grp.loai, _pgt_grp.chuyen)
+                    if not _pgt_token:
+                        continue
+                    _pgt_esc = _pgt_token.replace("%", "[%]").replace("_", "[_]")
+                    _pgt_rows: list[dict] = []
+                    try:
+                        _pgt_rows = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_pgt_esc}%",)
+                        )
+                    except pyodbc.Error:
+                        pass
+                    for _pgt_row in _pgt_rows:
+                        _dm2k_per_grp_pairs.append((_pgt_row, _pgt_grp))
+            if _dm2k_per_grp_pairs:
+                _dm2k_pgm = entry.model.strip().upper()
+                _dm2k_pgm_no_chuyen = {"LR61", "9V", "6LR61"}
+                for _pgt_a, _pgt_grp in _dm2k_per_grp_pairs:
+                    _pgt_resolved = (
+                        str(_dm2000_get_value(_pgt_a, "cdid", "archname") or _dm2k_arch).strip()
+                        or _dm2k_arch
+                    )
+                    _pgt_fdfs_raw = str(_dm2000_get_value(_pgt_a, "fdfs") or "").strip()
+                    _pgt_load_res = str(_dm2000_get_value(
+                        _pgt_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                    ) or "").strip()
+                    _pgt_ep_raw = _dm2000_get_value(
+                        _pgt_a,
+                        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                    )
+                    _pgt_ep_str = str(_pgt_ep_raw or "").strip()
+                    _pgt_fdfs = _build_dm2000_condition_label(
+                        _pgt_fdfs_raw, _pgt_load_res, _pgt_ep_str, _dm2k_arch,
+                    )
+                    _pgt_startdate = _dm2000_get_value(_pgt_a, "startdate", "fdrq")
+                    _pgt_fdrq = _to_date(_pgt_startdate) if _pgt_startdate else ""
+                    if entry.special_type in _SPECIAL_TYPE_LABEL:
+                        _pgt_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                    elif _pgt_fdrq:
+                        _pgt_row_label = _pgt_fdrq
+                    elif entry.report_date:
+                        _pgt_row_label = _to_date(entry.report_date) or entry.report_date
+                    else:
+                        _pgt_row_label = _dm2k_arch
+                    _pgt_all_batys = _get_batys_for_archive(_pgt_resolved)
+                    # Determine tray assignment from the archive's own bz remark:
+                    # per-grade archives (single group in bz) → use ALL batteries;
+                    # composite archives (multiple groups in bz) → positional split.
+                    _pgt_a_bz_raw = str(_dm2000_get_value(
+                        _pgt_a, "remarks", "remark", "bz", "note", "memo", "bzh",
+                    ) or "").strip()
+                    _pgt_a_bz_groups = _parse_bz_groups(_pgt_a_bz_raw)
+                    if _pgt_grp.trays:
+                        _pgt_batys = [b for b in _pgt_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                    elif len(_pgt_a_bz_groups) <= 1:
+                        # Per-grade archive: the archive covers exactly this one group.
+                        _pgt_batys = _pgt_all_batys
+                    else:
+                        # Composite archive: determine which group index this is.
+                        _pgt_bz_sorted = sorted(
+                            _pgt_a_bz_groups,
+                            key=lambda g: (int(g["chuyen"]) if str(g["chuyen"]).isdigit() else 0, g["chuyen"]),
+                        )
+                        _pgt_g_idx = next(
+                            (i for i, bg in enumerate(_pgt_bz_sorted)
+                             if str(bg.get("chuyen") or "") == str(_pgt_grp.chuyen or "").strip()),
+                            0,
+                        )
+                        _pgt_auto = _DMP_TRAY_ASSIGNMENT.get(len(_pgt_a_bz_groups), [_pgt_all_batys])
+                        _pgt_batys = (
+                            _pgt_auto[_pgt_g_idx] if _pgt_g_idx < len(_pgt_auto) else _pgt_all_batys
+                        )
+                    if not _pgt_batys:
+                        continue
+                    _pgt_tav = _get_tav_for_batteries(_pgt_resolved, _pgt_batys)
+                    _pgt_perf = _compute_perf_values(_pgt_ep_str, _pgt_tav, _pgt_batys)
+                    _pgt_perf["hfsj_unit"] = "hour"
+                    _pgt_sheet = (
+                        entry.model.strip()
+                        if _dm2k_pgm in _dm2k_pgm_no_chuyen
+                        else f"{entry.model.strip()} {str(_pgt_grp.chuyen or '').strip()}"
+                    )
+                    _pgt_fdfs_label = _pgt_fdfs or _pgt_grp.loai
+                    groups.setdefault(_pgt_sheet, {}).setdefault(
+                        (_pgt_row_label, _pgt_grp.loai), {}
+                    )[_pgt_fdfs_label] = _pgt_perf
+                continue  # per-group archives processed; skip DMP path
             if not _arch_rows:
                 if skip_not_found:
                     continue
@@ -5644,6 +5772,95 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         )
                     except pyodbc.Error:
                         pass
+                # Per-group token fallback for _fb_ path — same logic as in the
+                # dm2000_archname path above.  When the composite remark text finds no
+                # archives, search each group's individual token (UDP501, HP503, …).
+                _fb_per_grp_pairs: list[tuple[dict, Any]] = []
+                if not _fb_arch_rows and entry.groups:
+                    for _fbpgt_grp in entry.groups:
+                        _fbpgt_token = _group_to_bz_token(_fbpgt_grp.loai, _fbpgt_grp.chuyen)
+                        if not _fbpgt_token:
+                            continue
+                        _fbpgt_esc = _fbpgt_token.replace("%", "[%]").replace("_", "[_]")
+                        _fbpgt_rows: list[dict] = []
+                        try:
+                            _fbpgt_rows = _read_dm2000_ls(
+                                "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fbpgt_esc}%",)
+                            )
+                        except pyodbc.Error:
+                            pass
+                        for _fbpgt_row in _fbpgt_rows:
+                            _fb_per_grp_pairs.append((_fbpgt_row, _fbpgt_grp))
+                if _fb_per_grp_pairs:
+                    _fb_pgm = entry.model.strip().upper()
+                    _fb_pgm_no_chuyen = {"LR61", "9V", "6LR61"}
+                    for _fbpgt_a, _fbpgt_grp in _fb_per_grp_pairs:
+                        _fbpgt_resolved = (
+                            str(_dm2000_get_value(_fbpgt_a, "cdid", "archname") or _fb_remark).strip()
+                            or _fb_remark
+                        )
+                        _fbpgt_fdfs_raw = str(_dm2000_get_value(_fbpgt_a, "fdfs") or "").strip()
+                        _fbpgt_load_res = str(_dm2000_get_value(
+                            _fbpgt_a, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                        ) or "").strip()
+                        _fbpgt_ep_raw = _dm2000_get_value(
+                            _fbpgt_a,
+                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                        )
+                        _fbpgt_ep_str = str(_fbpgt_ep_raw or "").strip()
+                        _fbpgt_fdfs = _build_dm2000_condition_label(
+                            _fbpgt_fdfs_raw, _fbpgt_load_res, _fbpgt_ep_str, _fb_remark,
+                        )
+                        _fbpgt_startdate = _dm2000_get_value(_fbpgt_a, "startdate", "fdrq")
+                        _fbpgt_fdrq = _to_date(_fbpgt_startdate) if _fbpgt_startdate else ""
+                        if entry.special_type in _SPECIAL_TYPE_LABEL:
+                            _fbpgt_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                        elif _fbpgt_fdrq:
+                            _fbpgt_row_label = _fbpgt_fdrq
+                        elif entry.report_date:
+                            _fbpgt_row_label = _to_date(entry.report_date) or entry.report_date
+                        else:
+                            _fbpgt_row_label = _fb_remark
+                        _fbpgt_all_batys = _get_batys_for_archive(_fbpgt_resolved)
+                        _fbpgt_a_bz_raw = str(_dm2000_get_value(
+                            _fbpgt_a, "remarks", "remark", "bz", "note", "memo", "bzh",
+                        ) or "").strip()
+                        _fbpgt_a_bz_groups = _parse_bz_groups(_fbpgt_a_bz_raw)
+                        if _fbpgt_grp.trays:
+                            _fbpgt_batys = [b for b in _fbpgt_grp.trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                        elif len(_fbpgt_a_bz_groups) <= 1:
+                            _fbpgt_batys = _fbpgt_all_batys
+                        else:
+                            _fbpgt_bz_sorted = sorted(
+                                _fbpgt_a_bz_groups,
+                                key=lambda g: (int(g["chuyen"]) if str(g["chuyen"]).isdigit() else 0, g["chuyen"]),
+                            )
+                            _fbpgt_g_idx = next(
+                                (i for i, bg in enumerate(_fbpgt_bz_sorted)
+                                 if str(bg.get("chuyen") or "") == str(_fbpgt_grp.chuyen or "").strip()),
+                                0,
+                            )
+                            _fbpgt_auto = _DMP_TRAY_ASSIGNMENT.get(len(_fbpgt_a_bz_groups), [_fbpgt_all_batys])
+                            _fbpgt_batys = (
+                                _fbpgt_auto[_fbpgt_g_idx] if _fbpgt_g_idx < len(_fbpgt_auto) else _fbpgt_all_batys
+                            )
+                        if not _fbpgt_batys:
+                            continue
+                        _fbpgt_tav = _get_tav_for_batteries(_fbpgt_resolved, _fbpgt_batys)
+                        _fbpgt_perf = _compute_perf_values(_fbpgt_ep_str, _fbpgt_tav, _fbpgt_batys)
+                        _fbpgt_perf["hfsj_unit"] = "hour"
+                        _fbpgt_sheet = (
+                            entry.model.strip()
+                            if _fb_pgm in _fb_pgm_no_chuyen
+                            else f"{entry.model.strip()} {str(_fbpgt_grp.chuyen or '').strip()}"
+                        )
+                        _fbpgt_fdfs_label = _fbpgt_fdfs or _fbpgt_grp.loai
+                        groups.setdefault(_fbpgt_sheet, {}).setdefault(
+                            (_fbpgt_row_label, _fbpgt_grp.loai), {}
+                        )[_fbpgt_fdfs_label] = _fbpgt_perf
+                    continue  # per-group archives processed; skip rest of DMP path
                 if _fb_arch_rows:
                     # When multiple archives are found and at least one can be paired
                     # with a group by production-line (chuyen), process every archive

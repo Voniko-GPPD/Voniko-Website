@@ -4916,7 +4916,8 @@ def _parse_bz_groups(bz: str) -> list[dict]:
 
 
 def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -> bool:
-    """Return True when every archive matches every group's chuyen.
+    """Return True when every archive matches every group's chuyen AND all archives
+    have distinct start dates.
 
     This signals the "same-bz, different-dates" scenario: multiple archives
     share an identical remark (e.g. "LR6 UDP501 HP503") and therefore each
@@ -4924,13 +4925,38 @@ def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -
     processed with all groups independently (using *_parse_bz_groups* +
     *_DMP_TRAY_ASSIGNMENT* battery splits) rather than a 1-archive-per-group
     positional pairing.
+
+    When two or more archives share the same start date they represent
+    same-day per-grade runs (e.g. a UD+ archive on channels 1-4 and an HP
+    archive on channels 6-9, both with remark "LR6 UDP501 HP503").  In that
+    case the positional pairing path must be used so each archive is matched
+    to its own group and queried with its own actual batteries — not with
+    the fixed [1-4]/[6-9] splits that *_DMP_TRAY_ASSIGNMENT* prescribes
+    (which fail when DM2000 renumbers each archive's channels from 1).
     """
     if not arch_rows or not groups:
         return False
-    return all(
+    if not all(
         all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in groups)
         for a in arch_rows
-    )
+    ):
+        return False
+    # Require unique start dates.  When any two archives share the same date
+    # this is a same-day per-grade scenario, not different-dates same-bz.
+    dates: list[str] = []
+    for a in arch_rows:
+        raw_d = _dm2000_get_value(a, "startdate", "fdrq")
+        if raw_d is None:
+            d_str = ""
+        elif hasattr(raw_d, "strftime"):
+            d_str = raw_d.strftime("%Y-%m-%d")
+        else:
+            d_str = str(raw_d).strip()[:10]
+        dates.append(d_str)
+    non_empty = [d for d in dates if d]
+    if non_empty and len(non_empty) != len(set(non_empty)):
+        return False
+    return True
 
 
 def _pair_dm2000_archives_to_groups(

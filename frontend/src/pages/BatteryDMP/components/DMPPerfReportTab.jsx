@@ -252,14 +252,18 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
   const [batteryTypes, setBatteryTypes] = useState([]);
 
-  // Load admin-configured battery family names once
+  // Load admin-configured battery family names once.
+  // GET /api/battery/types returns { types: [{id, name, created_at}, ...] }
   useEffect(() => {
     getBatteryTypes()
       .then((res) => {
-        const names = (res.data?.types || res.data || []).map((t) => t.name).filter(Boolean);
+        const names = (res.data?.types || []).map((bt) => bt.name).filter(Boolean);
         if (names.length > 0) setBatteryTypes(names);
       })
-      .catch(() => {}); // silently fall back to built-in defaults
+      .catch((err) => {
+        // Non-critical: fall back to built-in defaults so the form remains usable
+        console.warn('DMPPerfReportTab: failed to load battery types', err?.message);
+      });
   }, []);
 
   const modelOptions = useMemo(

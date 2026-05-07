@@ -165,7 +165,9 @@ async function handleClientMessage(ws, msg) {
       const res = await axios.post(`${base}/connect`, payload || {});
       // Mark this WS connection as the station operator
       stationOperatorMap.set(stationId, ws);
-      broadcastToStation(stationId, {
+      // Only the requesting client needs the connect_result; all other clients are
+      // informed about the new operator via _broadcastStationState below.
+      sendToClient(ws, {
         type: 'connect_result',
         ok: true,
         message: res.data.message,
@@ -176,7 +178,7 @@ async function handleClientMessage(ws, msg) {
       startSseRelay(stationId, base);
     } catch (e) {
       const detail = e.response?.data?.detail || e.message;
-      broadcastToStation(stationId, {
+      sendToClient(ws, {
         type: 'connect_result',
         ok: false,
         message: detail,

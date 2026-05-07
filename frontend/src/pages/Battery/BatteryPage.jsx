@@ -487,6 +487,12 @@ export default function BatteryPage() {
         setStationOccupied(msg.occupied || false);
         if (msg.isOperator !== undefined) {
           setIsOperator(msg.isOperator);
+          // A non-operator client must not hold a "connected" state — doing so would
+          // leave the viewer in an inconsistent connected:true/isOperator:false state
+          // that can happen if a spurious connect_result was received.
+          if (!msg.isOperator) {
+            setConnected(false);
+          }
         }
         break;
 

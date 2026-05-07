@@ -4972,11 +4972,11 @@ def _bz_token_is_whole_word(bz: str, token: str) -> bool:
 
     Examples::
 
-        _bz_token_is_whole_word("LR6 UD501 HP503", "UD501")  # True
-        _bz_token_is_whole_word("LR6 UDP501 HP503", "UD501") # False — "UD501" only in "UDP501"
-        _bz_token_is_whole_word("LR6 UDP501 HP503", "UDP501")# True
-        _bz_token_is_whole_word("UD501", "UD501")             # True  — exact match
-        _bz_token_is_whole_word("LR6 UD501", "UD501")         # True  — token at end
+        _bz_token_is_whole_word("LR6 UD501 HP503", "UD501")   # True
+        _bz_token_is_whole_word("LR6 UDP501 HP503", "UD501")  # False — "UD501" only in "UDP501"
+        _bz_token_is_whole_word("LR6 UDP501 HP503", "UDP501") # True
+        _bz_token_is_whole_word("UD501", "UD501")              # True  — exact match
+        _bz_token_is_whole_word("LR6 UD501", "UD501")          # True  — token at end
     """
     if not bz or not token:
         return False

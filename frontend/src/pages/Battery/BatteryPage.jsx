@@ -326,6 +326,9 @@ export default function BatteryPage() {
   const retestCountMapRef = useRef({});
   // Starting battery ID for the current test run (1 for fresh, N+1 when resuming loaded history)
   const startIdRef = useRef(1);
+  // Flag: when handleLoadOrder sends a clear_session to reset the backend, ignore the resulting
+  // session_cleared broadcast so the snapshot records we just loaded are not wiped.
+  const ignoreClearedRef = useRef(false);
   const orderIdRef = useRef(orderId);
   useEffect(() => { orderIdRef.current = orderId; }, [orderId]);
   const batteryTypeRef = useRef(batteryType);
@@ -642,6 +645,13 @@ export default function BatteryPage() {
         break;
 
       case 'session_cleared':
+        if (ignoreClearedRef.current) {
+          // This clear was triggered by handleLoadOrder to reset the backend session so
+          // that start_id arithmetic is correct when resuming from a snapshot.
+          // Preserve all frontend state (records, charts) — just reset the flag.
+          ignoreClearedRef.current = false;
+          break;
+        }
         setChartData([]);
         setChartDataOCV([]);
         setChartDataCCV([]);
@@ -746,11 +756,6 @@ export default function BatteryPage() {
     if (running) {
       sendMsg({ action: 'stop' });
     } else {
-      // When starting a test, resume from the next battery after any already-loaded records.
-      // This lets users load a 190-battery history and continue from battery 191.
-      // Use Math.max so the value set by handleLoadOrder is not accidentally overridden
-      // when records state hasn't yet updated in this render cycle.
-      startIdRef.current = Math.max(startIdRef.current, records.length + 1);
       setSessionStarted(true);
       sendMsg({ action: 'start', payload: buildParams() });
     }
@@ -860,9 +865,15 @@ export default function BatteryPage() {
   const handleLoadOrder = useCallback((snapshot) => {
     const loadedRecords = snapshot.records || [];
     setRecords(loadedRecords);
-    // Update startIdRef immediately so that when the user clicks "Bắt đầu kiểm tra"
-    // the test continues from the correct ID, even before the React state re-renders.
+    // Update startIdRef so the test continues from the correct ID after the snapshot.
+    // start_id is sent to the backend as the absolute first ID of the new run; the backend
+    // computes each battery's ID as  start_id + n_records_in_session.  We must therefore
+    // reset the backend session (n_records → 0) so the arithmetic stays correct.
     startIdRef.current = loadedRecords.length + 1;
+    // Clear the backend session without wiping the snapshot we just loaded in the frontend.
+    // ignoreClearedRef tells the session_cleared handler to skip the setRecords([]) call.
+    ignoreClearedRef.current = true;
+    sendMsg({ action: 'clear_session' });
     setChartSeriesByBattery(snapshot.chartSeriesByBattery || {});
     setReadingsByBattery(snapshot.readingsByBattery || {});
     // Rebuild flat chart data from chartSeriesByBattery for legacy chart fallback
@@ -884,7 +895,7 @@ export default function BatteryPage() {
     loadedSnapshotSignatureRef.current = buildSnapshotSignature(snapshot);
     setLoadedSnapshotId(snapshot._snapshotId);
     notification.success({ message: `Đã tải lại đơn hàng: ${snapshot.orderId || '-'}` });
-  }, []);
+  }, [sendMsg]);
 
   // Delete a specific order snapshot from history
   const handleDeleteOrderSnapshot = useCallback((snapshotId) => {
@@ -2695,7 +2706,7 @@ export default function BatteryPage() {
               {t('batteryClearSession')}
             </Button>
 
-            {!running && records.length > 0 && !caliperPhase && (
+            {!running && records.length > 0 && !caliperPhase && isOperator && (
               <>
                 <Divider type="vertical" />
                 <Button

@@ -4980,9 +4980,10 @@ def _bz_token_is_whole_word(bz: str, token: str) -> bool:
     """
     if not bz or not token:
         return False
-    # Pad with spaces so every token is surrounded by spaces, allowing a single
-    # " {token} " membership test to cover leading, trailing and middle positions.
-    padded = f" {bz.strip().upper()} "
+    # Normalise all whitespace (tabs, multiple spaces, etc.) to single spaces
+    # before the word-boundary check so bz values with non-standard whitespace
+    # are handled correctly.
+    padded = f" {' '.join(bz.split()).upper()} "
     return f" {token.strip().upper()} " in padded
 
 
@@ -5368,17 +5369,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             # Per-grade archive: the archive covers only this one group
                             _eg_batys = _eg_all_batys
                         else:
-                            # Composite archive: positional split by sorted chuyen index
-                            _eg_bz_sorted = sorted(
-                                _eg_arch_bz_gs,
-                                key=lambda g: (
-                                    int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
-                                    g.get("chuyen", ""),
-                                ),
-                            )
+                            # Composite archive: positional split by remark order (the
+                            # order groups appear in the bz field matches the physical
+                            # tray layout, e.g. "LR6 UD502 HP503 UD501" → 502=trays1-3,
+                            # 503=trays4-6, 501=trays7-9).  Do NOT sort by chuyen number
+                            # as that produces wrong assignments when the remark order
+                            # differs from ascending chuyen order.
                             _eg_chuyen_str = str(_dm2k_eg["chuyen"] or "").strip()
                             _eg_g_idx = next(
-                                (i for i, bg in enumerate(_eg_bz_sorted)
+                                (i for i, bg in enumerate(_eg_arch_bz_gs)
                                  if str(bg.get("chuyen", "")) == _eg_chuyen_str),
                                 0,
                             )
@@ -5529,6 +5528,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
                 _dm2k_eff_groups
             )
+            # Build a chuyen→remark-position map from the archive bz field so
+            # that tray assignment follows the physical layout order expressed in
+            # the remark (e.g. "LR6 UD502 HP503 UD501" → 502=pos0, 503=pos1,
+            # 501=pos2) rather than ascending chuyen number order.
+            _dm2k_bz_pos: dict[str, int] = {
+                str(g["chuyen"]): i for i, g in enumerate(_dm2k_bz_groups)
+            }
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
                 _dm2k_n, [_dm2k_all_batys]
             )
@@ -5536,11 +5542,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
             model_upper = entry.model.strip().upper()
             no_chuyen_models = {"LR61", "9V", "6LR61"}
 
-            for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
+            for _dm2k_eff_grp in _dm2k_eff_groups:
                 _dm2k_grp_trays = _dm2k_eff_grp.get("trays") or []
                 if _dm2k_grp_trays:
                     _dm2k_batys = [b for b in _dm2k_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                 else:
+                    _dm2k_chuyen_key = str(_dm2k_eff_grp.get("chuyen") or "").strip()
+                    _dm2k_g_idx = _dm2k_bz_pos.get(_dm2k_chuyen_key, 0)
                     _dm2k_batys = (
                         _dm2k_auto_trays[_dm2k_g_idx]
                         if _dm2k_g_idx < len(_dm2k_auto_trays)
@@ -5794,16 +5802,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             elif len(_feg_arch_bz_gs) <= 1:
                                 _feg_batys = _feg_all_batys
                             else:
-                                _feg_bz_sorted = sorted(
-                                    _feg_arch_bz_gs,
-                                    key=lambda g: (
-                                        int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
-                                        g.get("chuyen", ""),
-                                    ),
-                                )
+                                # Composite archive: use remark order (bz field order),
+                                # not chuyen-sorted order, for positional tray assignment.
                                 _feg_chuyen_str = str(_fb_eg["chuyen"] or "").strip()
                                 _feg_g_idx = next(
-                                    (i for i, bg in enumerate(_feg_bz_sorted)
+                                    (i for i, bg in enumerate(_feg_arch_bz_gs)
                                      if str(bg.get("chuyen", "")) == _feg_chuyen_str),
                                     0,
                                 )
@@ -5917,14 +5920,22 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_eff_groups = _sort_eff_groups_for_tray_assignment(
                         _fb_eff_groups
                     )
+                    # Build chuyen→remark-position map from the archive bz field so
+                    # that tray assignment follows the physical layout expressed in the
+                    # bz remark, not ascending chuyen number order.
+                    _fb_bz_pos: dict[str, int] = {
+                        str(g["chuyen"]): i for i, g in enumerate(_fb_bz_groups)
+                    }
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}
-                    for _fb_g_idx, _fb_eff_grp in enumerate(_fb_eff_groups):
+                    for _fb_eff_grp in _fb_eff_groups:
                         _fb_grp_trays = _fb_eff_grp.get("trays") or []
                         if _fb_grp_trays:
                             _fb_batys = [b for b in _fb_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                         else:
+                            _fb_chuyen_key = str(_fb_eff_grp.get("chuyen") or "").strip()
+                            _fb_g_idx = _fb_bz_pos.get(_fb_chuyen_key, 0)
                             _fb_batys = (
                                 _fb_auto_trays[_fb_g_idx]
                                 if _fb_g_idx < len(_fb_auto_trays)

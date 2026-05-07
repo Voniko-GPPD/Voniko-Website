@@ -5204,7 +5204,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                     {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
                                     for g in _dm2k_a_bz_groups
                                 ]
-                                _dm2k_a_n = len(_dm2k_a_eff_groups)
                             _dm2k_a_eff_groups = _sort_eff_groups_for_tray_assignment(
                                 _dm2k_a_eff_groups, _dm2k_a_bz_groups
                             )
@@ -5383,7 +5382,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
                 _dm2k_eff_groups, _dm2k_bz_groups
             )
-            _dm2k_n = len(_dm2k_eff_groups)
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
                 _dm2k_n, [_dm2k_all_batys]
             )
@@ -5629,7 +5627,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                         {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
                                         for g in _fb_a_bz_groups
                                     ]
-                                    _fb_a_n = len(_fb_a_eff_groups)
                                 _fb_a_eff_groups = _sort_eff_groups_for_tray_assignment(
                                     _fb_a_eff_groups, _fb_a_bz_groups
                                 )
@@ -5779,7 +5776,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_eff_groups = _sort_eff_groups_for_tray_assignment(
                         _fb_eff_groups, _fb_bz_groups
                     )
-                    _fb_n = len(_fb_eff_groups)
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}

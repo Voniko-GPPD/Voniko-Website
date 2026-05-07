@@ -93,10 +93,15 @@ function _broadcastStationState(stationId) {
 async function _autoSaveSessionOnDisconnect(stationId, base, operatorToken) {
   try {
     // Always try to stop the test (idempotent — safe even if already stopped)
-    await axios.post(`${base}/stop`).catch(() => {});
+    await axios.post(`${base}/stop`).catch((e) => {
+      logger.warn('Battery auto-save: failed to stop test on operator disconnect', { stationId, error: e.message });
+    });
 
     // Fetch current session state from the Python service
-    const statusRes = await axios.get(`${base}/status`).catch(() => null);
+    const statusRes = await axios.get(`${base}/status`).catch((e) => {
+      logger.warn('Battery auto-save: failed to fetch status on operator disconnect', { stationId, error: e.message });
+      return null;
+    });
     if (!statusRes) return;
 
     const { records = [], order_id: orderId, date } = statusRes.data || {};

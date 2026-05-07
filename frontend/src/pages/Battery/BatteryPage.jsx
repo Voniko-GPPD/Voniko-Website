@@ -709,7 +709,9 @@ export default function BatteryPage() {
         // session to history. Refresh the local order-history list so any user can load it.
         getOrderHistory().then((res) => {
           setOrderHistory(dedupeOrderHistory(res.data.items || []));
-        }).catch(() => {});
+        }).catch((e) => {
+          console.error('Failed to refresh order history after session_auto_saved', e?.message);
+        });
         notification.info({ message: t('batteryAutoSavedToHistory') });
         break;
 

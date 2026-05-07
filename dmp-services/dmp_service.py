@@ -4626,38 +4626,36 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
 
-# Loai sort order for _sort_eff_groups_for_tray_assignment.
-# UD/UD+ always occupy the lower-numbered tray slots (1-4) and HP the
-# upper-numbered slots (6-9) in the standard DM2000 machine layout.
-_LOAI_TRAY_SORT_ORDER: dict[str, int] = {"UD": 0, "UD+": 0, "HP": 1}
-
-
 def _sort_eff_groups_for_tray_assignment(
     eff_groups: list[dict], bz_groups: list[dict]
 ) -> list[dict]:
-    """Sort eff_groups by loai type when no explicit ordering is available.
+    """Sort eff_groups by production-line (chuyen) number when no explicit ordering is available.
 
     When the archive remark (*bz_groups*) is empty and no group has explicit
     tray assignments, the positional *_DMP_TRAY_ASSIGNMENT* is the sole
     mechanism for deciding which physical battery slots each group reads.
-    If the user entered groups in the wrong order (e.g. HP before UD+) the
-    positional assignment swaps the batteries, causing HP data to appear in
-    the UD+ performance column and vice-versa.
 
-    This function corrects the order so that UD/UD+ grades always sort before
-    HP, regardless of how the groups were originally entered.  When
-    *bz_groups* is non-empty the archive remark already encodes the physical
-    layout, so the original order is preserved.
+    The correct sort key is the **chuyen (production-line) number**: lower
+    line numbers correspond to lower physical tray slots on the machine
+    (e.g. line 501 → trays 1-4, line 503 → trays 6-9).  Sorting by battery
+    grade (loai) instead would break cases where HP batteries occupy the
+    lower-numbered line (e.g. remark "HP501 UDP503"), swapping the tray
+    assignment and producing wrong results and uniform-rate values.
+
+    When *bz_groups* is non-empty the archive remark already encodes the
+    physical layout, so the original order is preserved.
     """
     if bz_groups or any(g.get("trays") for g in eff_groups):
         return eff_groups
-    return sorted(
-        eff_groups,
-        key=lambda g: (
-            _LOAI_TRAY_SORT_ORDER.get(str(g.get("loai") or "").upper(), 99),
-            str(g.get("chuyen") or ""),
-        ),
-    )
+
+    def _chuyen_sort_key(g: dict) -> tuple:
+        c = str(g.get("chuyen") or "")
+        try:
+            return (0, int(c), c)
+        except (ValueError, TypeError):
+            return (1, 0, c)
+
+    return sorted(eff_groups, key=_chuyen_sort_key)
 
 
 # Map special_type → row label for column-A matching in Excel template

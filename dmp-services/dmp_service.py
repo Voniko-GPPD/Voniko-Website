@@ -5291,6 +5291,22 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     for g in _dm2k_bz_groups
                 ]
                 _dm2k_n = len(_dm2k_eff_groups)
+            # Correct loai from the archive's bz field (matched by chuyen) so that
+            # entries whose groups_json was saved with an incorrect loai still
+            # display the right battery grade (e.g. bz "LR6 UDP501 HP503" →
+            # chuyen 501 → "UD+", chuyen 503 → "HP").
+            _dm2k_bz_loai_by_chuyen: dict[str, str] = {
+                str(g["chuyen"]): g["loai"]
+                for g in _dm2k_bz_groups
+                if g.get("chuyen")
+            }
+            if _dm2k_bz_loai_by_chuyen:
+                _dm2k_eff_groups = [
+                    {**eg, "loai": _dm2k_bz_loai_by_chuyen.get(
+                        str(eg.get("chuyen") or "").strip(), eg["loai"]
+                    )}
+                    for eg in _dm2k_eff_groups
+                ]
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
                 _dm2k_n, [_dm2k_all_batys]
             )
@@ -5749,6 +5765,17 @@ def _compute_dmp_perf_groups(  # noqa: C901
         n_groups = len(entry.groups)
         auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
 
+        # Re-derive authoritative loai by chuyen from raw_remark so that stored
+        # entries with an incorrect loai in groups_json still display the correct
+        # battery grade.  Example: raw_remark "LR6 UDP501 HP503" yields the
+        # mapping {"501": "UD+", "503": "HP"}.  If raw_remark is absent or a
+        # chuyen has no match, the stored grp.loai is used as fallback.
+        _remark_loai_by_chuyen: dict[str, str] = {}
+        if entry.raw_remark:
+            for _rg in _parse_bz_groups(entry.raw_remark):
+                if _rg.get("chuyen"):
+                    _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
+
         for g_idx, grp in enumerate(entry.groups):
             trays = grp.trays if grp.trays else (auto_trays[g_idx] if g_idx < len(auto_trays) else [])
             if not trays:
@@ -5768,10 +5795,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
             else:
                 sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
 
-            # fdfs label for column matching
-            fdfs_label = fdfs if fdfs else grp.loai
+            # Use loai from raw_remark (re-parsed) when available so that entries
+            # whose groups_json was saved with an incorrect loai are displayed with
+            # the correct battery grade derived from the remark token (UDP→UD+,
+            # HP→HP, UD→UD) matched by chuyen.
+            effective_loai = _remark_loai_by_chuyen.get(grp.chuyen.strip(), grp.loai)
 
-            row_key = (row_label, grp.loai)
+            # fdfs label for column matching
+            fdfs_label = fdfs if fdfs else effective_loai
+
+            row_key = (row_label, effective_loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
 
     return groups

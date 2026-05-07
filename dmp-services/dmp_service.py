@@ -5548,7 +5548,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _dm2k_batys = [b for b in _dm2k_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                 else:
                     _dm2k_chuyen_key = str(_dm2k_eff_grp.get("chuyen") or "").strip()
-                    _dm2k_g_idx = _dm2k_bz_pos.get(_dm2k_chuyen_key, 0)
+                    _dm2k_g_idx = _dm2k_bz_pos.get(_dm2k_chuyen_key, None)
+                    if _dm2k_g_idx is None:
+                        logger.warning(
+                            "_compute_dmp_perf_groups: chuyen %r not found in archive bz "
+                            "groups %r; defaulting to position 0 for tray assignment",
+                            _dm2k_chuyen_key, _dm2k_bz_groups,
+                        )
+                        _dm2k_g_idx = 0
                     _dm2k_batys = (
                         _dm2k_auto_trays[_dm2k_g_idx]
                         if _dm2k_g_idx < len(_dm2k_auto_trays)
@@ -5935,7 +5942,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _fb_batys = [b for b in _fb_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
                         else:
                             _fb_chuyen_key = str(_fb_eff_grp.get("chuyen") or "").strip()
-                            _fb_g_idx = _fb_bz_pos.get(_fb_chuyen_key, 0)
+                            _fb_g_idx = _fb_bz_pos.get(_fb_chuyen_key, None)
+                            if _fb_g_idx is None:
+                                logger.warning(
+                                    "_compute_dmp_perf_groups: chuyen %r not found in archive bz "
+                                    "groups %r; defaulting to position 0 for tray assignment",
+                                    _fb_chuyen_key, _fb_bz_groups,
+                                )
+                                _fb_g_idx = 0
                             _fb_batys = (
                                 _fb_auto_trays[_fb_g_idx]
                                 if _fb_g_idx < len(_fb_auto_trays)

@@ -4626,6 +4626,40 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
 
+# Loai sort order for _sort_eff_groups_for_tray_assignment.
+# UD/UD+ always occupy the lower-numbered tray slots (1-4) and HP the
+# upper-numbered slots (6-9) in the standard DM2000 machine layout.
+_LOAI_TRAY_SORT_ORDER: dict[str, int] = {"UD": 0, "UD+": 0, "HP": 1}
+
+
+def _sort_eff_groups_for_tray_assignment(
+    eff_groups: list[dict], bz_groups: list[dict]
+) -> list[dict]:
+    """Sort eff_groups by loai type when no explicit ordering is available.
+
+    When the archive remark (*bz_groups*) is empty and no group has explicit
+    tray assignments, the positional *_DMP_TRAY_ASSIGNMENT* is the sole
+    mechanism for deciding which physical battery slots each group reads.
+    If the user entered groups in the wrong order (e.g. HP before UD+) the
+    positional assignment swaps the batteries, causing HP data to appear in
+    the UD+ performance column and vice-versa.
+
+    This function corrects the order so that UD/UD+ grades always sort before
+    HP, regardless of how the groups were originally entered.  When
+    *bz_groups* is non-empty the archive remark already encodes the physical
+    layout, so the original order is preserved.
+    """
+    if bz_groups or any(g.get("trays") for g in eff_groups):
+        return eff_groups
+    return sorted(
+        eff_groups,
+        key=lambda g: (
+            _LOAI_TRAY_SORT_ORDER.get(str(g.get("loai") or "").upper(), 99),
+            str(g.get("chuyen") or ""),
+        ),
+    )
+
+
 # Map special_type → row label for column-A matching in Excel template
 _SPECIAL_TYPE_LABEL: dict[str, str] = {
     "6020": "6020",
@@ -5170,7 +5204,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                     {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
                                     for g in _dm2k_a_bz_groups
                                 ]
-                                _dm2k_a_n = len(_dm2k_a_eff_groups)
+                            _dm2k_a_eff_groups = _sort_eff_groups_for_tray_assignment(
+                                _dm2k_a_eff_groups, _dm2k_a_bz_groups
+                            )
+                            _dm2k_a_n = len(_dm2k_a_eff_groups)
                             _dm2k_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
                                 _dm2k_a_n, [_dm2k_a_all_batys]
                             )
@@ -5337,6 +5374,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )}
                     for eg in _dm2k_eff_groups
                 ]
+            # Sort groups so UD/UD+ comes before HP when no explicit ordering
+            # is available from the archive remark.  This prevents the
+            # positional tray assignment from assigning HP batteries to the
+            # UD+ group (and vice-versa) when groups were stored in the wrong
+            # order (e.g. HP first because the remark said "HP503 UDP501").
+            _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
+                _dm2k_eff_groups, _dm2k_bz_groups
+            )
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
                 _dm2k_n, [_dm2k_all_batys]
             )
@@ -5582,7 +5627,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                         {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
                                         for g in _fb_a_bz_groups
                                     ]
-                                    _fb_a_n = len(_fb_a_eff_groups)
+                                _fb_a_eff_groups = _sort_eff_groups_for_tray_assignment(
+                                    _fb_a_eff_groups, _fb_a_bz_groups
+                                )
+                                _fb_a_n = len(_fb_a_eff_groups)
                                 _fb_a_auto_trays = _DMP_TRAY_ASSIGNMENT.get(
                                     _fb_a_n, [_fb_a_all_batys]
                                 )
@@ -5725,6 +5773,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             for g in _fb_bz_groups
                         ]
                         _fb_n = len(_fb_eff_groups)
+                    _fb_eff_groups = _sort_eff_groups_for_tray_assignment(
+                        _fb_eff_groups, _fb_bz_groups
+                    )
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}
@@ -5791,23 +5842,41 @@ def _compute_dmp_perf_groups(  # noqa: C901
         else:
             row_label = fdrq or entry.batch_id
 
-        # Auto-assign trays if not specified
-        n_groups = len(entry.groups)
-        auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
-
         # Re-derive authoritative loai by chuyen from raw_remark so that stored
         # entries with an incorrect loai in groups_json still display the correct
         # battery grade.  Example: raw_remark "LR6 UDP501 HP503" yields the
         # mapping {"501": "UD+", "503": "HP"}.  If raw_remark is absent or a
         # chuyen has no match, the stored grp.loai is used as fallback.
         _remark_loai_by_chuyen: dict[str, str] = {}
+        _remark_bz_groups: list[dict] = []
         if entry.raw_remark:
-            for _rg in _parse_bz_groups(entry.raw_remark):
+            _remark_bz_groups = _parse_bz_groups(entry.raw_remark)
+            for _rg in _remark_bz_groups:
                 if _rg.get("chuyen"):
                     _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
 
-        for g_idx, grp in enumerate(entry.groups):
-            trays = grp.trays if grp.trays else (auto_trays[g_idx] if g_idx < len(auto_trays) else [])
+        # Build a sortable eff_groups list for the DMP path so that UD/UD+
+        # always precedes HP in the positional tray assignment (same ordering
+        # correction applied to the DM2000 paths above).
+        _dmp_eff_groups = [
+            {
+                "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
+                "chuyen": grp.chuyen,
+                "trays": list(grp.trays or []),
+                "_orig_idx": i,
+            }
+            for i, grp in enumerate(entry.groups)
+        ]
+        _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(
+            _dmp_eff_groups, _remark_bz_groups
+        )
+        n_groups = len(_dmp_eff_groups)
+        auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+
+        for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
+            orig_grp = entry.groups[_dmp_grp["_orig_idx"]]
+            trays = (orig_grp.trays if orig_grp.trays else
+                     (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
             if not trays:
                 continue
 
@@ -5823,13 +5892,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
             if model_upper in no_chuyen_models:
                 sheet_key = entry.model.strip()
             else:
-                sheet_key = f"{entry.model.strip()} {grp.chuyen.strip()}"
+                sheet_key = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
 
             # Use loai from raw_remark (re-parsed) when available so that entries
             # whose groups_json was saved with an incorrect loai are displayed with
             # the correct battery grade derived from the remark token (UDP→UD+,
             # HP→HP, UD→UD) matched by chuyen.
-            effective_loai = _remark_loai_by_chuyen.get(grp.chuyen.strip(), grp.loai)
+            effective_loai = _dmp_grp["loai"]
 
             # fdfs label for column matching
             fdfs_label = fdfs if fdfs else effective_loai

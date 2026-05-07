@@ -5867,8 +5867,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             for i, grp in enumerate(entry.groups)
         ]
+        # Pass an empty bz_groups so that the sort is never suppressed for DMP
+        # entries.  For DM2000 archives the BZ field encodes the physical tray
+        # layout, so the order must be preserved.  For DMP entries, raw_remark
+        # is descriptive metadata only — the tray assignment is always positional
+        # (_DMP_TRAY_ASSIGNMENT), so UD/UD+ must always sort before HP regardless
+        # of the token order in raw_remark (e.g. "HP503 UDP501" must not cause
+        # HP to receive the lower tray slots).
         _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(
-            _dmp_eff_groups, _remark_bz_groups
+            _dmp_eff_groups, []
         )
         n_groups = len(_dmp_eff_groups)
         auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])

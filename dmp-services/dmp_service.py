@@ -5853,9 +5853,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _rg.get("chuyen"):
                     _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
 
-        # Build a sortable eff_groups list for the DMP path so that UD/UD+
-        # always precedes HP in the positional tray assignment (same ordering
-        # correction applied to the DM2000 paths above).
+        # Build a sortable eff_groups list for the DMP path and sort by
+        # production-line (chuyen) number so that the positional tray
+        # assignment always maps the lower-numbered line to the lower physical
+        # tray slots — regardless of battery grade or entry order.
         _dmp_eff_groups = [
             {
                 "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
@@ -5865,13 +5866,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             for i, grp in enumerate(entry.groups)
         ]
-        # Pass an empty bz_groups so that the sort is never suppressed for DMP
-        # entries.  For DM2000 archives the BZ field encodes the physical tray
-        # layout, so the order must be preserved.  For DMP entries, raw_remark
-        # is descriptive metadata only — the tray assignment is always positional
-        # (_DMP_TRAY_ASSIGNMENT), so UD/UD+ must always sort before HP regardless
-        # of the token order in raw_remark (e.g. "HP503 UDP501" must not cause
-        # HP to receive the lower tray slots).
+        # Pass [] so the sort is always applied (bz_groups non-empty would
+        # suppress it, but raw_remark is descriptive metadata, not a physical
+        # tray-layout encoding like a DM2000 archive BZ field).
         _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(
             _dmp_eff_groups, []
         )

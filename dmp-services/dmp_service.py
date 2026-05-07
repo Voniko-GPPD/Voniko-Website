@@ -5302,7 +5302,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             if _dm2k_bz_loai_by_chuyen:
                 _dm2k_eff_groups = [
-                    {**eg, "loai": _dm2k_bz_loai_by_chuyen.get(str(eg.get("chuyen") or "").strip(), eg["loai"])}
+                    {**eg, "loai": _dm2k_bz_loai_by_chuyen.get(
+                        str(eg.get("chuyen") or "").strip(), eg["loai"]
+                    )}
                     for eg in _dm2k_eff_groups
                 ]
             _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(

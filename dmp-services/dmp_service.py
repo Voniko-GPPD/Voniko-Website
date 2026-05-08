@@ -789,6 +789,8 @@ class PerfReportEntry(BaseModel):
     battery_type: str  # e.g. "HP", "UD", "UD+"
     batys: list[int] = Field(default=[])  # empty = use all detected batteries
     sheet_name: str = ""  # auto-derived from dcxh+serialno when empty
+    override_serial_no: Optional[str] = None  # override serialno for sheet-name derivation
+    override_remarks: Optional[str] = None  # override remarks (informational)
 
 
 class PerfReportRequest(BaseModel):
@@ -3004,7 +3006,7 @@ def get_dm2000_archives(
             kw = keyword.lower()
             if not any(
                 kw in str(row.get(field) or "").lower()
-                for field in ("dcxh", "name", "manufacturer", "serialno", "archname", "remarks")
+                for field in ("dcxh", "name", "manufacturer", "serialno", "archname", "remarks", "dis_condition", "fdfs")
             ):
                 continue
         filtered.append(row)
@@ -4524,7 +4526,8 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         )
         fdfs_raw = str(_dm2000_get_value(archive, "fdfs") or "").strip()
         dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
-        serialno = str(_dm2000_get_value(archive, "serialno", "dcph") or "").strip()
+        serialno_override = entry.override_serial_no if (entry.override_serial_no is not None and entry.override_serial_no != "") else None
+        serialno = str(serialno_override if serialno_override is not None else (_dm2000_get_value(archive, "serialno", "dcph") or "")).strip()
         trademark = str(_dm2000_get_value(archive, "trademark", "shangbiao", "sb") or "").strip()
         manufacturer_db = str(_dm2000_get_value(archive, "manufacturer", "changshang", "cs") or "").strip()
         load_resistance = str(_dm2000_get_value(

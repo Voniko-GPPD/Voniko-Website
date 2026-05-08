@@ -1132,7 +1132,11 @@ _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
 
 # ─── Condition frequency classification ──────────────────────────────────────
 # Maps each discharge condition to its measurement frequency category.
-# Used for documentation and future API filtering.
+# This dictionary is documentation-only; it is not wired to runtime routing
+# (the Excel template's section headers define the visual grouping, and the
+# backend matches conditions to columns purely by label).  It is exposed here
+# so that future API filtering (e.g. "show only Everyday conditions") can use
+# a single authoritative source rather than duplicating the lists elsewhere.
 _COND_FREQUENCY: dict[str, dict[str, str]] = {
     "LR6": {
         "10ohm 24h/d-0.9V":                              "everyday",
@@ -1187,6 +1191,8 @@ def _remark_has_quarter_marker(remark: str) -> bool:
     Examples that return True:  ``"LR03 HP701 UD702 Q"``,  ``"LR6 UD501 Q"``
     Examples that return False: ``"LR6 QC501"``,  ``"HP502 quantity"``
     """
+    if not remark:
+        return False
     return bool(re.search(r'(?<![A-Za-z0-9])Q(?![A-Za-z0-9])', remark, re.IGNORECASE))
 
 
@@ -1198,6 +1204,8 @@ def _remark_has_15day_marker(remark: str) -> bool:
     Examples that return True:  ``"LR6 UD501 HP502 15"``,  ``"15 LR6 HP501"``
     Examples that return False: ``"HP501 150ohm"``,  ``"LR6 HP501-15"``
     """
+    if not remark:
+        return False
     return bool(re.search(r'(?<![0-9A-Za-z])15(?![0-9A-Za-z])', remark))
 
 

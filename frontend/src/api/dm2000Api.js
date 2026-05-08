@@ -1,6 +1,6 @@
 const BASE = '/api/dmp/dm2000';
 
-async function apiFetch(url, options = {}) {
+async function apiFetch(url, options = {}, _retried = false) {
   const token = localStorage.getItem('accessToken');
   const res = await fetch(url, {
     headers: {
@@ -9,6 +9,35 @@ async function apiFetch(url, options = {}) {
     },
     ...options,
   });
+
+  // On 401, attempt a one-time token refresh then retry the original request.
+  // This mirrors the axios interceptor in api/index.js so that dm2000 saves
+  // don't fail when the access token has expired.
+  if (res.status === 401 && !_retried) {
+    const refreshToken = localStorage.getItem('refreshToken');
+    if (refreshToken) {
+      try {
+        const refreshRes = await fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken }),
+        });
+        if (refreshRes.ok) {
+          const data = await refreshRes.json();
+          localStorage.setItem('accessToken', data.accessToken);
+          if (data.refreshToken) localStorage.setItem('refreshToken', data.refreshToken);
+          return apiFetch(url, options, true);
+        }
+      } catch (_) {
+        // refresh failed — fall through to clear tokens and redirect
+      }
+    }
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    window.location.href = '/login';
+    throw new Error('Session expired');
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
     throw new Error(err.message || err.error || err.detail || 'Request failed');

@@ -3405,14 +3405,36 @@ def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
                 sql_cdid = f"UPDATE ls_jb_cs SET {', '.join(set_parts)} WHERE cdid = ?"
                 try:
                     cursor.execute(sql_cdid, params_with_id)
-                    rows_updated = max(0, cursor.rowcount)
+                    rc = cursor.rowcount
+                    # rc == -1 means the Access ODBC driver does not report the
+                    # number of affected rows.  The UPDATE executed without error
+                    # (autocommit=True), so treat -1 as "likely succeeded" rather
+                    # than falling through to an incorrect archname fallback.
+                    rows_updated = rc if rc >= 0 else 1
+                    # rc == 0 with no error can mean the string archname didn't
+                    # match a numeric cdid column.  Retry with an explicit int so
+                    # Access performs a numeric comparison.
+                    if rows_updated == 0 and archname.isdigit():
+                        try:
+                            params_with_int = tuple(params_list) + (int(archname),)
+                            cursor = conn.cursor()
+                            cursor.execute(sql_cdid, params_with_int)
+                            rc2 = cursor.rowcount
+                            rows_updated = rc2 if rc2 >= 0 else 1
+                        except pyodbc.Error:
+                            pass  # fall through to archname fallback below
                 except pyodbc.Error as inner_exc:
                     err_str = str(inner_exc)
                     if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                        # Access ODBC driver doesn't support parameterised queries;
+                        # inline params directly.  For digit-only archnames pass as
+                        # int so the WHERE clause works for numeric cdid columns.
+                        archname_inline: int | str = int(archname) if archname.isdigit() else archname
                         try:
                             cursor = conn.cursor()
-                            cursor.execute(_inline_params(sql_cdid, params_with_id))
-                            rows_updated = max(0, cursor.rowcount)
+                            cursor.execute(_inline_params(sql_cdid, tuple(params_list) + (archname_inline,)))
+                            rc = cursor.rowcount
+                            rows_updated = rc if rc >= 0 else 1
                         except (pyodbc.Error, ValueError) as fallback_exc:
                             logger.warning(
                                 "update_dm2000_archive_meta: inline-params fallback failed for %s: %s",

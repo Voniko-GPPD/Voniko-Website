@@ -3600,7 +3600,7 @@ def update_dmp_batch_meta(payload: DMPUpdateBatchMetaRequest):
                         err_str = str(exc)
                         if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
                             try:
-                                id_inline = int(batch_id) if batch_id.isdigit() else batch_id
+                                id_inline: int | str = int(batch_id) if batch_id.isdigit() else batch_id
                                 cursor = conn.cursor()
                                 cursor.execute(_inline_params(
                                     "UPDATE para_singl SET dcph = ? WHERE sid = ?",

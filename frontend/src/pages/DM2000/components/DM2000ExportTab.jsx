@@ -312,6 +312,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
         </Space>
       </Card>
 
+      {/* Archive Info - hidden, not needed for now
       <Card size="small" title={t('dm2000ArchiveInfo')}>
         <Row gutter={[16, 8]}>
           <Col xs={24} sm={8}>
@@ -383,6 +384,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
           </Col>
         </Row>
       </Card>
+      */}
 
       <Card size="small" title={t('dm2000ReportPreviewTitle')}>
         {previewBatys.length === 0 ? (

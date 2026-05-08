@@ -1,8 +1,8 @@
-import React, { useRef, useState } from 'react';
-import { Alert, Button, Col, DatePicker, Form, Input, Modal, Row, Space, Table, Tooltip, Typography } from 'antd';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, AutoComplete, Button, Col, DatePicker, Form, Input, Modal, Row, Space, Table, Tooltip, Typography } from 'antd';
 import { EditOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { fetchDM2000Archives, refreshDM2000Archives, saveDM2000ArchiveOverride } from '../../../api/dm2000Api';
+import { fetchDM2000Archives, fetchDM2000DisConditionOptions, refreshDM2000Archives, saveDM2000ArchiveOverride } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const dateFormat = 'YYYY-MM-DD';
@@ -20,7 +20,17 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   const [reloading, setReloading] = useState(false);
   const [editingArchive, setEditingArchive] = useState(null);
   const [editSaving, setEditSaving] = useState(false);
+  const [disConditionOptions, setDisConditionOptions] = useState([]);
   const lastFiltersRef = useRef({});
+
+  useEffect(() => {
+    if (!stationId) return;
+    let active = true;
+    fetchDM2000DisConditionOptions(stationId)
+      .then((opts) => { if (active) setDisConditionOptions(opts); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [stationId]);
 
   const onSearch = async (filters) => {
     if (!stationId) return;
@@ -31,6 +41,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       type_filter: values.type_filter?.trim() || undefined,
       name_filter: values.name_filter?.trim() || undefined,
       mfr_filter: values.mfr_filter?.trim() || undefined,
+      dis_condition_filter: values.dis_condition_filter?.trim() || undefined,
       keyword: values.keyword?.trim() || undefined,
     };
     lastFiltersRef.current = values;
@@ -201,6 +212,18 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
           <Col xs={24} sm={12} md={8} lg={6} xl={4}>
             <Form.Item name="mfr_filter" label={t('dm2000MfrFilter')} style={{ marginBottom: 8 }}>
               <Input allowClear />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={6} xl={8}>
+            <Form.Item name="dis_condition_filter" label={t('dm2000DisConditionFilter')} style={{ marginBottom: 8 }}>
+              <AutoComplete
+                allowClear
+                options={disConditionOptions.map((v) => ({ value: v }))}
+                filterOption={(input, option) =>
+                  option.value.toLowerCase().includes(input.toLowerCase())
+                }
+                placeholder={t('dm2000DisCondition')}
+              />
             </Form.Item>
           </Col>
           <Col xs={24} sm={12} md={8} lg={6} xl={8}>

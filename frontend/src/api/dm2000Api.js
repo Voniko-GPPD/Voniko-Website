@@ -66,10 +66,18 @@ export async function fetchDM2000Archives(stationId, filters = {}, { signal } = 
   if (filters.name_filter) params.set('name_filter', filters.name_filter);
   if (filters.mfr_filter) params.set('mfr_filter', filters.mfr_filter);
   if (filters.serial_filter) params.set('serial_filter', filters.serial_filter);
+  if (filters.dis_condition_filter) params.set('dis_condition_filter', filters.dis_condition_filter);
   if (filters.keyword) params.set('keyword', filters.keyword);
   const res = await apiFetch(`${BASE}/archives?${params.toString()}`, { signal });
   const data = await res.json();
   return { archives: data.archives || [], total: data.total || 0 };
+}
+
+export async function fetchDM2000DisConditionOptions(stationId, { signal } = {}) {
+  const params = new URLSearchParams({ stationId });
+  const res = await apiFetch(`${BASE}/dis-condition-options?${params.toString()}`, { signal });
+  const data = await res.json();
+  return data.options || [];
 }
 
 export async function fetchDM2000Batteries(stationId, archname, { signal } = {}) {

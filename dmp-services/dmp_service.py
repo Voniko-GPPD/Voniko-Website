@@ -2893,6 +2893,24 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
 
 # ─── DM2000 Historic Database Routes ────────────────────────────────────────
 
+def _build_dis_condition_display(archive: dict) -> str:
+    """Build the human-readable Dis-condition string exactly as the frontend does.
+
+    Format: ``{resistance}ohm {fdfs} to {endpoint_voltage}V``
+    A bare numeric load_resistance is auto-suffixed with "ohm".
+    """
+    raw_res = str(archive.get("load_resistance") or "").strip()
+    if raw_res and re.match(r'^\d+(\.\d+)?$', raw_res):
+        resistance = f"{raw_res}ohm"
+    else:
+        resistance = raw_res
+    fdfs = str(archive.get("fdfs") or "").strip()
+    endpoint = str(archive.get("endpoint_voltage") or "").strip()
+    prefix = " ".join(p for p in [resistance, fdfs] if p)
+    suffix = f" to {endpoint}V" if endpoint else ""
+    return prefix + suffix
+
+
 @app.get("/dm2000/archives")
 def get_dm2000_archives(
     date_from: str = None,
@@ -2901,6 +2919,7 @@ def get_dm2000_archives(
     name_filter: str = None,
     mfr_filter: str = None,
     serial_filter: str = None,
+    dis_condition_filter: str = None,
     keyword: str = None,
     limit: Optional[int] = None,
 ):
@@ -2981,6 +3000,9 @@ def get_dm2000_archives(
         # Build database file path from archname and data directory
         archname_val = item.get("archname") or ""
         item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
+        # Pre-compute the human-readable Dis-condition display string (same formula
+        # as the frontend renderer) so keyword and dis_condition_filter can match it.
+        item["_dis_condition_display"] = _build_dis_condition_display(item)
         archives.append(item)
 
     def _contains(value, pattern):
@@ -3008,11 +3030,17 @@ def get_dm2000_archives(
             continue
         if not _contains(row.get("serialno"), serial_filter):
             continue
+        if not _contains(row.get("_dis_condition_display"), dis_condition_filter):
+            continue
         if keyword:
             kw = keyword.lower()
             if not any(
                 kw in str(row.get(field) or "").lower()
-                for field in ("dcxh", "name", "manufacturer", "serialno", "archname", "remarks", "dis_condition", "fdfs")
+                for field in (
+                    "dcxh", "name", "manufacturer", "serialno", "archname",
+                    "remarks", "dis_condition", "fdfs",
+                    "load_resistance", "endpoint_voltage", "_dis_condition_display",
+                )
             ):
                 continue
         filtered.append(row)
@@ -3021,6 +3049,26 @@ def get_dm2000_archives(
     if limit is not None and limit > 0:
         filtered = filtered[:limit]
     return {"archives": filtered, "total": len(filtered)}
+
+
+@app.get("/dm2000/dis-condition-options")
+def get_dm2000_dis_condition_options():
+    """Return unique Dis-condition display strings derived from the archive cache.
+
+    The strings are computed with the same formula used by the frontend renderer
+    (load_resistance + fdfs + endpoint_voltage) so they exactly match what users
+    see in the table, making them useful as autocomplete suggestions.
+    """
+    result = get_dm2000_archives()
+    options: list[str] = []
+    seen: set[str] = set()
+    for archive in result.get("archives", []):
+        val = str(archive.get("_dis_condition_display") or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            options.append(val)
+    options.sort()
+    return {"options": options}
 
 
 def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:

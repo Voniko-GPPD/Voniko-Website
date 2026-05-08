@@ -28,7 +28,7 @@ async function apiFetch(url, options = {}, _retried = false) {
           if (data.refreshToken) localStorage.setItem('refreshToken', data.refreshToken);
           return apiFetch(url, options, true);
         }
-      } catch (_) {
+      } catch (_refreshError) {
         // refresh failed — fall through to clear tokens and redirect
       }
     }

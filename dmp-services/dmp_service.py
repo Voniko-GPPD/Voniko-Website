@@ -1085,6 +1085,7 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         "10ohm 24h/d-0.9V",
         "1000mA 24h/d-0.9V",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V 15",  # 15-day variant (remark contains "15")
         "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
         "3.9ohm 1h/d-0.8V",
         "3.9ohm 4m/h 8h/d-0.9V",
@@ -1129,6 +1130,116 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
 # same as template labels that use () when doing template-order lookups.
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
 
+# ─── Condition frequency classification ──────────────────────────────────────
+# Maps each discharge condition to its measurement frequency category.
+# Used for documentation and future API filtering.
+_COND_FREQUENCY: dict[str, dict[str, str]] = {
+    "LR6": {
+        "10ohm 24h/d-0.9V":                              "everyday",
+        "1000mA 24h/d-0.9V":                             "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V":         "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V 15":      "everyday",  # measured every 15 days
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V":          "everyday",
+        "3.9ohm 1h/d-0.8V":                              "everyweek",
+        "3.9ohm 4m/h 8h/d-0.9V":                        "everyweek",
+        "250mA 1h/d-0.9V":                               "everyweek",
+        "3.9ohm 24h/d-0.8V":                             "everymonth",
+        "1000mA 10s/m 1h/d-0.9V":                        "everymonth",
+        "100mA 1h/d-0.9V":                               "everymonth",
+        "50mA 1h/8h 24h/d-1V":                          "everymonth",
+        "750mA 2m/h 8h/d-1.1V":                         "everymonth",
+        "(450mW5s,45mW175s) 3h/124h-1.1V":              "everymonth",
+        "(1ohm,0.25s.3.0ohm,19.75s),10m/h,1h/12h-1.0V": "everymonth",
+    },
+    "LR03": {
+        "20ohm 24h/d-0.9V":           "everyday",
+        "600mA 24h/d-0.9V":           "everyday",
+        "5.1ohm 1h/d-0.8V":           "everyweek",
+        "5.1ohm 4m/h 8h/d-0.9V":     "everyweek",
+        "600mA 10s/m 1h/d-0.9V":     "everyweek",
+        "50mA 1h/12h-0.9V":          "everymonth",
+        "250mA 5m/h 12h/d-1.1V":     "everymonth",
+        "100mA 1h/d-0.9V":           "everymonth",
+        "24ohm 15s/m 8h/d-1V":       "everymonth",
+        "3.9ohm 24h/d-0.8V":         "everymonth",
+        "75mA 1h/12h 24h/d-0.9V":   "everymonth",
+    },
+    "LR61": {
+        "35mA 24h/d-0.9V":   "everyday",
+        "5.1ohm 5m/d-0.9V":  "everyweek",
+        "75ohm 1h/d-0.9V":   "everymonth",
+        "75ohm 1h/d-1.1V":   "everymonth",
+    },
+    "9V": {
+        "35mA 24h/d-5.4V":                   "everyday",
+        "180ohm 4h/d-6.8V":                  "everyweek",
+        "270ohm 1h/d-5.4V":                  "everyweek",
+        "620ohm 2h/d-5.4V":                  "everymonth",
+        "620ohm+10Kohm 1s/60m.24h/d-7.5V":  "everymonth",
+    },
+}
+
+
+def _remark_has_quarter_marker(remark: str) -> bool:
+    """Return True when the remark contains a standalone ``Q`` token that marks
+    a comprehensive quarterly (EveryQuarter) measurement.
+
+    Examples that return True:  ``"LR03 HP701 UD702 Q"``,  ``"LR6 UD501 Q"``
+    Examples that return False: ``"LR6 QC501"``,  ``"HP502 quantity"``
+    """
+    return bool(re.search(r'(?<![A-Za-z0-9])Q(?![A-Za-z0-9])', remark, re.IGNORECASE))
+
+
+def _remark_has_15day_marker(remark: str) -> bool:
+    """Return True when the remark contains a standalone ``15`` token that marks
+    the 15-day measurement cycle for the LR6 ``(1500mW2s,650mW28s)10T/h,24h/d``
+    condition.
+
+    Examples that return True:  ``"LR6 UD501 HP502 15"``,  ``"15 LR6 HP501"``
+    Examples that return False: ``"HP501 150ohm"``,  ``"LR6 HP501-15"``
+    """
+    return bool(re.search(r'(?<![0-9A-Za-z])15(?![0-9A-Za-z])', remark))
+
+
+_LR6_15DAY_COND_RE = re.compile(r'\(1500mW2s[,，]650mW28s\)\s*10T/h', re.IGNORECASE)
+
+
+def _apply_15day_fdfs_modifier(fdfs_label: str, raw_remark: str, model: str) -> str:
+    """Append ``' 15'`` to *fdfs_label* for the LR6 15-day condition when the
+    batch remark contains a standalone ``15`` token.
+
+    This disambiguates the two LR6 Excel columns that share the same base
+    discharge pattern ``(1500mW2s,650mW28s)10T/h,24h/d`` but are measured at
+    different intervals (daily vs every 15 days).
+
+    The Excel template column for the 15-day variant must include ``' 15'``
+    **before** the unit suffix, e.g.::
+
+        (1500mW2s,650mW28s)10T/h,24h/d-1.05V 15(t)
+    """
+    if (
+        model.strip().upper() == "LR6"
+        and raw_remark
+        and _remark_has_15day_marker(raw_remark)
+        and _LR6_15DAY_COND_RE.search(fdfs_label)
+    ):
+        return fdfs_label + " 15"
+    return fdfs_label
+
+
+def _maybe_override_quarterly(row_label: str, raw_remark: Optional[str]) -> str:
+    """Override *row_label* with ``'EVERY QUARTER'`` when the remark contains
+    a standalone ``Q`` token and the current label is not already a
+    special-type label (6020 / 3 THÁNG / 6 THÁNG).
+    """
+    if (
+        row_label not in _SPECIAL_TYPE_LABEL.values()
+        and raw_remark
+        and _remark_has_quarter_marker(raw_remark)
+    ):
+        return "EVERY QUARTER"
+    return row_label
+
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -1146,6 +1257,14 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     f = re.sub(_unit_re, "", c_norm).strip().lower()
     h = re.sub(_unit_re, "", t_norm).strip().lower()
     if not f or not h:
+        return False
+
+    # Guard: the trailing ' 15' marker distinguishes the LR6 15-day condition
+    # from the daily one.  Only match when both sides agree on the presence of
+    # the '15' suffix.
+    _has_15_f = bool(re.search(r'\s+15$', f))
+    _has_15_h = bool(re.search(r'\s+15$', h))
+    if _has_15_f != _has_15_h:
         return False
 
     # Exact match after normalisation
@@ -1208,6 +1327,14 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     f = fdfs.lower().strip()
     h = clean_header.lower().strip()
     if not f or not h:
+        return False
+    # Guard: the trailing ' 15' marker distinguishes the LR6 15-day condition
+    # column from the daily column.  Only match when both sides agree on whether
+    # the '15' suffix is present — this prevents the daily fdfs label from
+    # inadvertently filling the 15-day column (and vice-versa).
+    _has_15_f = bool(re.search(r'\s+15$', f))
+    _has_15_h = bool(re.search(r'\s+15$', h))
+    if _has_15_f != _has_15_h:
         return False
     # Exact match after normalisation
     if f == h:
@@ -1510,8 +1637,9 @@ def _render_perf_template(template_path: str, groups: dict) -> bytes:
                         )
 
                 # Step 3: build date/label → row index map from column A.
-                # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".
-                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THÁNG", "3 THANG", "6 THANG"}
+                # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG",
+                # "EVERY QUARTER".
+                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THÁNG", "3 THANG", "6 THANG", "EVERY QUARTER"}
                 date_row_map: dict[str, int] = {}
                 for drow in ws.iter_rows(min_col=1, max_col=1):
                     for dcell in drow:
@@ -4975,6 +5103,7 @@ _SPECIAL_TYPE_LABEL: dict[str, str] = {
     "6020": "6020",
     "3thang": "3 THÁNG",
     "6thang": "6 THÁNG",
+    "quarterly": "EVERY QUARTER",
 }
 
 
@@ -5672,6 +5801,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
                         _eg_fdfs_label = _eg_fdfs or _dm2k_eg["loai"]
+                        _eg_fdfs_label = _apply_15day_fdfs_modifier(
+                            _eg_fdfs_label, entry.raw_remark or "", entry.model
+                        )
+                        _eg_row_label = _maybe_override_quarterly(_eg_row_label, entry.raw_remark)
                         groups.setdefault(_eg_sheet, {}).setdefault(
                             (_eg_row_label, _dm2k_eg["loai"]), {}
                         )[_eg_fdfs_label] = _eg_perf
@@ -5840,6 +5973,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
                 _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
+                _dm2k_fdfs_label = _apply_15day_fdfs_modifier(
+                    _dm2k_fdfs_label, entry.raw_remark or "", entry.model
+                )
+                _dm2k_row_label = _maybe_override_quarterly(_dm2k_row_label, entry.raw_remark)
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
 
@@ -6096,6 +6233,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
                             _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
+                            _feg_fdfs_label = _apply_15day_fdfs_modifier(
+                                _feg_fdfs_label, entry.raw_remark or "", entry.model
+                            )
+                            _feg_row_label = _maybe_override_quarterly(_feg_row_label, entry.raw_remark)
                             groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
                             )[_feg_fdfs_label] = _feg_perf
@@ -6223,6 +6364,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
                         _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
+                        _fb_fdfs_label = _apply_15day_fdfs_modifier(
+                            _fb_fdfs_label, entry.raw_remark or "", entry.model
+                        )
+                        _fb_row_label = _maybe_override_quarterly(_fb_row_label, entry.raw_remark)
                         groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}
                         )[_fb_fdfs_label] = _fb_perf
@@ -6338,6 +6483,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # fdfs label for column matching
             fdfs_label = fdfs if fdfs else effective_loai
+            fdfs_label = _apply_15day_fdfs_modifier(fdfs_label, entry.raw_remark or "", entry.model)
+            row_label = _maybe_override_quarterly(row_label, entry.raw_remark)
 
             row_key = (row_label, effective_loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf

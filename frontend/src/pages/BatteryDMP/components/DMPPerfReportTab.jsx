@@ -41,7 +41,7 @@ import {
 } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
-const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
+const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang', 'quarterly'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
 
 /** Derive model/loai/chuyen filter option lists and a filtered subset from entries. */
@@ -937,8 +937,8 @@ function ExportTab({ stationId }) {
   );
 
   const specialTag = (type) => {
-    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
-    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal' };
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', quarterly: 'green', normal: 'default' };
+    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', quarterly: 'dmpPerfSpecialQuarterly', normal: 'dmpPerfSpecialNormal' };
     const label = labelKeys[type] ? t(labelKeys[type]) : type;
     return <Tag color={colors[type] || 'default'}>{label}</Tag>;
   };

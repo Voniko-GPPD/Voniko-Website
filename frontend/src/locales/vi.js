@@ -730,6 +730,7 @@ export default {
   dmpPerfSpecial6020: 'Hàng 6020',
   dmpPerfSpecial3thang: 'Hàng 3 THÁNG',
   dmpPerfSpecial6thang: 'Hàng 6 THÁNG',
+  dmpPerfSpecialQuarterly: 'Hàng theo quý (EVERY QUARTER)',
   dmpPerfGroupLoai: 'Loại (UD/HP/UD+)',
   dmpPerfGroupChuyen: 'Chuyền (vd: 501)',
   dmpPerfGroupTrays: 'Khay (tự động)',

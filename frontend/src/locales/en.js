@@ -730,6 +730,7 @@ export default {
   dmpPerfSpecial6020: '6020 row',
   dmpPerfSpecial3thang: '3 THÁNG row',
   dmpPerfSpecial6thang: '6 THÁNG row',
+  dmpPerfSpecialQuarterly: 'Every Quarter row',
   dmpPerfGroupLoai: 'Grade (Loại)',
   dmpPerfGroupChuyen: 'Line (Chuyền)',
   dmpPerfGroupTrays: 'Trays (auto)',

@@ -730,6 +730,7 @@ export default {
   dmpPerfSpecial6020: '6020行',
   dmpPerfSpecial3thang: '3个月行',
   dmpPerfSpecial6thang: '6个月行',
+  dmpPerfSpecialQuarterly: '季度行（EVERY QUARTER）',
   dmpPerfGroupLoai: '等级（UD/HP/UD+）',
   dmpPerfGroupChuyen: '产线编号（如501）',
   dmpPerfGroupTrays: '托盘（自动）',

@@ -661,6 +661,7 @@ export default {
   dm2000Cancel: 'Hủy',
   dm2000SerialNoPlaceholder: 'Nhập số serial / lô',
   dm2000RemarksPlaceholder: 'Nhập ghi chú',
+  dmpEditBatchMetaTitle: 'Sửa thông tin lô: {batchId}',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'Đếm Pin AI',

@@ -297,6 +297,22 @@ function createTables() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_dm2000_overrides_station ON dm2000_archive_overrides(station_id);
+
+    -- DMP batch metadata overrides: user-provided serial no and remarks
+    -- for each batch, stored here so edits survive Access cache refreshes.
+    CREATE TABLE IF NOT EXISTS dmp_batch_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      station_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      serialno TEXT,
+      remarks TEXT,
+      updated_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now') || 'Z'),
+      UNIQUE(station_id, batch_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dmp_batch_overrides_station ON dmp_batch_overrides(station_id);
   `);
 
   // Safe migration: add folder_id column to files if not present

@@ -83,7 +83,39 @@ router.get('/batches', authenticateToken, async (req, res, next) => {
       params: { year: req.query.year },
       timeout: 30000,
     });
-    res.json(r.data);
+    const data = r.data;
+    // Merge user-provided overrides (serialno, remarks) stored in SQLite.
+    // SQLite override always takes precedence when non-null/non-empty so that
+    // web edits are immediately reflected.
+    if (data && Array.isArray(data.batches) && data.batches.length > 0 && req.query.stationId) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const stationId = req.query.stationId;
+        const overrides = db
+          .prepare('SELECT batch_id, serialno, remarks FROM dmp_batch_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) {
+            overrideMap[ov.batch_id] = ov;
+          }
+          data.batches = data.batches.map((batch) => {
+            const ov = overrideMap[String(batch.id)];
+            if (!ov) return batch;
+            return {
+              ...batch,
+              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (batch.serialno ?? null),
+              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (batch.remarks ?? null),
+            };
+          });
+        }
+      } catch (overrideErr) {
+        // Non-fatal: if SQLite read fails, return unmerged data
+        void overrideErr;
+      }
+    }
+    res.json(data);
   } catch (err) {
     handleProxyError(err, res, next);
   }
@@ -648,6 +680,75 @@ router.post('/dm2000/update-archive-meta', authenticateToken, async (req, res, n
     res.json(r.data);
   } catch (err) {
     next(err);
+  }
+});
+
+// ─── DMP Batch Overrides (serialno + remarks stored in local SQLite) ──────────
+
+// GET /api/dmp/batch-overrides?stationId=&batchId=
+router.get('/batch-overrides', authenticateToken, (req, res) => {
+  const { stationId, batchId } = req.query;
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    if (batchId) {
+      const row = db.prepare(
+        'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ? AND batch_id = ?'
+      ).get(stationId, batchId);
+      return res.json({ override: row || null });
+    }
+    const rows = db.prepare(
+      'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ?'
+    ).all(stationId);
+    res.json({ overrides: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/batch-overrides — upsert serialno/remarks for one DMP batch
+router.put('/batch-overrides', authenticateToken, (req, res) => {
+  const { stationId, batchId, serialno, remarks } = req.body || {};
+  if (!stationId || !batchId) return res.status(400).json({ error: 'stationId and batchId are required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    db.prepare(`
+      INSERT INTO dmp_batch_overrides (station_id, batch_id, serialno, remarks, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now', 'utc') || 'Z')
+      ON CONFLICT(station_id, batch_id) DO UPDATE SET
+        serialno = excluded.serialno,
+        remarks = excluded.remarks,
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now', 'utc') || 'Z'
+    `).run(stationId, batchId, serialno ?? null, remarks ?? null, req.user.id);
+    const row = db.prepare(
+      'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ? AND batch_id = ?'
+    ).get(stationId, batchId);
+
+    // Fire-and-forget: write remark/serialno back to the live Access database so
+    // that performance-report queries (which read directly from Access) see the
+    // updated values.  Failure is non-fatal — the SQLite override above still
+    // serves as a display-layer fallback.
+    const stationUrl = resolveUrl(stationId);
+    if (stationUrl) {
+      axios.post(`${stationUrl}/update-batch-meta`, {
+        batch_id: batchId,
+        remarks: remarks ?? null,
+        serialno: serialno ?? null,
+      }, { timeout: 10000 }).catch((err) => {
+        logger.warn('DMP batch-meta write-back to Access failed', {
+          batchId,
+          stationId,
+          error: err.message,
+        });
+      });
+    }
+
+    res.json({ override: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

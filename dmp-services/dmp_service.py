@@ -819,6 +819,12 @@ class DmpPerfReportRequest(BaseModel):
     template_name: Optional[str] = None
 
 
+class DM2000UpdateArchiveMetaRequest(BaseModel):
+    archname: str
+    remarks: Optional[str] = None   # None = no change; "" = clear the field
+    serialno: Optional[str] = None  # None = no change; "" = clear the field
+
+
 def render_excel_template(template_path: str, context: dict) -> bytes:
     wb = load_workbook(template_path)
     for ws in wb.worksheets:
@@ -3349,6 +3355,95 @@ def refresh_dm2000_archives():
     with _DM2000_ARCHIVES_CACHE_LOCK:
         _DM2000_ARCHIVES_CACHE.clear()
     return {"status": "ok", "cache_path": _DM2000_LS_CACHE_PATH}
+
+
+@app.post("/dm2000/update-archive-meta")
+def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
+    """Write remarks (bz) and/or serialno (dcph) directly to the live dmdata_ls.mdb.
+
+    Updates the LIVE Access database file (not the local read-cache) so that the
+    change persists across cache refreshes.  After a successful write the
+    local read-cache is force-refreshed and all in-memory caches are cleared
+    so subsequent reads immediately see the updated values.
+
+    Returns ``{"status": "ok", "updated": N}`` where N is the number of rows
+    updated (0 means the archive was not found, which is non-fatal).
+    """
+    _validate_dm2000_archname(payload.archname)
+
+    ls_path = Path(get_dm2000_ls_path())
+    if not ls_path.exists():
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+
+    # Build the SET clause from whichever fields were provided.
+    # None means "do not update this field"; "" means "clear the field".
+    set_parts: list[str] = []
+    params_list: list = []
+    if payload.remarks is not None:
+        set_parts.append("bz = ?")
+        params_list.append(payload.remarks)
+    if payload.serialno is not None:
+        set_parts.append("dcph = ?")
+        params_list.append(payload.serialno)
+
+    if not set_parts:
+        return {"status": "ok", "updated": 0, "message": "Nothing to update"}
+
+    conn_str = (
+        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={str(ls_path)};"
+    )
+    archname = payload.archname
+    params_with_id = tuple(params_list) + (archname,)
+
+    rows_updated = 0
+    try:
+        with _acquire_query_lock():
+            with pyodbc.connect(conn_str, autocommit=True, timeout=10) as conn:
+                cursor = conn.cursor()
+                # Primary: match by cdid (DM2000's internal archive identifier)
+                sql_cdid = f"UPDATE ls_jb_cs SET {', '.join(set_parts)} WHERE cdid = ?"
+                try:
+                    cursor.execute(sql_cdid, params_with_id)
+                    rows_updated = max(0, cursor.rowcount)
+                except pyodbc.Error as inner_exc:
+                    err_str = str(inner_exc)
+                    if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                        try:
+                            cursor = conn.cursor()
+                            cursor.execute(_inline_params(sql_cdid, params_with_id))
+                            rows_updated = max(0, cursor.rowcount)
+                        except (pyodbc.Error, ValueError) as fallback_exc:
+                            logger.warning(
+                                "update_dm2000_archive_meta: inline-params fallback failed for %s: %s",
+                                archname, fallback_exc,
+                            )
+                    else:
+                        raise
+
+                # Fallback: match by archname column when cdid found nothing
+                if rows_updated == 0:
+                    sql_arch = f"UPDATE ls_jb_cs SET {', '.join(set_parts)} WHERE archname = ?"
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute(sql_arch, params_with_id)
+                        rows_updated = max(0, cursor.rowcount)
+                    except pyodbc.Error as arch_exc:
+                        logger.warning(
+                            "update_dm2000_archive_meta: archname fallback failed for %s: %s",
+                            archname, arch_exc,
+                        )
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"Access write failed: {exc}") from exc
+
+    # Force-refresh the local read-cache so the next query sees the updated value
+    _dm2000_refresh_ls_cache(force=True)
+    with _DM2000_ARCHIVES_CACHE_LOCK:
+        _DM2000_ARCHIVES_CACHE.clear()
+
+    return {"status": "ok", "updated": rows_updated}
+
+
 def get_dm2000_templates():
     templates_dir = Path(DM2000_TEMPLATES_DIR).resolve()
     if not templates_dir.exists():

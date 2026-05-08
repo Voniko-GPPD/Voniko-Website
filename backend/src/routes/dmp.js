@@ -264,8 +264,9 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
             };
           });
         }
-      } catch (_) {
+      } catch (overrideErr) {
         // Non-fatal: if SQLite read fails, return unmerged data
+        void overrideErr;
       }
     }
     res.json(data);
@@ -452,8 +453,9 @@ router.post('/dm2000/perf-report', authenticateToken, async (req, res, next) => 
             };
           });
         }
-      } catch (_) {
+      } catch (overrideErr) {
         // Non-fatal: proceed without overrides
+        void overrideErr;
       }
     }
     const r = await axios.post(`${stationUrl}/dm2000/perf-report`, reportBody, {

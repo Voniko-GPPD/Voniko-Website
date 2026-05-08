@@ -4526,7 +4526,8 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         )
         fdfs_raw = str(_dm2000_get_value(archive, "fdfs") or "").strip()
         dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
-        serialno = str(entry.override_serial_no if (entry.override_serial_no is not None and entry.override_serial_no != "") else (_dm2000_get_value(archive, "serialno", "dcph") or "")).strip()
+        serialno_override = entry.override_serial_no if (entry.override_serial_no is not None and entry.override_serial_no != "") else None
+        serialno = str(serialno_override if serialno_override is not None else (_dm2000_get_value(archive, "serialno", "dcph") or "")).strip()
         trademark = str(_dm2000_get_value(archive, "trademark", "shangbiao", "sb") or "").strip()
         manufacturer_db = str(_dm2000_get_value(archive, "manufacturer", "changshang", "cs") or "").strip()
         load_resistance = str(_dm2000_get_value(

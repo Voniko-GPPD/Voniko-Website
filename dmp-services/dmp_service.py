@@ -4641,25 +4641,7 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
 
     # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
     # then by production-line (chuyen) number within each family.
-    _WORKBOOK_MODEL_ORDER = ["LR6", "LR03", "LR61", "9V", "6LR61"]
-
-    def _workbook_sheet_sort_key(k: str) -> tuple:
-        clean = k.split("|")[0].strip()
-        parts = clean.split()
-        m = parts[0].upper() if parts else ""
-        try:
-            fam = _WORKBOOK_MODEL_ORDER.index(next(
-                (x for x in _WORKBOOK_MODEL_ORDER if x.upper() == m), ""
-            ))
-        except (ValueError, StopIteration):
-            fam = len(_WORKBOOK_MODEL_ORDER)
-        try:
-            ch = int(parts[1]) if len(parts) > 1 else 0
-        except (ValueError, TypeError):
-            ch = 0
-        return (fam, ch, clean)
-
-    sorted_groups = dict(sorted(groups.items(), key=lambda x: _workbook_sheet_sort_key(x[0])))
+    sorted_groups = dict(sorted(groups.items(), key=lambda x: _sheet_model_sort_key(x[0])))
 
     for sheet_name_key, date_type_map in sorted_groups.items():
         # Use the first candidate (before any "|") as the sheet title
@@ -4934,6 +4916,26 @@ _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     2: [list(range(1, 5)), list(range(6, 10))],   # 4 + 4, skip tray 5
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
+
+# Standard sheet ordering for all reports: LR6 → LR03 → LR61 → 9V → 6LR61 → others
+_SHEET_MODEL_ORDER: list[str] = ["LR6", "LR03", "LR61", "9V", "6LR61"]
+
+
+def _sheet_model_sort_key(sheet_key: str) -> tuple:
+    """Return a sort key that orders sheet keys by model family then chuyền number.
+
+    Family order: LR6 → LR03 → LR61 → 9V → 6LR61 → (unknown, sorted alphabetically).
+    Within each family, numeric chuyền values are sorted ascending.
+    """
+    clean = sheet_key.split("|")[0].strip()
+    parts = clean.split()
+    m = parts[0].upper() if parts else ""
+    fam = _SHEET_MODEL_ORDER.index(m) if m in _SHEET_MODEL_ORDER else len(_SHEET_MODEL_ORDER)
+    try:
+        ch = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, TypeError):
+        ch = 0
+    return (fam, ch, clean)
 
 def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
     """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
@@ -5810,7 +5812,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # synthesize one empty group covering all batteries so the entry is
             # not silently skipped.
             if not _dm2k_eff_groups and model_upper in no_chuyen_models:
-                _dm2k_eff_groups = [{"loai": "", "chuyen": "", "trays": []}]
+                _dm2k_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
                 _dm2k_auto_trays = [_dm2k_all_batys]
 
             for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
@@ -6195,7 +6197,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # For no-chuyen models with no configured groups, synthesize one
                     # empty group covering all batteries so the entry is not skipped.
                     if not _fb_eff_groups and _fb_model_upper in _fb_no_chuyen:
-                        _fb_eff_groups = [{"loai": "", "chuyen": "", "trays": []}]
+                        _fb_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
                         _fb_n = 1
                         _fb_auto_trays = [_fb_all_batys]
                     for _fb_g_idx, _fb_eff_grp in enumerate(_fb_eff_groups):
@@ -6490,23 +6492,5 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
     # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
     # then by production-line (chuyen) number within each family.
-    _MODEL_FAMILY_ORDER = ["LR6", "LR03", "LR61", "9V", "6LR61"]
-
-    def _sheet_sort_key(k: str) -> tuple:
-        clean = k.split("|")[0].strip()
-        parts = clean.split()
-        m = parts[0].upper() if parts else ""
-        try:
-            fam = _MODEL_FAMILY_ORDER.index(next(
-                (x for x in _MODEL_FAMILY_ORDER if x.upper() == m), ""
-            ))
-        except (ValueError, StopIteration):
-            fam = len(_MODEL_FAMILY_ORDER)
-        try:
-            ch = int(parts[1]) if len(parts) > 1 else 0
-        except (ValueError, TypeError):
-            ch = 0
-        return (fam, ch, clean)
-
-    sheets = dict(sorted(sheets.items(), key=lambda x: _sheet_sort_key(x[0])))
+    sheets = dict(sorted(sheets.items(), key=lambda x: _sheet_model_sort_key(x[0])))
     return {"sheets": sheets}

@@ -235,9 +235,9 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
     });
     const data = r.data;
     // Merge user-provided overrides (serialno, remarks) stored in SQLite.
-    // DB value always takes precedence when it is non-null/non-empty so that
-    // direct edits to dmdata_ls.mdb are immediately reflected after a reload.
-    // The SQLite override is only used as a fallback when the DB has no value.
+    // SQLite override always takes precedence when non-null/non-empty so that
+    // web edits are immediately reflected.  The Access DB value is only used
+    // as a fallback when the user has not yet set a web override.
     if (data && Array.isArray(data.archives) && data.archives.length > 0 && req.query.stationId) {
       try {
         const { getDb } = require('../models/database');
@@ -256,10 +256,10 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
             if (!ov) return archive;
             return {
               ...archive,
-              // DB value wins when non-null/non-empty; SQLite override is the
-              // fallback for archives where DM2000 software left the field empty.
-              serialno: (archive.serialno != null && archive.serialno !== '') ? archive.serialno : (ov.serialno ?? null),
-              remarks: (archive.remarks != null && archive.remarks !== '') ? archive.remarks : (ov.remarks ?? null),
+              // SQLite override wins when non-null/non-empty; Access DB value is
+              // used as a fallback when the user has not set a web override.
+              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (archive.serialno ?? null),
+              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (archive.remarks ?? null),
               _has_override: true,
             };
           });
@@ -430,6 +430,32 @@ router.post('/dm2000/perf-report', authenticateToken, async (req, res, next) => 
   const stationUrl = getStationUrl(stationId, res);
   if (!stationUrl) return;
   try {
+    // Inject SQLite overrides (serialno, remarks) into each entry so the
+    // perf-report generator uses web-edited values for sheet-name derivation.
+    if (stationId && Array.isArray(reportBody.entries) && reportBody.entries.length > 0) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const overrides = db
+          .prepare('SELECT archname, serialno, remarks FROM dm2000_archive_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) { overrideMap[ov.archname] = ov; }
+          reportBody.entries = reportBody.entries.map((entry) => {
+            const ov = overrideMap[entry.archname];
+            if (!ov) return entry;
+            return {
+              ...entry,
+              override_serial_no: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (entry.override_serial_no ?? null),
+              override_remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (entry.override_remarks ?? null),
+            };
+          });
+        }
+      } catch (_) {
+        // Non-fatal: proceed without overrides
+      }
+    }
     const r = await axios.post(`${stationUrl}/dm2000/perf-report`, reportBody, {
       responseType: 'arraybuffer',
       timeout: 120000,

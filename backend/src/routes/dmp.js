@@ -602,9 +602,42 @@ router.put('/dm2000/archive-overrides', authenticateToken, (req, res) => {
     const row = db.prepare(
       'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'
     ).get(stationId, archname);
+
+    // Fire-and-forget: write remark/serialno back to the live Access database so
+    // that performance-report queries (which read directly from Access) see the
+    // updated values.  Failure is non-fatal — the SQLite override above still
+    // serves as a display-layer fallback.
+    const stationUrl = resolveUrl(stationId);
+    if (stationUrl) {
+      axios.post(`${stationUrl}/dm2000/update-archive-meta`, {
+        archname,
+        remarks: remarks ?? null,
+        serialno: serialno ?? null,
+      }, { timeout: 10000 }).catch((err) => {
+        logger.warn('DM2000 archive-meta write-back to Access failed', {
+          archname,
+          stationId,
+          error: err.message,
+        });
+      });
+    }
+
     res.json({ override: row });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/dm2000/update-archive-meta — write bz/dcph directly to live Access DB
+router.post('/dm2000/update-archive-meta', authenticateToken, async (req, res, next) => {
+  const { stationId, ...body } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/update-archive-meta`, body, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
   }
 });
 

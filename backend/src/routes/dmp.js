@@ -716,7 +716,7 @@ router.put('/batch-overrides', authenticateToken, (req, res) => {
   try {
     db.prepare(`
       INSERT INTO dmp_batch_overrides (station_id, batch_id, serialno, remarks, updated_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, datetime('now') || 'Z')
+      VALUES (?, ?, ?, ?, ?, datetime('now', 'utc') || 'Z')
       ON CONFLICT(station_id, batch_id) DO UPDATE SET
         serialno = excluded.serialno,
         remarks = excluded.remarks,

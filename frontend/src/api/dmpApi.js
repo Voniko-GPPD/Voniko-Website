@@ -260,3 +260,11 @@ export async function fetchDmpPerfData({ stationId, entries }) {
   }
   return res.json();
 }
+
+export async function saveDmpBatchOverride(stationId, batchId, { serialno, remarks } = {}) {
+  const res = await apiFetch(`${BASE}/batch-overrides`, {
+    method: 'PUT',
+    body: JSON.stringify({ stationId, batchId, serialno: serialno ?? null, remarks: remarks ?? null }),
+  });
+  return res.json();
+}

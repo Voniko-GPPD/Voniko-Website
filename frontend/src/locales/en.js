@@ -661,6 +661,7 @@ export default {
   dm2000Cancel: 'Cancel',
   dm2000SerialNoPlaceholder: 'Enter serial / batch number',
   dm2000RemarksPlaceholder: 'Enter remark',
+  dmpEditBatchMetaTitle: 'Edit Batch Info: {batchId}',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI Battery Counter',

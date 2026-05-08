@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { Alert, Button, Col, DatePicker, Form, Input, Row, Space, Table, Typography } from 'antd';
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { Alert, Button, Col, DatePicker, Form, Input, Modal, Row, Space, Table, Tooltip, Typography } from 'antd';
+import { EditOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { fetchBatches } from '../../../api/dmpApi';
+import { fetchBatches, saveDmpBatchOverride } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
 const dateFormat = 'YYYY-MM-DD';
@@ -10,11 +10,14 @@ const dateFormat = 'YYYY-MM-DD';
 export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect }) {
   const { t } = useLang();
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [batches, setBatches] = useState([]);
   const [searched, setSearched] = useState(false);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
+  const [editingBatch, setEditingBatch] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
 
   const onSearch = async () => {
     if (!stationId) return;
@@ -63,6 +66,55 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
     onSelect?.(null);
   };
 
+  const openEditModal = (e, record) => {
+    e.stopPropagation();
+    setEditingBatch(record);
+    editForm.setFieldsValue({
+      serialno: record.serialno || '',
+      remarks: record.remarks || '',
+    });
+  };
+
+  const handleEditSave = async () => {
+    if (!editingBatch || !stationId) return;
+    const values = editForm.getFieldsValue();
+    setEditSaving(true);
+    try {
+      await saveDmpBatchOverride(stationId, String(editingBatch.id), {
+        serialno: values.serialno?.trim() || null,
+        remarks: values.remarks?.trim() || null,
+      });
+      // Update local state so the table shows the new values immediately
+      setBatches((prev) =>
+        prev.map((b) =>
+          b.id === editingBatch.id
+            ? { ...b, serialno: values.serialno?.trim() || null, remarks: values.remarks?.trim() || null }
+            : b
+        )
+      );
+      setEditingBatch(null);
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const EditableCell = ({ value, record }) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{value || '-'}</span>
+      <Tooltip title={t('dm2000EditOverride')}>
+        <Button
+          size="small"
+          type="text"
+          icon={<EditOutlined style={{ fontSize: 11, color: '#999' }} />}
+          style={{ flexShrink: 0, padding: '0 2px', height: 18, minWidth: 18 }}
+          onClick={(e) => openEditModal(e, record)}
+        />
+      </Tooltip>
+    </div>
+  );
+
   const columns = [
     {
       title: '#',
@@ -91,8 +143,21 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
     { title: t('dmpChannelCount'), dataIndex: 'channel_count', key: 'channel_count', width: 90, align: 'center', render: (v) => (v != null ? v : '-') },
     { title: t('dm2000Manufacturer'), dataIndex: 'manufacturer', key: 'manufacturer', width: 120, render: (v) => v || '-' },
     { title: t('dm2000MadeDate'), dataIndex: 'madedate', key: 'madedate', width: 110, render: (v) => v || '-' },
-    { title: t('dm2000SerialNo'), dataIndex: 'serialno', key: 'serialno', width: 110, render: (v) => v || '-' },
-    { title: t('dm2000Remarks'), dataIndex: 'remarks', key: 'remarks', width: 140, ellipsis: true, render: (v) => v || '-' },
+    {
+      title: t('dm2000SerialNo'),
+      dataIndex: 'serialno',
+      key: 'serialno',
+      width: 140,
+      render: (v, record) => <EditableCell value={v} record={record} />,
+    },
+    {
+      title: t('dm2000Remarks'),
+      dataIndex: 'remarks',
+      key: 'remarks',
+      width: 160,
+      ellipsis: true,
+      render: (v, record) => <EditableCell value={v} record={record} />,
+    },
     { title: t('dm2000Database'), dataIndex: 'database', key: 'database', width: 320, ellipsis: true, render: (v) => v || '-' },
   ];
 
@@ -160,6 +225,27 @@ export default function DMPFilterPanel({ stationId, selectedBatchId, onSelect })
           />
         </>
       )}
+
+      <Modal
+        open={!!editingBatch}
+        title={t('dmpEditBatchMetaTitle', { batchId: editingBatch?.id || '' })}
+        onCancel={() => setEditingBatch(null)}
+        onOk={handleEditSave}
+        okText={t('dm2000Save')}
+        cancelText={t('dm2000Cancel')}
+        confirmLoading={editSaving}
+        width={420}
+        destroyOnClose
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="serialno" label={t('dm2000SerialNo')}>
+            <Input placeholder={t('dm2000SerialNoPlaceholder')} allowClear />
+          </Form.Item>
+          <Form.Item name="remarks" label={t('dm2000Remarks')}>
+            <Input.TextArea rows={3} placeholder={t('dm2000RemarksPlaceholder')} allowClear />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 }

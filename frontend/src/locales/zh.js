@@ -661,6 +661,7 @@ export default {
   dm2000Cancel: '取消',
   dm2000SerialNoPlaceholder: '输入序列号 / 批号',
   dm2000RemarksPlaceholder: '输入备注',
+  dmpEditBatchMetaTitle: '编辑批次信息: {batchId}',
 
   // Count Batteries (AI image-based battery counting)
   countBatteries: 'AI 电池计数',

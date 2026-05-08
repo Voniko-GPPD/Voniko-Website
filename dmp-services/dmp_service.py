@@ -825,6 +825,12 @@ class DM2000UpdateArchiveMetaRequest(BaseModel):
     serialno: Optional[str] = None  # None = no change; "" = clear the field
 
 
+class DMPUpdateBatchMetaRequest(BaseModel):
+    batch_id: str
+    remarks: Optional[str] = None   # None = no change; "" = clear the field
+    serialno: Optional[str] = None  # None = no change; "" = clear the field
+
+
 def render_excel_template(template_path: str, context: dict) -> bytes:
     wb = load_workbook(template_path)
     for ws in wb.worksheets:
@@ -3510,6 +3516,107 @@ def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
     _dm2000_refresh_ls_cache(force=True)
     with _DM2000_ARCHIVES_CACHE_LOCK:
         _DM2000_ARCHIVES_CACHE.clear()
+
+    return {"status": "ok", "updated": rows_updated}
+
+
+@app.post("/update-batch-meta")
+def update_dmp_batch_meta(payload: DMPUpdateBatchMetaRequest):
+    """Write remarks (bz) and/or serialno (dcph) directly to the live DMPDATA.mdb.
+
+    Updates the LIVE Access database file (not the local read-cache) so that the
+    change persists across cache refreshes.  After a successful write the
+    local read-cache is force-refreshed so subsequent reads immediately see the
+    updated values.
+
+    Returns ``{"status": "ok", "updated": N}`` where N is the number of tables
+    updated (0 means the batch was not found, which is non-fatal).
+    """
+    batch_id = payload.batch_id
+    if not re.match(r'^[A-Za-z0-9_./ \-]+$', batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch_id")
+
+    dmpdata_path = Path(get_dmpdata_path())
+    if not dmpdata_path.exists():
+        raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+
+    if payload.remarks is None and payload.serialno is None:
+        return {"status": "ok", "updated": 0, "message": "Nothing to update"}
+
+    conn_str = (
+        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={str(dmpdata_path)};"
+    )
+
+    rows_updated = 0
+    try:
+        with _acquire_query_lock():
+            with pyodbc.connect(conn_str, autocommit=True, timeout=10) as conn:
+                # Update para_pub.bz (batch-level remark) WHERE id = batch_id
+                if payload.remarks is not None:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE para_pub SET bz = ? WHERE id = ?", (payload.remarks, batch_id))
+                        rc = cursor.rowcount
+                        if rc == 0 and batch_id.isdigit():
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE para_pub SET bz = ? WHERE id = ?", (payload.remarks, int(batch_id)))
+                            rc = cursor.rowcount
+                        if rc != 0 and rc != -1:
+                            rows_updated += 1
+                        elif rc == -1:
+                            rows_updated += 1  # Access ODBC does not report rowcount
+                    except pyodbc.Error as exc:
+                        err_str = str(exc)
+                        if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                            try:
+                                id_inline: int | str = int(batch_id) if batch_id.isdigit() else batch_id
+                                cursor = conn.cursor()
+                                cursor.execute(_inline_params(
+                                    "UPDATE para_pub SET bz = ? WHERE id = ?",
+                                    (payload.remarks, id_inline),
+                                ))
+                                rows_updated += 1
+                            except (pyodbc.Error, ValueError) as fb_exc:
+                                logger.warning("update_dmp_batch_meta: para_pub inline fallback failed: %s", fb_exc)
+                        else:
+                            logger.warning("update_dmp_batch_meta: para_pub update failed: %s", exc)
+
+                # Update para_singl.dcph (serial number) for all channels WHERE sid = batch_id
+                if payload.serialno is not None:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE para_singl SET dcph = ? WHERE sid = ?", (payload.serialno, batch_id))
+                        rc = cursor.rowcount
+                        if rc == 0 and batch_id.isdigit():
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE para_singl SET dcph = ? WHERE sid = ?", (payload.serialno, int(batch_id)))
+                            rc = cursor.rowcount
+                        if rc != 0 and rc != -1:
+                            rows_updated += 1
+                        elif rc == -1:
+                            rows_updated += 1
+                    except pyodbc.Error as exc:
+                        err_str = str(exc)
+                        if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                            try:
+                                id_inline = int(batch_id) if batch_id.isdigit() else batch_id
+                                cursor = conn.cursor()
+                                cursor.execute(_inline_params(
+                                    "UPDATE para_singl SET dcph = ? WHERE sid = ?",
+                                    (payload.serialno, id_inline),
+                                ))
+                                rows_updated += 1
+                            except (pyodbc.Error, ValueError) as fb_exc:
+                                logger.warning("update_dmp_batch_meta: para_singl inline fallback failed: %s", fb_exc)
+                        else:
+                            logger.warning("update_dmp_batch_meta: para_singl update failed: %s", exc)
+
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"Access write failed: {exc}") from exc
+
+    # Force-refresh the local read-cache so the next query sees the updated values
+    _dmpdata_refresh_cache(force=True)
 
     return {"status": "ok", "updated": rows_updated}
 

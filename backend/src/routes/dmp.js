@@ -228,6 +228,7 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
         name_filter: req.query.name_filter,
         mfr_filter: req.query.mfr_filter,
         serial_filter: req.query.serial_filter,
+        dis_condition_filter: req.query.dis_condition_filter,
         keyword: req.query.keyword,
         limit: req.query.limit,
       },
@@ -270,6 +271,15 @@ router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
       }
     }
     res.json(data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/dis-condition-options', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/dis-condition-options`, { timeout: 30000 });
+    res.json(r.data);
   } catch (err) { handleProxyError(err, res, next); }
 });
 

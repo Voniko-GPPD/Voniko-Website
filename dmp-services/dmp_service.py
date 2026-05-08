@@ -4639,7 +4639,29 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
     wb = _Workbook()
     wb.remove(wb.active)
 
-    for sheet_name_key, date_type_map in groups.items():
+    # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
+    # then by production-line (chuyen) number within each family.
+    _WORKBOOK_MODEL_ORDER = ["LR6", "LR03", "LR61", "9V", "6LR61"]
+
+    def _workbook_sheet_sort_key(k: str) -> tuple:
+        clean = k.split("|")[0].strip()
+        parts = clean.split()
+        m = parts[0].upper() if parts else ""
+        try:
+            fam = _WORKBOOK_MODEL_ORDER.index(next(
+                (x for x in _WORKBOOK_MODEL_ORDER if x.upper() == m), ""
+            ))
+        except (ValueError, StopIteration):
+            fam = len(_WORKBOOK_MODEL_ORDER)
+        try:
+            ch = int(parts[1]) if len(parts) > 1 else 0
+        except (ValueError, TypeError):
+            ch = 0
+        return (fam, ch, clean)
+
+    sorted_groups = dict(sorted(groups.items(), key=lambda x: _workbook_sheet_sort_key(x[0])))
+
+    for sheet_name_key, date_type_map in sorted_groups.items():
         # Use the first candidate (before any "|") as the sheet title
         sheet_name = sheet_name_key.split("|")[0].strip()[:_EXCEL_MAX_SHEET_NAME]
         ws = wb.create_sheet(title=sheet_name)
@@ -5784,6 +5806,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
             model_upper = entry.model.strip().upper()
             no_chuyen_models = {"LR61", "9V", "6LR61"}
 
+            # For no-chuyen models (LR61, 9V, 6LR61) with no configured groups,
+            # synthesize one empty group covering all batteries so the entry is
+            # not silently skipped.
+            if not _dm2k_eff_groups and model_upper in no_chuyen_models:
+                _dm2k_eff_groups = [{"loai": "", "chuyen": "", "trays": []}]
+                _dm2k_auto_trays = [_dm2k_all_batys]
+
             for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
                 _dm2k_grp_trays = _dm2k_eff_grp.get("trays") or []
                 if _dm2k_grp_trays:
@@ -6163,6 +6192,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}
+                    # For no-chuyen models with no configured groups, synthesize one
+                    # empty group covering all batteries so the entry is not skipped.
+                    if not _fb_eff_groups and _fb_model_upper in _fb_no_chuyen:
+                        _fb_eff_groups = [{"loai": "", "chuyen": "", "trays": []}]
+                        _fb_n = 1
+                        _fb_auto_trays = [_fb_all_batys]
                     for _fb_g_idx, _fb_eff_grp in enumerate(_fb_eff_groups):
                         _fb_grp_trays = _fb_eff_grp.get("trays") or []
                         if _fb_grp_trays:
@@ -6256,10 +6291,26 @@ def _compute_dmp_perf_groups(  # noqa: C901
         n_groups = len(_dmp_eff_groups)
         auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
 
+        # Hoist model/no-chuyen check outside the loop so the synthetic-group
+        # path (LR61/9V with no configured groups) shares the same variable.
+        _dmp_model_upper = entry.model.strip().upper()
+        _dmp_no_chuyen_models = {"LR61", "9V", "6LR61"}
+        # For no-chuyen models with no configured groups, synthesize one empty
+        # group covering all batteries so the entry is not silently skipped.
+        if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
+            _dmp_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+            n_groups = 1
+            auto_trays = [list(range(1, 10))]
+
         for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
-            orig_grp = entry.groups[_dmp_grp["_orig_idx"]]
-            trays = (orig_grp.trays if orig_grp.trays else
-                     (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
+            _orig_idx = _dmp_grp.get("_orig_idx")
+            if _orig_idx is not None:
+                orig_grp = entry.groups[_orig_idx]
+                trays = (orig_grp.trays if orig_grp.trays else
+                         (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
+            else:
+                # Synthetic group for no-chuyen model with no configured groups
+                trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
             if not trays:
                 continue
 
@@ -6269,9 +6320,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             perf["hfsj_unit"] = hfsj_unit
 
             # Determine sheet name
-            model_upper = entry.model.strip().upper()
+            model_upper = _dmp_model_upper
             # Models without production-line requirement use only the model name
-            no_chuyen_models = {"LR61", "9V", "6LR61"}
+            no_chuyen_models = _dmp_no_chuyen_models
             if model_upper in no_chuyen_models:
                 sheet_key = entry.model.strip()
             else:
@@ -6437,4 +6488,25 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         sheets[sheet_key] = {"rows": rows, "conditions": all_conditions, "units": units}
 
+    # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
+    # then by production-line (chuyen) number within each family.
+    _MODEL_FAMILY_ORDER = ["LR6", "LR03", "LR61", "9V", "6LR61"]
+
+    def _sheet_sort_key(k: str) -> tuple:
+        clean = k.split("|")[0].strip()
+        parts = clean.split()
+        m = parts[0].upper() if parts else ""
+        try:
+            fam = _MODEL_FAMILY_ORDER.index(next(
+                (x for x in _MODEL_FAMILY_ORDER if x.upper() == m), ""
+            ))
+        except (ValueError, StopIteration):
+            fam = len(_MODEL_FAMILY_ORDER)
+        try:
+            ch = int(parts[1]) if len(parts) > 1 else 0
+        except (ValueError, TypeError):
+            ch = 0
+        return (fam, ch, clean)
+
+    sheets = dict(sorted(sheets.items(), key=lambda x: _sheet_sort_key(x[0])))
     return {"sheets": sheets}

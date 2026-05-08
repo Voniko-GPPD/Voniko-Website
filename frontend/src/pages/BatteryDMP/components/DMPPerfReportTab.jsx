@@ -860,7 +860,7 @@ function PerfViewTab({ stationId }) {
     }));
 
     return [...fixedCols, ...freqCols];
-  }, [sheetsData, t, filterFreq, entryByDateLoai]);
+  }, [sheetsData, t, filterFreq]);
 
   // When filterFreq === 'quarter', filter rows to only show those where a matching entry has "Q" in remark
   const getVisibleRows = useCallback((sheetKey) => {

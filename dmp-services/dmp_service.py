@@ -4164,18 +4164,30 @@ def _get_batys_for_archive(archname: str) -> list[int]:
 
 
 def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[dict]]:
-    """Return time-at-voltage data for each battery number in batys."""
+    """Return time-at-voltage data for each battery number in batys.
+
+    Query order (cdid-based schema first, archname-based last):
+    1. ls_vtime cdid-based  — ``SELECT dy AS sj, time{b} AS minutes FROM ls_vtime WHERE cdid = ?``
+       User-confirmed primary data source.
+    2. ls_timev cdid-based  — ``SELECT sj, tim_vot{b} AS minutes FROM ls_timev WHERE cdid = ?``
+       Alternative cdid schema used by some DM2000 versions.
+    3. ls_timev archname-based — ``SELECT * FROM ls_timev WHERE archname = ? AND baty = ?``
+       Legacy archname schema fallback.
+    """
     result: dict[int, list[dict]] = {}
     for b in batys:
         tav: list[dict] = []
+        # Try 1: ls_vtime cdid-based (primary — confirmed by user as correct data source)
+        time_col = f"time{b}"
         try:
             tav = _read_dm2000_ls(
-                "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
-                (archname, b),
+                f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+                (archname,),
             )
         except (pyodbc.Error, HTTPException):
             pass
         if not tav:
+            # Try 2: ls_timev cdid-based
             tim_col = f"tim_vot{b}"
             try:
                 tav = _read_dm2000_ls(
@@ -4185,11 +4197,11 @@ def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[di
             except (pyodbc.Error, HTTPException):
                 pass
         if not tav:
-            time_col = f"time{b}"
+            # Try 3: ls_timev archname-based (legacy schema)
             try:
                 tav = _read_dm2000_ls(
-                    f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
-                    (archname,),
+                    "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+                    (archname, b),
                 )
             except (pyodbc.Error, HTTPException):
                 pass
@@ -5239,7 +5251,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     for _rg in _parse_bz_groups(_dm2k_arch)
                     if _rg.get("chuyen")
                 }
-                # Build eff_groups with corrected loai and sort by chuyen (mirrors DMP)
+                # Build eff_groups with corrected loai; preserve remark-position order
+                # (do NOT sort by chuyen — remark position determines physical tray slot).
                 _dm2k_eff_gs = [
                     {
                         "loai": _dm2k_loai_map.get(str(grp.chuyen or "").strip(), grp.loai),
@@ -5248,7 +5261,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     }
                     for grp in entry.groups
                 ]
-                _dm2k_eff_gs = _sort_eff_groups_for_tray_assignment(_dm2k_eff_gs)
                 # Reusable: run four composite archname searches (bz exact → bz LIKE → cdid → archname)
                 def _dm2k_search_archname(key: str) -> list[dict]:
                     for _sql, _par in [
@@ -5333,17 +5345,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             # Per-grade archive: the archive covers only this one group
                             _eg_batys = _eg_all_batys
                         else:
-                            # Composite archive: positional split by sorted chuyen index
-                            _eg_bz_sorted = sorted(
-                                _eg_arch_bz_gs,
-                                key=lambda g: (
-                                    int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
-                                    g.get("chuyen", ""),
-                                ),
-                            )
+                            # Composite archive: positional split by remark order.
+                            # Use _parse_bz_groups left-to-right order (remark position),
+                            # not chuyen-number-sorted order, so that remarks like
+                            # "LR6 UD502 HP503 UD501" correctly map 502→[1-3], 503→[4-6], 501→[7-9].
                             _eg_chuyen_str = str(_dm2k_eg["chuyen"] or "").strip()
                             _eg_g_idx = next(
-                                (i for i, bg in enumerate(_eg_bz_sorted)
+                                (i for i, bg in enumerate(_eg_arch_bz_gs)
                                  if str(bg.get("chuyen", "")) == _eg_chuyen_str),
                                 0,
                             )
@@ -5670,7 +5678,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         }
                         for grp in entry.groups
                     ]
-                    _fb_eff_gs = _sort_eff_groups_for_tray_assignment(_fb_eff_gs)
+                    # Preserve remark-position order (same as dm2000_archname path above).
                     def _fb_search_archname(key: str) -> list[dict]:
                         for _sql2, _par2 in [
                             ("SELECT * FROM ls_jb_cs WHERE bz = ?", (key,)),
@@ -5689,8 +5697,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_seen_pairs: set[tuple] = set()
                     for _fb_eg in _fb_eff_gs:
                         _feg_token = _group_to_bz_token(_fb_eg["loai"], _fb_eg["chuyen"])
-                        _feg_rows: list[dict] = []
-                        if _feg_token:
+                        # Search by full remark first (finds only the exact composite archives,
+                        # prevents per-grade archives from overwriting composite-archive data
+                        # when multiple archives from the same date match the token).
+                        _feg_rows: list[dict] = _fb_search_archname(_fb_remark)
+                        if not _feg_rows and _feg_token:
+                            # Token fallback: used when no archive matches the full remark
+                            # (e.g. remark was entered differently in DM2000 vs the UI form).
                             _feg_esc = _escape_sql_wildcards(_feg_token)
                             try:
                                 _feg_rows = _read_dm2000_ls(
@@ -5698,8 +5711,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 )
                             except pyodbc.Error:
                                 pass
-                        if not _feg_rows:
-                            _feg_rows = _fb_search_archname(_fb_remark)
                         if not _feg_rows:
                             continue
                         for _feg_arch in _feg_rows:
@@ -5749,16 +5760,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             elif len(_feg_arch_bz_gs) <= 1:
                                 _feg_batys = _feg_all_batys
                             else:
-                                _feg_bz_sorted = sorted(
-                                    _feg_arch_bz_gs,
-                                    key=lambda g: (
-                                        int(g["chuyen"]) if str(g.get("chuyen", "")).isdigit() else 0,
-                                        g.get("chuyen", ""),
-                                    ),
-                                )
+                                # Composite archive: positional split by remark order.
+                                # _parse_bz_groups already returns groups in left-to-right
+                                # remark order (e.g. "LR6 UD502 HP503 UD501" → [502,503,501]),
+                                # which directly matches the physical tray arrangement.
+                                # Do NOT sort by chuyen number: that would give the wrong
+                                # slot for 3-line remarks where chuyen order ≠ remark order.
                                 _feg_chuyen_str = str(_fb_eg["chuyen"] or "").strip()
                                 _feg_g_idx = next(
-                                    (i for i, bg in enumerate(_feg_bz_sorted)
+                                    (i for i, bg in enumerate(_feg_arch_bz_gs)
                                      if str(bg.get("chuyen", "")) == _feg_chuyen_str),
                                     0,
                                 )
@@ -5869,9 +5879,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             for g in _fb_bz_groups
                         ]
                         _fb_n = len(_fb_eff_groups)
-                    _fb_eff_groups = _sort_eff_groups_for_tray_assignment(
-                        _fb_eff_groups
-                    )
+                    # Preserve remark-position order — _parse_bz_groups and parseRemark both
+                    # return groups left-to-right which directly maps to physical tray slots
+                    # (first group → slot 0 → [1-4] or [1-3], etc.).
+                    # Do NOT call _sort_eff_groups_for_tray_assignment here: sorting by chuyen
+                    # number gives the wrong assignment when chuyen order differs from remark
+                    # order (e.g. "LR6 UD502 HP503 UD501": 502 is physically first).
                     _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}

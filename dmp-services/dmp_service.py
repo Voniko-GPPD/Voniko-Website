@@ -808,7 +808,7 @@ class DmpPerfEntry(BaseModel):
     batch_id: str  # para_pub.id
     model: str  # e.g. "LR6", "LR03", "LR61", "9V"
     groups: list[DmpPerfGroup]
-    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
+    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang" | "quarter"
     report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
     raw_remark: Optional[str] = None  # free-text remark; used as fallback to search para_pub.bz
     dm2000_archname: Optional[str] = None  # DM2000 archive name; when set, data is read from DM2000 instead of DMP
@@ -1125,6 +1125,55 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
     ],
 }
 
+# Frequency group for each standard discharge condition, keyed by battery family.
+# Groups: "everyday" | "everyweek" | "everymonth".
+# Matching against actual DB condition labels uses the same fuzzy logic as
+# _perf_fdfs_matches_template (see _get_condition_freq_group below).
+_CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
+    "LR6": {
+        "10ohm 24h/d-0.9V":                                    "everyday",
+        "1000mA 24h/d-0.9V":                                   "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V":                "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V":                 "everyday",
+        "3.9ohm 1h/d-0.8V":                                    "everyweek",
+        "3.9ohm 4m/h 8h/d-0.9V":                               "everyweek",
+        "250mA 1h/d-0.9V":                                     "everyweek",
+        "3.9ohm 24h/d-0.8V":                                   "everymonth",
+        "1000mA 10s/m 1h/d-0.9V":                              "everymonth",
+        "100mA 1h/d-0.9V":                                     "everymonth",
+        "50mA 1h/8h 24h/d-1V":                                 "everymonth",
+        "750mA 2m/h 8h/d-1.1V":                                "everymonth",
+        "(450mW5s,45mW175s) 3h/124h-1.1V":                     "everymonth",
+        "(1ohm,0.25s.3.0ohm,19.75s),10m/h,1h/12h-1.0V":        "everymonth",
+    },
+    "LR03": {
+        "20ohm 24h/d-0.9V":                                    "everyday",
+        "600mA 24h/d-0.9V":                                    "everyday",
+        "5.1ohm 1h/d-0.8V":                                    "everyweek",
+        "5.1ohm 4m/h 8h/d-0.9V":                               "everyweek",
+        "600mA 10s/m 1h/d-0.9V":                               "everyweek",
+        "50mA 1h/12h-0.9V":                                    "everymonth",
+        "250mA 5m/h 12h/d-1.1V":                               "everymonth",
+        "100mA 1h/d-0.9V":                                     "everymonth",
+        "24ohm 15s/m 8h/d-1V":                                 "everymonth",
+        "3.9ohm 24h/d-0.8V":                                   "everymonth",
+        "75mA 1h/12h 24h/d-0.9V":                              "everymonth",
+    },
+    "LR61": {
+        "35mA 24h/d-0.9V":                                     "everyday",
+        "5.1ohm 5m/d-0.9V":                                    "everyweek",
+        "75ohm 1h/d-0.9V":                                     "everymonth",
+        "75ohm 1h/d-1.1V":                                     "everymonth",
+    },
+    "9V": {
+        "35mA 24h/d-5.4V":                                     "everyday",
+        "180ohm 4h/d-6.8V":                                    "everyweek",
+        "270ohm 1h/d-5.4V":                                    "everyweek",
+        "620ohm 2h/d-5.4V":                                    "everymonth",
+        "620ohm+10Kohm 1s/60m.24h/d-7.5V":                     "everymonth",
+    },
+}
+
 # Normalise bracket style so that DMP-software labels using {} are treated the
 # same as template labels that use () when doing template-order lookups.
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
@@ -1190,6 +1239,21 @@ def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
         if _perf_fdfs_matches_template(cond, tmpl_entry):
             return (i, cond)
     return (len(template), cond)
+
+
+def _get_condition_freq_group(cond: str, battery_type: str) -> str:
+    """Return the frequency group for *cond*: ``"everyday"``, ``"everyweek"``,
+    ``"everymonth"``, or ``"other"`` when not found.
+
+    Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
+    minor variations in spacing, bracket style, or trailing voltage suffix are
+    still correctly categorised.
+    """
+    freq_map = _CONDITION_FREQ_GROUP.get(battery_type.strip().upper(), {})
+    for tmpl_label, group in freq_map.items():
+        if _perf_fdfs_matches_template(cond, tmpl_label):
+            return group
+    return "other"
 
 
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
@@ -6472,6 +6536,12 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         all_conditions.sort(key=_sort_key)
 
+        # Build frequency-group map: condition label → "everyday"|"everyweek"|"everymonth"|"other"
+        freq_groups: dict[str, str] = {
+            c: _get_condition_freq_group(c, _battery_type)
+            for c in all_conditions
+        }
+
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
             rows.append({
@@ -6488,7 +6558,12 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
                 },
             })
 
-        sheets[sheet_key] = {"rows": rows, "conditions": all_conditions, "units": units}
+        sheets[sheet_key] = {
+            "rows": rows,
+            "conditions": all_conditions,
+            "units": units,
+            "freq_groups": freq_groups,
+        }
 
     # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
     # then by production-line (chuyen) number within each family.

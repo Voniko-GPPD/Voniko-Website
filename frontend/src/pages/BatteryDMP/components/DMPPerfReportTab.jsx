@@ -41,8 +41,27 @@ import {
 } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
-const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
+const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang', 'quarter'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
+
+/** Frequency group order for column grouping headers. */
+const FREQ_GROUP_ORDER = ['everyday', 'everyweek', 'everymonth', 'other'];
+
+/** Background colours for each frequency group header. */
+const FREQ_GROUP_COLORS = {
+  everyday: '#e6f4ff',
+  everyweek: '#fffbe6',
+  everymonth: '#f6ffed',
+  other: '#f0f0f0',
+};
+
+/** Border colours for each frequency group header. */
+const FREQ_GROUP_BORDER_COLORS = {
+  everyday: '#91caff',
+  everyweek: '#ffd666',
+  everymonth: '#95de64',
+  other: '#d9d9d9',
+};
 
 /** Derive model/loai/chuyen filter option lists and a filtered subset from entries. */
 function useEntryFilters(entries, filterModel, filterLoai, filterChuyen) {
@@ -103,7 +122,8 @@ const SIX_DIGIT_RE = /^\d{6}$/;
 
 /**
  * Parses a remark string such as "160226 LR6 UD501 UDP504" into:
- *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}] }
+ *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}],
+ *     isQuarter: bool, is15d: bool }
  *
  * Rules:
  *   - First token that is exactly 6 digits → DDMMYY date (optional)
@@ -111,17 +131,21 @@ const SIX_DIGIT_RE = /^\d{6}$/;
  *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [] }
  *   - "HP<n>"  → { loai: 'HP',  chuyen: '<n>', trays: [] }
  *   - "UD<n>"  → { loai: 'UD',  chuyen: '<n>', trays: [] }
+ *   - Standalone "Q"  → isQuarter = true  (Every Quarter: all conditions measured)
+ *   - Standalone "15" → is15d = true      (LR6 15-day variant of (1500mW…) column)
  *
  * Trays are always left empty so the backend assigns them positionally:
  *   1 group → trays 1-9 | 2 groups → 1-4 / 6-9 | 3 groups → 1-3 / 4-6 / 7-9
  */
 function parseRemark(raw) {
-  if (!raw || !raw.trim()) return { date: null, model: null, groups: [] };
+  if (!raw || !raw.trim()) return { date: null, model: null, groups: [], isQuarter: false, is15d: false };
 
   const tokens = raw.trim().toUpperCase().split(/\s+/);
   let date = null;
   let model = null;
   const groups = [];
+  let isQuarter = false;
+  let is15d = false;
   let start = 0;
 
   // Optional 6-digit date prefix (DDMMYY)
@@ -156,10 +180,16 @@ function parseRemark(raw) {
     } else if (/^UD\d+$/.test(tok)) {
       // Trays are assigned positionally (not by type) — leave empty for auto-assignment
       groups.push({ loai: 'UD', chuyen: tok.substring(2), trays: [] });
+    } else if (tok === 'Q') {
+      // Every Quarter marker: all conditions are measured on this day
+      isQuarter = true;
+    } else if (tok === '15') {
+      // LR6 15-day variant: (1500mW2s,650mW28s)10T/h,24h/d measured every 15 days
+      is15d = true;
     }
   }
 
-  return { date, model, groups };
+  return { date, model, groups, isQuarter, is15d };
 }
 
 // ─── Group editor ─────────────────────────────────────────────────────────────
@@ -239,7 +269,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
 
-  // Auto-parse remark to fill model + groups
+  // Auto-parse remark to fill model + groups + special_type (Q → quarter)
   const handleRemarkChange = (e) => {
     const raw = e.target.value;
     const parsed = parseRemark(raw);
@@ -249,6 +279,10 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
     }
     if (parsed.groups.length > 0) {
       setGroups(parsed.groups);
+    }
+    // Auto-set special_type to 'quarter' when "Q" marker is present
+    if (parsed.isQuarter) {
+      form.setFieldValue('special_type', 'quarter');
     }
   };
 
@@ -311,7 +345,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       {/* ── Remark ── */}
       <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
         <Input
-          placeholder="e.g. 160226 LR6 UD501 UDP504 or LR6 UDP501 HP503"
+          placeholder="e.g. 160226 LR6 UD501 UDP504 or LR6 UDP501 HP503 Q or LR6 UD501 15"
           onChange={handleRemarkChange}
         />
       </Form.Item>
@@ -391,8 +425,8 @@ function RemarkRegistryTab({ stationId, selection }) {
   };
 
   const specialTag = (type) => {
-    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
-    const labels = { '6020': '6020', '3thang': '3 THÁNG', '6thang': '6 THÁNG', normal: '-' };
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default', quarter: 'cyan' };
+    const labels = { '6020': '6020', '3thang': '3 THÁNG', '6thang': '6 THÁNG', normal: '-', quarter: t('dmpPerfSpecialQuarterTag') };
     return <Tag color={colors[type] || 'default'}>{labels[type] || type}</Tag>;
   };
 
@@ -607,7 +641,8 @@ function PerfViewTab({ stationId }) {
   const [filterModel, setFilterModel] = useState(null);
   const [filterLoai, setFilterLoai] = useState(null);
   const [filterChuyen, setFilterChuyen] = useState(null);
-  const [sheetsData, setSheetsData] = useState(null); // { [sheetKey]: {rows, conditions} }
+  const [filterFreq, setFilterFreq] = useState(null); // null | "everyday" | "everyweek" | "everymonth" | "quarter"
+  const [sheetsData, setSheetsData] = useState(null); // { [sheetKey]: {rows, conditions, freq_groups} }
   const [activeSheet, setActiveSheet] = useState(null);
 
   // Load entries from SQLite (used on mount and when date range changes)
@@ -701,46 +736,38 @@ function PerfViewTab({ stationId }) {
     }
   }, [stationId, dateRange, applyFilters, t]);
 
-  // Build Ant Design table columns for a given sheet
+  // Build a lookup map: "YYYY-MM-DD:loai" → entry, for EveryQuarter / is15d detection
+  const entryByDateLoai = useMemo(() => {
+    const map = {};
+    for (const e of entries) {
+      for (const g of (e.groups || [])) {
+        const key = `${e.report_date}:${g.loai}`;
+        if (!map[key]) map[key] = e;
+      }
+    }
+    return map;
+  }, [entries]);
+
+  // Build Ant Design table columns for a given sheet, grouped by frequency block
   const buildColumns = useCallback((sheetKey) => {
     if (!sheetsData || !sheetsData[sheetKey]) return [];
-    const { conditions, units: sheetUnits = {} } = sheetsData[sheetKey];
-    const cols = [
-      {
-        title: t('dmpPerfViewDate'),
-        dataIndex: 'date',
-        key: 'date',
-        width: 120,
-        fixed: 'left',
-        render: (v) => <RowLabelCell label={v} />,
-        onCell: (row) => ({
-          style: SPECIAL_ROW_LABELS.has(row.date)
-            ? { background: '#fffbe6', fontWeight: 600 }
-            : {},
-        }),
-      },
-      {
-        title: t('dmpPerfViewLoaiCol'),
-        dataIndex: 'loai',
-        key: 'loai',
-        width: 80,
-        fixed: 'left',
-        render: (v) => <Tag>{v}</Tag>,
-      },
-    ];
+    const { conditions, units: sheetUnits = {}, freq_groups: freqGroups = {} } = sheetsData[sheetKey];
 
-    (conditions || []).forEach((cond) => {
-      // Prefer unit from backend hfsj field; fall back to text inference from label.
-      const backendUnit = sheetUnits[cond]; // "hour" | "minute" | "times" | undefined
+    // Determine which conditions to show based on frequency filter
+    const visibleConditions = (conditions || []).filter((cond) => {
+      if (!filterFreq || filterFreq === 'quarter') return true;
+      const grp = freqGroups[cond] || 'other';
+      return grp === filterFreq;
+    });
+
+    // Helper: build a single condition column (result + rate as children)
+    const buildCondCol = (cond) => {
+      const backendUnit = sheetUnits[cond];
       let unit;
-      if (backendUnit === 'times') {
-        unit = 'times';
-      } else if (backendUnit === 'minute') {
-        unit = 'minute';
-      } else if (backendUnit === 'hour') {
-        unit = 'hour';
-      } else {
-        // Fallback: infer from label text
+      if (backendUnit === 'times') unit = 'times';
+      else if (backendUnit === 'minute') unit = 'minute';
+      else if (backendUnit === 'hour') unit = 'hour';
+      else {
         const lc = cond.toLowerCase();
         if (lc.endsWith('(t)') || /\d+t\/h/.test(lc)) unit = 'times';
         else if (lc.endsWith('(m)')) unit = 'minute';
@@ -749,8 +776,7 @@ function PerfViewTab({ stationId }) {
       const unitLabel = unit === 'times' ? t('dmpPerfViewCount')
         : unit === 'minute' ? t('dmpPerfViewMinutes')
         : t('dmpPerfViewHours');
-
-      cols.push({
+      return {
         title: (
           <Tooltip title={cond}>
             <span style={{ fontSize: 11 }}>{cond}</span>
@@ -781,13 +807,82 @@ function PerfViewTab({ stationId }) {
             },
           },
         ],
-      });
-    });
+      };
+    };
 
-    return cols;
-  }, [sheetsData, t]);
+    const fixedCols = [
+      {
+        title: t('dmpPerfViewDate'),
+        dataIndex: 'date',
+        key: 'date',
+        width: 120,
+        fixed: 'left',
+        render: (v) => <RowLabelCell label={v} />,
+        onCell: (row) => ({
+          style: SPECIAL_ROW_LABELS.has(row.date)
+            ? { background: '#fffbe6', fontWeight: 600 }
+            : {},
+        }),
+      },
+      {
+        title: t('dmpPerfViewLoaiCol'),
+        dataIndex: 'loai',
+        key: 'loai',
+        width: 80,
+        fixed: 'left',
+        render: (v) => <Tag>{v}</Tag>,
+      },
+    ];
+
+    // Group visible conditions by frequency
+    const grouped = {};
+    for (const cond of visibleConditions) {
+      const grp = freqGroups[cond] || 'other';
+      if (!grouped[grp]) grouped[grp] = [];
+      grouped[grp].push(cond);
+    }
+
+    // Build frequency-group header columns in standard order
+    const freqCols = FREQ_GROUP_ORDER.filter((g) => grouped[g]?.length).map((grp) => ({
+      title: (
+        <span style={{ fontWeight: 700, color: '#333' }}>
+          {t(`dmpPerfFreq${grp.charAt(0).toUpperCase() + grp.slice(1)}`)}
+        </span>
+      ),
+      key: `freq_${grp}`,
+      onHeaderCell: () => ({
+        style: {
+          background: FREQ_GROUP_COLORS[grp] || '#f0f0f0',
+          borderBottom: `2px solid ${FREQ_GROUP_BORDER_COLORS[grp] || '#d9d9d9'}`,
+        },
+      }),
+      children: grouped[grp].map(buildCondCol),
+    }));
+
+    return [...fixedCols, ...freqCols];
+  }, [sheetsData, t, filterFreq, entryByDateLoai]);
+
+  // When filterFreq === 'quarter', filter rows to only show those where a matching entry has "Q" in remark
+  const getVisibleRows = useCallback((sheetKey) => {
+    if (!sheetsData || !sheetsData[sheetKey]) return [];
+    const rows = sheetsData[sheetKey].rows || [];
+    if (filterFreq !== 'quarter') return rows;
+    return rows.filter((row) => {
+      const entry = entryByDateLoai[`${row.date}:${row.loai}`];
+      if (!entry) return false;
+      const remark = (entry.raw_remark || '').toUpperCase();
+      return remark.split(/\s+/).includes('Q');
+    });
+  }, [sheetsData, filterFreq, entryByDateLoai]);
 
   const sheetKeys = Object.keys(sheetsData || {});
+
+  const freqFilterOptions = [
+    { value: 'everyday', label: t('dmpPerfFreqEveryday') },
+    { value: 'everyweek', label: t('dmpPerfFreqEveryweek') },
+    { value: 'everymonth', label: t('dmpPerfFreqEverymonth') },
+    { value: 'quarter', label: t('dmpPerfFreqEveryquarter') },
+  ];
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -825,6 +920,14 @@ function PerfViewTab({ stationId }) {
             value={filterChuyen}
             onChange={setFilterChuyen}
             options={chuyenOptions}
+          />
+          <Select
+            allowClear
+            style={{ minWidth: 150 }}
+            placeholder={t('dmpPerfViewFilterFreq')}
+            value={filterFreq}
+            onChange={setFilterFreq}
+            options={freqFilterOptions}
           />
           <Button
             type="primary"
@@ -867,11 +970,17 @@ function PerfViewTab({ stationId }) {
               size="small"
               rowKey={(row, i) => `${row.date}-${row.loai}-${i}`}
               columns={buildColumns(activeSheet)}
-              dataSource={sheetsData[activeSheet].rows || []}
+              dataSource={getVisibleRows(activeSheet)}
               pagination={false}
               scroll={{ x: 'max-content' }}
               bordered
-              rowClassName={(row) => SPECIAL_ROW_LABELS.has(row.date) ? 'perf-special-row' : ''}
+              rowClassName={(row) => {
+                const entry = entryByDateLoai[`${row.date}:${row.loai}`];
+                const isQuarter = entry && (entry.raw_remark || '').toUpperCase().split(/\s+/).includes('Q');
+                if (SPECIAL_ROW_LABELS.has(row.date)) return 'perf-special-row';
+                if (isQuarter) return 'perf-quarter-row';
+                return '';
+              }}
               style={{ borderRadius: 0 }}
             />
           )}
@@ -937,8 +1046,8 @@ function ExportTab({ stationId }) {
   );
 
   const specialTag = (type) => {
-    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
-    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal' };
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default', quarter: 'cyan' };
+    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal', quarter: 'dmpPerfSpecialQuarter' };
     const label = labelKeys[type] ? t(labelKeys[type]) : type;
     return <Tag color={colors[type] || 'default'}>{label}</Tag>;
   };

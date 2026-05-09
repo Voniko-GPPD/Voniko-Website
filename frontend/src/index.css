@@ -47,10 +47,4 @@ code, pre, .ant-typography code {
   background: #8c8c8c;
 }
 
-/* Performance report table: quarter rows (entries with "Q" in remark) */
-.perf-quarter-row td {
-  background: #e6fffb !important;
-}
-.perf-quarter-row:hover td {
-  background: #b5f5ec !important;
-}
+

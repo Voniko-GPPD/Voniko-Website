@@ -5702,6 +5702,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
         return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
 
     groups: dict[str, dict] = {}
+    # Tracks row_keys that had at least one Q-marked entry write to them.
+    # Stored separately so that a later non-Q entry cannot silently overwrite
+    # the True flag that was set by an earlier Q entry for the same row.
+    quarter_keys: dict[str, set] = {}
 
     for entry in payload.entries:
         if not (entry.batch_id or "").strip() and not entry.dm2000_archname:
@@ -5868,9 +5872,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
                         _eg_fdfs_label = _eg_fdfs or _dm2k_eg["loai"]
+                        _eg_row_key = (_eg_row_label, _dm2k_eg["loai"])
                         groups.setdefault(_eg_sheet, {}).setdefault(
-                            (_eg_row_label, _dm2k_eg["loai"]), {}
+                            _eg_row_key, {}
                         )[_eg_fdfs_label] = _eg_perf
+                        if _eg_perf["_is_quarter"]:
+                            quarter_keys.setdefault(_eg_sheet, set()).add(_eg_row_key)
                 continue  # per-group DMP-mirroring done; skip single-archive + DMP paths
 
             # ── No explicit groups: single-archive path (unchanged) ─────────────────────────
@@ -6240,6 +6247,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
                     row_key = (row_label, effective_loai)
                     groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+                    if perf["_is_quarter"]:
+                        quarter_keys.setdefault(sheet_key, set()).add(row_key)
         else:
             # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
             # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
@@ -6387,9 +6396,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             # separate column from the daily variant.
                             if _remark_has_15d(entry.raw_remark):
                                 _feg_fdfs_label = _feg_fdfs_label + " 15d"
+                            _feg_row_key = (_feg_row_label, _fb_eg["loai"])
                             groups.setdefault(_feg_sheet, {}).setdefault(
-                                (_feg_row_label, _fb_eg["loai"]), {}
+                                _feg_row_key, {}
                             )[_feg_fdfs_label] = _feg_perf
+                            if _feg_perf["_is_quarter"]:
+                                quarter_keys.setdefault(_feg_sheet, set()).add(_feg_row_key)
                     continue  # _fb_ per-group DMP-mirroring done; skip rest of DMP path
 
                 # No explicit groups: single-archive path
@@ -6520,9 +6532,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         # Append "15d" marker when the entry remark contains "15"
                         if _remark_has_15d(entry.raw_remark):
                             _fb_fdfs_label = _fb_fdfs_label + " 15d"
+                        _fb_row_key = (_fb_row_label, _fb_grp_loai)
                         groups.setdefault(_fb_sheet, {}).setdefault(
-                            (_fb_row_label, _fb_grp_loai), {}
+                            _fb_row_key, {}
                         )[_fb_fdfs_label] = _fb_perf
+                        if _fb_perf["_is_quarter"]:
+                            quarter_keys.setdefault(_fb_sheet, set()).add(_fb_row_key)
                     continue  # DM2000 path handled; skip rest of DMP path
 
             # Both DMP and DM2000 lookups failed.
@@ -6621,8 +6636,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
                 row_key = (row_label, effective_loai)
                 groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+                if perf["_is_quarter"]:
+                    quarter_keys.setdefault(sheet_key, set()).add(row_key)
 
-    return groups
+    return groups, quarter_keys
 
 
 @app.post("/dmp-perf-report/generate")
@@ -6635,7 +6652,7 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    groups = _compute_dmp_perf_groups(payload)
+    groups, _ = _compute_dmp_perf_groups(payload)
 
     if not groups:
         raise HTTPException(
@@ -6696,7 +6713,7 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
     # skip_not_found=True: entries with no matching DMP data are omitted from the
     # web preview so the table does not show spurious empty rows or columns whose
     # header is the battery grade (e.g. "UD+") rather than the real test condition.
-    groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
+    groups, quarter_keys = _compute_dmp_perf_groups(payload, skip_not_found=True)
 
     sheets: dict = {}
     for sheet_key, date_type_map in groups.items():
@@ -6760,18 +6777,11 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
-            # A row is a "quarter" (comprehensive measurement) row when:
-            # 1. Any condition has _is_quarter=True (explicit "Q" remark marker), OR
-            # 2. The row contains at least one condition from the "everymonth" frequency
-            #    group — indicating a comprehensive measurement day where periodic
-            #    (weekly + monthly) conditions were also tested alongside the daily ones.
-            #    Such days correspond to monthly or quarterly check-ups and should be
-            #    visible when the "Every Quarter" filter is selected.
-            _row_freq_groups = {freq_groups.get(c, "other") for c in conditions}
-            row_is_quarter = (
-                any(perf.get("_is_quarter", False) for perf in conditions.values())
-                or "everymonth" in _row_freq_groups
-            )
+            # A row is a "quarter" (Every Quarter) row only when at least one
+            # entry with a standalone "Q" token in raw_remark contributed to it.
+            # The quarter_keys dict is populated during _compute_dmp_perf_groups
+            # and is immune to later non-Q entries overwriting the flag.
+            row_is_quarter = (row_label, loai) in quarter_keys.get(sheet_key, set())
             rows.append({
                 "date": row_label,
                 "loai": loai,

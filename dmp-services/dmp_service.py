@@ -5416,7 +5416,10 @@ def _extract_made_date_from_remark(remark: Optional[str]) -> Optional[str]:
         mm = int(first[2:4])
         yy = int(first[4:6])
         cur_year = date.today().year
-        # Choose the century whose year is closest to today; prefer 2000s on ties.
+        # Choose the century whose year is closest to today.
+        # When both centuries are equidistant (yy exactly 50 years from cur_year),
+        # the `<=` condition selects 2000s, which is the expected behaviour for
+        # modern manufacture dates.
         century = 2000 if abs(2000 + yy - cur_year) <= abs(1900 + yy - cur_year) else 1900
         return date(century + yy, mm, dd).strftime("%Y-%m-%d")
     except (ValueError, TypeError):

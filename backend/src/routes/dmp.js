@@ -884,6 +884,151 @@ router.delete('/perf-entries/:id', authenticateToken, (req, res) => {
   }
 });
 
+// GET /api/dmp/perf-entries/export?stationId= — export all entries for a station as Excel
+router.get('/perf-entries/export', authenticateToken, async (req, res) => {
+  const ExcelJS = require('exceljs');
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  const { stationId } = req.query;
+  try {
+    let sql = 'SELECT * FROM dmp_perf_entries WHERE 1=1';
+    const params = [];
+    if (stationId) { sql += ' AND station_id = ?'; params.push(stationId); }
+    sql += ' ORDER BY report_date DESC, created_at DESC';
+    const rows = db.prepare(sql).all(...params);
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Remark Data');
+    sheet.columns = [
+      { header: 'id', key: 'id', width: 38 },
+      { header: 'station_id', key: 'station_id', width: 20 },
+      { header: 'batch_id', key: 'batch_id', width: 14 },
+      { header: 'report_date', key: 'report_date', width: 14 },
+      { header: 'model', key: 'model', width: 10 },
+      { header: 'groups_json', key: 'groups_json', width: 60 },
+      { header: 'special_type', key: 'special_type', width: 14 },
+      { header: 'raw_remark', key: 'raw_remark', width: 40 },
+      { header: 'notes', key: 'notes', width: 30 },
+      { header: 'dm2000_archname', key: 'dm2000_archname', width: 20 },
+    ];
+    // Style header row
+    sheet.getRow(1).font = { bold: true };
+    rows.forEach((r) => sheet.addRow(r));
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="remark_data_${stationId || 'all'}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/perf-entries/import?stationId= — import entries from Excel (upsert by id)
+router.post('/perf-entries/import', authenticateToken, upload.single('file'), async (req, res) => {
+  const ExcelJS = require('exceljs');
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const db = getDb();
+  const { stationId } = req.query;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(req.file.buffer);
+    const sheet = workbook.worksheets[0];
+    if (!sheet) return res.status(400).json({ error: 'Excel file has no sheets' });
+
+    // Read header row to build column index map
+    const headerRow = sheet.getRow(1).values; // 1-indexed, index 0 is empty
+    const colIdx = {};
+    headerRow.forEach((h, i) => { if (h) colIdx[String(h).trim()] = i; });
+
+    const upsert = db.prepare(`
+      INSERT INTO dmp_perf_entries
+        (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, dm2000_archname, created_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now') || 'Z', datetime('now') || 'Z')
+      ON CONFLICT(id) DO UPDATE SET
+        station_id = excluded.station_id,
+        batch_id = excluded.batch_id,
+        report_date = excluded.report_date,
+        model = excluded.model,
+        groups_json = excluded.groups_json,
+        special_type = excluded.special_type,
+        raw_remark = excluded.raw_remark,
+        notes = excluded.notes,
+        dm2000_archname = excluded.dm2000_archname,
+        updated_at = datetime('now') || 'Z'
+    `);
+
+    const getCell = (row, key) => {
+      const idx = colIdx[key];
+      if (idx == null) return null;
+      const cell = row.getCell(idx);
+      const v = cell.value;
+      if (v == null) return null;
+      return String(v).trim() || null;
+    };
+
+    let imported = 0;
+    let skipped = 0;
+    db.transaction(() => {
+      sheet.eachRow((row, rowNum) => {
+        if (rowNum === 1) return; // skip header
+        const effectiveStationId = stationId || getCell(row, 'station_id') || null;
+        const model = getCell(row, 'model');
+        if (!effectiveStationId || !model) { skipped += 1; return; }
+
+        let groupsJson = getCell(row, 'groups_json') || '[]';
+        // Validate JSON; fall back to empty array on parse error
+        try { JSON.parse(groupsJson); } catch (_) { groupsJson = '[]'; }
+
+        const rawRemark = getCell(row, 'raw_remark');
+        let effectiveBatchId = getCell(row, 'batch_id');
+        let effectiveDate = getCell(row, 'report_date');
+        // Derive batch_id / report_date from raw_remark when columns are absent
+        if ((!effectiveBatchId || !effectiveDate) && rawRemark) {
+          const firstToken = rawRemark.trim().split(/\s+/)[0] || '';
+          if (/^\d{6}$/.test(firstToken)) {
+            const day = parseInt(firstToken.substring(0, 2), 10);
+            const month = parseInt(firstToken.substring(2, 4), 10);
+            const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
+            const candidate = new Date(year, month - 1, day);
+            const isValid = candidate.getFullYear() === year
+              && candidate.getMonth() === month - 1
+              && candidate.getDate() === day;
+            if (isValid) {
+              if (!effectiveBatchId) effectiveBatchId = firstToken;
+              if (!effectiveDate) effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            }
+          }
+        }
+        if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+        if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
+
+        const id = getCell(row, 'id') || uuidv4();
+        upsert.run(
+          id,
+          effectiveStationId,
+          effectiveBatchId,
+          effectiveDate,
+          model,
+          groupsJson,
+          getCell(row, 'special_type') || 'normal',
+          rawRemark,
+          getCell(row, 'notes'),
+          getCell(row, 'dm2000_archname'),
+          req.user.id,
+        );
+        imported += 1;
+      });
+    })();
+
+    res.json({ ok: true, imported, skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/dmp/dmp-perf-templates?stationId=
 router.get('/dmp-perf-templates', authenticateToken, async (req, res, next) => {
   const stationUrl = getStationUrl(req.query.stationId, res);

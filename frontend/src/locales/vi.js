@@ -791,4 +791,9 @@ export default {
   dmpPerfViewFilterFreq: 'Tần suất đo',
   dmpPerfSpecialQuarter: 'Hàng quý (đo toàn bộ điều kiện)',
   dmpPerfViewFreqAll: 'Tất cả tần suất',
+  dmpPerfExportExcel: 'Xuất Excel',
+  dmpPerfImportExcel: 'Nhập Excel',
+  dmpPerfExportFailed: 'Xuất Excel thất bại',
+  dmpPerfImportSuccess: 'Nhập Excel thành công',
+  dmpPerfImportFailed: 'Nhập Excel thất bại',
 };

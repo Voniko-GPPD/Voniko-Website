@@ -790,4 +790,9 @@ export default {
   dmpPerfViewFilterFreq: '测试频率',
   dmpPerfSpecialQuarter: '季度行（全条件测试日）',
   dmpPerfViewFreqAll: '所有频率',
+  dmpPerfExportExcel: '导出 Excel',
+  dmpPerfImportExcel: '导入 Excel',
+  dmpPerfExportFailed: '导出 Excel 失败',
+  dmpPerfImportSuccess: '导入 Excel 成功',
+  dmpPerfImportFailed: '导入 Excel 失败',
 };

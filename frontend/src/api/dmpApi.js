@@ -192,6 +192,46 @@ export async function deletePerfEntry(id) {
   return res.json();
 }
 
+export async function exportPerfEntries(stationId) {
+  const token = localStorage.getItem('accessToken');
+  const params = new URLSearchParams();
+  if (stationId) params.set('stationId', stationId);
+  const res = await fetch(`${BASE}/perf-entries/export?${params.toString()}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Export failed');
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `remark_data_${stationId || 'all'}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function importPerfEntries(stationId, file) {
+  const token = localStorage.getItem('accessToken');
+  const params = new URLSearchParams();
+  if (stationId) params.set('stationId', stationId);
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/perf-entries/import?${params.toString()}`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Import failed');
+  }
+  return res.json();
+}
+
 export async function fetchDmpPerfTemplates(stationId) {
   const res = await apiFetch(`${BASE}/dmp-perf-templates?stationId=${encodeURIComponent(stationId)}`);
   const data = await res.json();

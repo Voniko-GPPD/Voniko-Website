@@ -2562,10 +2562,15 @@ def get_batches(year: Optional[int] = None):
             dcmc_val_singl = _dm2000_get_value(singl_ext, "dcmc")
             if dcmc_val_singl is not None and not _dmp_is_empty(dcmc_val_singl) and _dmp_is_empty(row.get("name")):
                 row["name"] = str(dcmc_val_singl).strip()
-            # scrq is the sample/start date from para_singl; use it as madedate.
-            scrq_val = _dm2000_get_value(singl_ext, "scrq")
-            if scrq_val is not None and _dmp_is_empty(row.get("madedate")):
-                row["madedate"] = _to_date_str(scrq_val)
+            # madedate: prefer DDMMYY prefix in para_pub.bz remark; fall back to scrq.
+            _bz_for_md = str(_dm2000_get_value(row, "bz") or "")
+            _madedate_from_bz = _extract_made_date_from_remark(_bz_for_md)
+            if _madedate_from_bz and _dmp_is_empty(row.get("madedate")):
+                row["madedate"] = _madedate_from_bz
+            elif not _madedate_from_bz:
+                scrq_val = _dm2000_get_value(singl_ext, "scrq")
+                if scrq_val is not None and _dmp_is_empty(row.get("madedate")):
+                    row["madedate"] = _to_date_str(scrq_val)
 
         # Serial No comes from para_singl.dcph.
         if singl_ext:
@@ -2882,7 +2887,7 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
         # builder compute it from time-at-voltage data.
         "unifrate": "",
         "manufacturer": str(_apply_override(first_singl.get("scdw"), payload.override_manufacturer) or ""),
-        "madedate": _to_date_text(first_singl.get("scrq")),
+        "madedate": _extract_made_date_from_remark(str(batch.get("bz") or "")) or _to_date_text(first_singl.get("scrq")),
         "serialno": str(first_singl.get("dcph") or ""),
         "remarks": str(batch.get("bz") or ""),
         # Voltage type — para_pub.dylx; falls back to fdlx/jstj for older schemas.
@@ -3147,6 +3152,12 @@ def get_dm2000_archives(
         # Build database file path from archname and data directory
         archname_val = item.get("archname") or ""
         item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
+        # Override madedate with the DDMMYY date prefix embedded in the remark,
+        # which encodes the actual manufacture date.  Fall back to the scrq value
+        # already stored in madedate when no valid prefix is found.
+        _md_from_remark = _extract_made_date_from_remark(str(item.get("remarks") or ""))
+        if _md_from_remark:
+            item["madedate"] = _md_from_remark
         # Pre-compute the human-readable Dis-condition display string (same formula
         # as the frontend renderer) so keyword and dis_condition_filter can match it.
         item["_dis_condition_display"] = _build_dis_condition_display(item)
@@ -3859,7 +3870,11 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
         "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
         "MANUFACTURER": _apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
-        "MADE_DATE": _apply_override(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
+        "MADE_DATE": _apply_override(
+            _extract_made_date_from_remark(str(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh") or ""))
+            or str(_dm2000_get_value(archive, "madedate", "scrq") or ""),
+            payload.override_made_date,
+        ),
         "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no"), payload.override_serial_no),
         "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh"), payload.override_remarks),
         "BATTERY_NO": baty_label,
@@ -4416,6 +4431,10 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         ) or ""),
         "min_duration": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts") or ""),
     }
+    # Override madedate with the DDMMYY date prefix from the remark field.
+    _af_md = _extract_made_date_from_remark(archive_fields.get("remarks", ""))
+    if _af_md:
+        archive_fields["madedate"] = _af_md
 
     # Fetch per-battery params (OCV/FCV/SOt)
     try:
@@ -4938,8 +4957,11 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
                 return v.strftime("%Y-%m-%d")
             return str(v)[:10] if v not in (None, "") else ""
 
-        startdate = _to_date_text(
-            _dm2000_get_value(archive, "startdate", "fdrq")
+        _bz_raw = str(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh") or "").strip()
+        madedate = (
+            _extract_made_date_from_remark(_bz_raw)
+            or _to_date_text(_dm2000_get_value(archive, "madedate", "scrq"))
+            or _to_date_text(_dm2000_get_value(archive, "startdate", "fdrq"))
         )
         fdfs_raw = str(_dm2000_get_value(archive, "fdfs") or "").strip()
         dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
@@ -5009,7 +5031,7 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
 
         # Insert into groups structure
         sheet_group = groups.setdefault(sheet_name, {})
-        row_key = (startdate, entry.battery_type)
+        row_key = (madedate, entry.battery_type)
         row_data = sheet_group.setdefault(row_key, {})
         row_data[fdfs] = perf
 
@@ -5374,6 +5396,36 @@ async def upload_dmp_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
+def _extract_made_date_from_remark(remark: Optional[str]) -> Optional[str]:
+    """Extract a manufacture date from a DDMMYY prefix in *remark*.
+
+    If the remark starts with a 6-digit token in DDMMYY format
+    (e.g. ``"160226 LR6 UD501"``), converts it to a ``YYYY-MM-DD`` string.
+    The century is chosen by picking whichever of 1900+YY or 2000+YY is
+    closest to the current year (ties go to 2000s).
+    Returns ``None`` when no valid DDMMYY prefix is found.
+    """
+    tokens = (remark or "").strip().split()
+    if not tokens:
+        return None
+    first = tokens[0]
+    if not re.fullmatch(r"\d{6}", first):
+        return None
+    try:
+        dd = int(first[0:2])
+        mm = int(first[2:4])
+        yy = int(first[4:6])
+        cur_year = date.today().year
+        # Choose the century whose year is closest to today.
+        # When both centuries are equidistant (yy exactly 50 years from cur_year),
+        # the `<=` condition selects 2000s, which is the expected behaviour for
+        # modern manufacture dates.
+        century = 2000 if abs(2000 + yy - cur_year) <= abs(1900 + yy - cur_year) else 1900
+        return date(century + yy, mm, dd).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
 def _parse_bz_groups(bz: str) -> list[dict]:
     """Parse a DM2000 remark like ``'LR6 UDP501 HP503'`` into group tokens.
 
@@ -5383,14 +5435,12 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     * ``HP{n}``   →  ``{"loai": "HP",  "chuyen": "{n}"}``
     * ``UD{n}``   →  ``{"loai": "UD",  "chuyen": "{n}"}``
 
-    A leading 6-digit DDMMYY date token is skipped.  Unrecognised tokens (e.g.
-    model names like ``'LR6'``) are silently ignored.  Returns ``[]`` when no
-    group tokens are found.
+    Unrecognised tokens (e.g. model names like ``'LR6'`` or a leading DDMMYY
+    date) are silently ignored.  Returns ``[]`` when no group tokens are found.
     """
     groups: list[dict] = []
     tokens = (bz or "").strip().upper().split()
-    start = 1 if (tokens and re.fullmatch(r"\d{6}", tokens[0])) else 0
-    for tok in tokens[start:]:
+    for tok in tokens:
         if re.fullmatch(r"UDP\d+", tok):
             groups.append({"loai": "UD+", "chuyen": tok[3:]})
         elif re.fullmatch(r"HP\d+", tok):
@@ -5760,21 +5810,25 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _eg_fdfs = _build_dm2000_condition_label(
                             _eg_fdfs_raw, _eg_load_res, _eg_ep_str, _dm2k_arch,
                         )
-                        _eg_startdate = _dm2000_get_value(_eg_arch, "startdate", "fdrq")
-                        _eg_fdrq = _to_date(_eg_startdate) if _eg_startdate else ""
+                        # Determine row label — use made date from remark DDMMYY prefix;
+                        # fall back to archive start date (fdrq), then entry.report_date.
+                        _eg_arch_bz = str(_dm2000_get_value(
+                            _eg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                        ) or "").strip()
+                        _eg_madedate = (
+                            _extract_made_date_from_remark(_eg_arch_bz)
+                            or _to_date(_dm2000_get_value(_eg_arch, "startdate", "fdrq") or "")
+                        )
                         if entry.special_type in _SPECIAL_TYPE_LABEL:
                             _eg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                        elif _eg_fdrq:
-                            _eg_row_label = _eg_fdrq
+                        elif _eg_madedate:
+                            _eg_row_label = _eg_madedate
                         elif entry.report_date:
                             _eg_row_label = _to_date(entry.report_date) or entry.report_date
                         else:
                             _eg_row_label = _dm2k_arch
                         # Step 3: determine batys (mirrors DMP trays logic)
                         _eg_all_batys = _get_batys_for_archive(_eg_resolved)
-                        _eg_arch_bz = str(_dm2000_get_value(
-                            _eg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
-                        ) or "").strip()
                         _eg_arch_bz_gs = _parse_bz_groups(_eg_arch_bz)
                         if _dm2k_eg["trays"]:
                             _eg_batys = [
@@ -5880,16 +5934,20 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_fdfs_raw, _dm2k_load_res, _dm2k_ep_str, _dm2k_arch,
             )
 
-            # Determine row label — prefer the archive's own start date (fdrq) over
-            # entry.report_date, which is typically set to today when no date prefix
-            # was entered in the remark.  The DM2000 archive's fdrq is the actual
-            # test start date and should be used as the row label.
-            _dm2k_startdate_raw = _dm2000_get_value(_arch_meta, "startdate", "fdrq")
-            _dm2k_fdrq = _to_date(_dm2k_startdate_raw) if _dm2k_startdate_raw else ""
+            # Determine row label — use made date from remark DDMMYY prefix;
+            # fall back to archive start date (fdrq), then entry.report_date.
+            # Compute _dm2k_bz_raw early so it can be reused for group parsing below.
+            _dm2k_bz_raw = str(_dm2000_get_value(
+                _arch_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+            ) or "").strip()
+            _dm2k_madedate = (
+                _extract_made_date_from_remark(_dm2k_bz_raw)
+                or _to_date(_dm2000_get_value(_arch_meta, "startdate", "fdrq") or "")
+            )
             if entry.special_type in _SPECIAL_TYPE_LABEL:
                 _dm2k_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-            elif _dm2k_fdrq:
-                _dm2k_row_label = _dm2k_fdrq
+            elif _dm2k_madedate:
+                _dm2k_row_label = _dm2k_madedate
             elif entry.report_date:
                 _dm2k_row_label = _to_date(entry.report_date) or entry.report_date
             else:
@@ -5903,9 +5961,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # two groups with positional tray assignment ([1-4] for group-0, [6-9] for
             # group-1).  Using all batteries for a single group would mix channels from
             # different production lines and produce an incorrect average.
-            _dm2k_bz_raw = str(_dm2000_get_value(
-                _arch_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
-            ) or "").strip()
             _dm2k_bz_groups = _parse_bz_groups(_dm2k_bz_raw)
             _dm2k_eff_groups = [
                 {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
@@ -6039,18 +6094,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
         # Fallback: search para_pub.bz (remark field) using the raw_remark text.
-        # This handles the case where the user entered a remark without a date
-        # prefix (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date
-        # and the date-based lookup yields no results, but the corresponding
-        # para_pub row can still be identified by its bz value.
+        # This handles the case where the user entered a remark without a batch_id
+        # (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date and the
+        # date-based lookup yields no results, but the corresponding para_pub row
+        # can still be identified by its bz value.
         if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
             _remark_search = entry.raw_remark.strip()
-            # Strip leading 6-digit DDMMYY date prefix so "160226 LR6 UD501"
-            # becomes "LR6 UD501" and matches bz = "160226 LR6 UD501 UD502".
-            _remark_tokens = _remark_search.split()
-            if _remark_tokens and re.fullmatch(r"\d{6}", _remark_tokens[0]):
-                # Drop the leading DDMMYY date prefix
-                _remark_tokens = _remark_tokens[1:]
             # Strip trailing frequency-variant tokens ("15", "Q") so that a
             # remark data entry "LR6 UD501 UD502" finds both the daily batch
             # (bz="LR6 UD501 UD502") and the every-15-days batch
@@ -6059,11 +6108,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # from the matched batch's own bz value at write time.
             # The set contains uppercase strings; .upper() on each token ensures
             # case-insensitive matching (handles "q" as well as "Q", etc.).
-            _remark_tokens = [t for t in _remark_tokens if t.upper() not in {"15", "Q"}]
+            _remark_tokens = [t for t in _remark_search.split() if t.upper() not in {"15", "Q"}]
             _remark_search = " ".join(_remark_tokens).strip()
             if _remark_search:
-                # Leading wildcard is intentional: bz values often contain a
-                # DDMMYY date prefix before the remark text (e.g. "160226 LR6 UD501").
+                # Leading wildcard is intentional: bz values in the database may
+                # contain characters before the remark text.
                 _bz_pattern = f"%{_remark_search}%"
                 _bz_sql = (
                     "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
@@ -6275,20 +6324,24 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _feg_fdfs = _build_dm2000_condition_label(
                                 _feg_fdfs_raw, _feg_load_res, _feg_ep_str, _fb_remark,
                             )
-                            _feg_startdate = _dm2000_get_value(_feg_arch, "startdate", "fdrq")
-                            _feg_fdrq = _to_date(_feg_startdate) if _feg_startdate else ""
+                            # Determine row label — use made date from remark DDMMYY prefix;
+                            # fall back to archive start date (fdrq), then entry.report_date.
+                            _feg_arch_bz = str(_dm2000_get_value(
+                                _feg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                            ) or "").strip()
+                            _feg_madedate = (
+                                _extract_made_date_from_remark(_feg_arch_bz)
+                                or _to_date(_dm2000_get_value(_feg_arch, "startdate", "fdrq") or "")
+                            )
                             if entry.special_type in _SPECIAL_TYPE_LABEL:
                                 _feg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                            elif _feg_fdrq:
-                                _feg_row_label = _feg_fdrq
+                            elif _feg_madedate:
+                                _feg_row_label = _feg_madedate
                             elif entry.report_date:
                                 _feg_row_label = _to_date(entry.report_date) or entry.report_date
                             else:
                                 _feg_row_label = _fb_remark
                             _feg_all_batys = _get_batys_for_archive(_feg_resolved)
-                            _feg_arch_bz = str(_dm2000_get_value(
-                                _feg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
-                            ) or "").strip()
                             _feg_arch_bz_gs = _parse_bz_groups(_feg_arch_bz)
                             if _fb_eg["trays"]:
                                 _feg_batys = [
@@ -6389,15 +6442,20 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_fdfs = _build_dm2000_condition_label(
                         _fb_fdfs_raw, _fb_load_res, _fb_ep_str, _fb_remark,
                     )
-                    # Determine row label — prefer the archive's own start date (fdrq)
-                    # over entry.report_date, which is typically set to today when no
-                    # date prefix was entered in the remark.
-                    _fb_startdate_raw = _dm2000_get_value(_fb_meta, "startdate", "fdrq")
-                    _fb_fdrq = _to_date(_fb_startdate_raw) if _fb_startdate_raw else ""
+                    # Determine row label — use made date from remark DDMMYY prefix;
+                    # fall back to archive start date (fdrq), then entry.report_date.
+                    # Compute _fb_bz_raw early so it can be reused for group parsing below.
+                    _fb_bz_raw = str(_dm2000_get_value(
+                        _fb_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+                    ) or "").strip()
+                    _fb_madedate = (
+                        _extract_made_date_from_remark(_fb_bz_raw)
+                        or _to_date(_dm2000_get_value(_fb_meta, "startdate", "fdrq") or "")
+                    )
                     if entry.special_type in _SPECIAL_TYPE_LABEL:
                         _fb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                    elif _fb_fdrq:
-                        _fb_row_label = _fb_fdrq
+                    elif _fb_madedate:
+                        _fb_row_label = _fb_madedate
                     elif entry.report_date:
                         _fb_row_label = _to_date(entry.report_date) or entry.report_date
                     else:
@@ -6408,9 +6466,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # HP503" implies two groups with positional tray assignment ([1-4]
                     # for group-0, [6-9] for group-1).  Using all batteries for a single
                     # group would mix channels from different production lines.
-                    _fb_bz_raw = str(_dm2000_get_value(
-                        _fb_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
-                    ) or "").strip()
                     _fb_bz_groups = _parse_bz_groups(_fb_bz_raw)
                     _fb_eff_groups = [
                         {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}

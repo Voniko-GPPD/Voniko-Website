@@ -41,7 +41,7 @@ import {
 } from '../../../api/dmpApi';
 import { useLang } from '../../../contexts/LangContext';
 
-const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang', 'quarter'];
+const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
 
 /** Frequency group order for column grouping headers. */
@@ -269,7 +269,7 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
 
-  // Auto-parse remark to fill model + groups + special_type (Q → quarter)
+  // Auto-parse remark to fill model + groups
   const handleRemarkChange = (e) => {
     const raw = e.target.value;
     const parsed = parseRemark(raw);
@@ -279,10 +279,6 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
     }
     if (parsed.groups.length > 0) {
       setGroups(parsed.groups);
-    }
-    // Auto-set special_type to 'quarter' when "Q" marker is present
-    if (parsed.isQuarter) {
-      form.setFieldValue('special_type', 'quarter');
     }
   };
 
@@ -349,6 +345,30 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
           onChange={handleRemarkChange}
         />
       </Form.Item>
+      {/* ── Suffix helper: click to append a common suffix token to the remark ── */}
+      <div style={{ marginTop: -16, marginBottom: 12 }}>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t('dmpPerfRemarkSuffix')}:{' '}
+        </Typography.Text>
+        {['15', 'Q'].map((sfx) => (
+          <Tag
+            key={sfx}
+            color="blue"
+            style={{ cursor: 'pointer', userSelect: 'none' }}
+            onClick={() => {
+              const current = (form.getFieldValue('raw_remark') || '').trim();
+              const tokens = current.toUpperCase().split(/\s+/);
+              if (!tokens.includes(sfx)) {
+                const newVal = current ? `${current} ${sfx}` : sfx;
+                form.setFieldValue('raw_remark', newVal);
+                handleRemarkChange({ target: { value: newVal } });
+              }
+            }}
+          >
+            +{sfx}
+          </Tag>
+        ))}
+      </div>
 
       {/* ── Common fields ── */}
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>

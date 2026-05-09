@@ -726,6 +726,7 @@ export default {
   dmpPerfEntrySpecialType: 'Loại hàng',
   dmpPerfEntryRemark: 'Remark',
   dmpPerfEntryNotes: 'Ghi chú',
+  dmpPerfRemarkSuffix: 'Hậu tố',
   dmpPerfSpecialNormal: 'Hàng thường (theo ngày)',
   dmpPerfSpecial6020: 'Hàng 6020',
   dmpPerfSpecial3thang: 'Hàng 3 THÁNG',

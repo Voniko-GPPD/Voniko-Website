@@ -1122,6 +1122,7 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         "270ohm 1h/d-5.4V",
         "620ohm 2h/d-5.4V",
         "620ohm+10Kohm 1s/60m.24h/d-7.5V",
+        "620+10k 1s/60m.24h/d-7.5V",           # DM2000 alias (shorter load-res format)
     ],
 }
 
@@ -1171,12 +1172,43 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
         "270ohm 1h/d-5.4V":                                    "everyweek",
         "620ohm 2h/d-5.4V":                                    "everymonth",
         "620ohm+10Kohm 1s/60m.24h/d-7.5V":                     "everymonth",
+        "620+10k 1s/60m.24h/d-7.5V":                           "everymonth",  # DM2000 alias
     },
 }
 
 # Normalise bracket style so that DMP-software labels using {} are treated the
 # same as template labels that use () when doing template-order lookups.
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
+
+
+def _sep_normalize(s: str) -> str:
+    """Normalize separator characters in a condition label for fuzzy matching.
+
+    Removes whitespace and commas (used as condition-part separators by both the
+    DMP software and DM2000, e.g. ``"5.1ohm 4m/h,8h/d"`` vs ``"5.1ohm 4m/h 8h/d"``),
+    and removes periods that are **not** part of a decimal number (e.g. the period
+    in ``"1s/60m.24h/d"`` is a separator and is removed, while the ``"."`` in
+    ``"3.9ohm"`` or ``"7.5V"`` is a decimal point and is preserved because it is
+    preceded by a digit).
+    """
+    # Remove whitespace and commas (separator usage)
+    s = re.sub(r'[\s,]+', '', s)
+    # Remove periods NOT preceded by a digit (separator usage, e.g. "1s/60m.24h/d")
+    s = re.sub(r'(?<!\d)\.', '', s)
+    return s
+
+
+def _remark_has_15d(raw_remark: Optional[str]) -> bool:
+    """Return True when *raw_remark* contains a standalone ``'15'`` token.
+
+    A standalone ``'15'`` in the remark (e.g. ``"LR6 UD501 HP502 15"``) indicates
+    that this measurement entry uses the every-15-days variant of the
+    ``(1500mW2s,650mW28s)10T/h,24h/d`` discharge condition so that it is displayed
+    in a separate column from the daily variant of the same condition.
+    """
+    if not raw_remark:
+        return False
+    return "15" in raw_remark.strip().upper().split()
 
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
@@ -1223,6 +1255,25 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     if f_no_v and h_no_v and f_no_v == h_no_v:
         return True
 
+    # Separator-normalised match: handles DMP/DM2000 labels that use commas or
+    # non-decimal periods as separators between condition parts, e.g.
+    #   "5.1ohm 4m/h,8h/d-0.9V"  matches  "5.1ohm 4m/h 8h/d-0.9V"
+    #   "24ohm 15s/m,8h/d-1V"    matches  "24ohm 15s/m 8h/d-1V"
+    #   "1s/60m.24h/d"            matches  "1s/60m,24h/d"
+    f_sep = _sep_normalize(f)
+    h_sep = _sep_normalize(h)
+    if f_sep and h_sep and f_sep == h_sep:
+        return True
+    # Sep-normalised + voltage-stripped variants
+    f_sep_no_v = _sep_normalize(_vsuf.sub('', f))
+    h_sep_no_v = _sep_normalize(_vsuf.sub('', h))
+    if f_sep_no_v and h_sep and f_sep_no_v == h_sep:
+        return True
+    if f_sep and h_sep_no_v and f_sep == h_sep_no_v:
+        return True
+    if f_sep_no_v and h_sep_no_v and f_sep_no_v == h_sep_no_v:
+        return True
+
     return False
 
 
@@ -1232,11 +1283,17 @@ def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
     *template_pos* is the 0-based position in the IEC template for *battery_type*,
     or ``len(template)`` when the condition is not found (unrecognised conditions
     are appended at the end, preserving their relative insertion order via *cond*).
+
+    Strips a trailing ``" 15d"`` marker (appended by ``_compute_dmp_perf_groups``
+    for every-15-days entries) before the template lookup so that the 15d variant
+    of a condition sorts immediately after its daily counterpart.
     """
+    # Strip "15d" suffix so the 15d variant maps to the same template position
+    _cond = cond[:-4] if cond.endswith(" 15d") else cond
     battery_type_upper = battery_type.strip().upper()
     template = _TEMPLATE_CONDITION_ORDER.get(battery_type_upper, [])
     for i, tmpl_entry in enumerate(template):
-        if _perf_fdfs_matches_template(cond, tmpl_entry):
+        if _perf_fdfs_matches_template(_cond, tmpl_entry):
             return (i, cond)
     return (len(template), cond)
 
@@ -1248,10 +1305,16 @@ def _get_condition_freq_group(cond: str, battery_type: str) -> str:
     Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
     minor variations in spacing, bracket style, or trailing voltage suffix are
     still correctly categorised.
+
+    Strips a trailing ``" 15d"`` marker (appended by ``_compute_dmp_perf_groups``
+    for every-15-days entries) before the lookup so the 15d variant inherits the
+    same frequency group as its base condition.
     """
+    # Strip "15d" suffix so the modified label still maps to the correct group
+    _cond = cond[:-4] if cond.endswith(" 15d") else cond
     freq_map = _CONDITION_FREQ_GROUP.get(battery_type.strip().upper(), {})
     for tmpl_label, group in freq_map.items():
-        if _perf_fdfs_matches_template(cond, tmpl_label):
+        if _perf_fdfs_matches_template(_cond, tmpl_label):
             return group
     return "other"
 
@@ -6160,6 +6223,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
                             _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
+                            # Append "15d" marker when the entry remark contains "15"
+                            # so that the every-15-days measurement appears as a
+                            # separate column from the daily variant.
+                            if _remark_has_15d(entry.raw_remark):
+                                _feg_fdfs_label = _feg_fdfs_label + " 15d"
                             groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
                             )[_feg_fdfs_label] = _feg_perf
@@ -6287,6 +6355,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
                         _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
+                        # Append "15d" marker when the entry remark contains "15"
+                        if _remark_has_15d(entry.raw_remark):
+                            _fb_fdfs_label = _fb_fdfs_label + " 15d"
                         groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}
                         )[_fb_fdfs_label] = _fb_perf
@@ -6402,6 +6473,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # fdfs label for column matching
             fdfs_label = fdfs if fdfs else effective_loai
+            # Append "15d" marker when the entry remark contains "15" so that the
+            # every-15-days measurement appears in a separate column from the daily
+            # variant of the same discharge condition.
+            if _remark_has_15d(entry.raw_remark):
+                fdfs_label = fdfs_label + " 15d"
 
             row_key = (row_label, effective_loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf

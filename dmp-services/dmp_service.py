@@ -5865,7 +5865,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _eg_tav = _get_tav_for_batteries(_eg_resolved, _eg_batys)
                         _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
                         _eg_perf["hfsj_unit"] = "hour"
-                        _eg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
+                        _eg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_eg_arch_bz)
                         _eg_sheet = (
                             entry.model.strip()
                             if _dm2k_model_up in _dm2k_no_ch
@@ -6035,7 +6035,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_tav_map = _get_tav_for_batteries(_dm2k_resolved, _dm2k_batys)
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
-                _dm2k_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
+                _dm2k_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_dm2k_bz_raw)
 
                 _dm2k_grp_chuyen = _dm2k_eff_grp.get("chuyen") or ""
                 _dm2k_grp_loai = _dm2k_eff_grp.get("loai") or ""
@@ -6047,6 +6047,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
+                if _dm2k_perf["_is_quarter"]:
+                    quarter_keys.setdefault(_dm2k_sheet_key, set()).add(_dm2k_row_key)
 
             continue  # Skip DMP lookup path for this entry
 
@@ -6384,7 +6386,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _feg_tav = _get_tav_for_batteries(_feg_resolved, _feg_batys)
                             _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
                             _feg_perf["hfsj_unit"] = "hour"
-                            _feg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
+                            _feg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_feg_arch_bz)
                             _feg_sheet = (
                                 entry.model.strip()
                                 if _fb_model_up in _fb_no_ch_m
@@ -6520,7 +6522,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
                         _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
                         _fb_perf["hfsj_unit"] = "hour"
-                        _fb_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
+                        _fb_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_fb_bz_raw)
                         _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""
                         _fb_grp_loai = _fb_eff_grp.get("loai") or ""
                         _fb_sheet = (

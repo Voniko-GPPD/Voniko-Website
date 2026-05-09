@@ -726,6 +726,7 @@ export default {
   dmpPerfEntrySpecialType: '行类型',
   dmpPerfEntryRemark: '备注',
   dmpPerfEntryNotes: '笔记',
+  dmpPerfRemarkSuffix: '后缀',
   dmpPerfSpecialNormal: '普通行（按日期）',
   dmpPerfSpecial6020: '6020行',
   dmpPerfSpecial3thang: '3个月行',

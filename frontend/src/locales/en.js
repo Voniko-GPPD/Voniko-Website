@@ -726,6 +726,7 @@ export default {
   dmpPerfEntrySpecialType: 'Row Type',
   dmpPerfEntryRemark: 'Remark',
   dmpPerfEntryNotes: 'Notes',
+  dmpPerfRemarkSuffix: 'Suffix',
   dmpPerfSpecialNormal: 'Normal (date row)',
   dmpPerfSpecial6020: '6020 row',
   dmpPerfSpecial3thang: '3 THÁNG row',

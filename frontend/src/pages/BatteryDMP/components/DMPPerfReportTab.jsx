@@ -32,10 +32,12 @@ import {
   createPerfEntry,
   deletePerfEntry,
   downloadDmpPerfReport,
+  exportPerfEntries,
   fetchDmpPerfData,
   fetchDmpPerfTemplates,
   fetchPerfEntries,
   fetchStations,
+  importPerfEntries,
   updatePerfEntry,
   uploadDmpPerfTemplate,
 } from '../../../api/dmpApi';
@@ -345,30 +347,6 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
           onChange={handleRemarkChange}
         />
       </Form.Item>
-      {/* ── Suffix helper: click to append a common suffix token to the remark ── */}
-      <div style={{ marginTop: -16, marginBottom: 12 }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {t('dmpPerfRemarkSuffix')}:{' '}
-        </Typography.Text>
-        {['15', 'Q'].map((sfx) => (
-          <Tag
-            key={sfx}
-            color="blue"
-            style={{ cursor: 'pointer', userSelect: 'none' }}
-            onClick={() => {
-              const current = (form.getFieldValue('raw_remark') || '').trim();
-              const tokens = current.toUpperCase().split(/\s+/);
-              if (!tokens.includes(sfx)) {
-                const newVal = current ? `${current} ${sfx}` : sfx;
-                form.setFieldValue('raw_remark', newVal);
-                handleRemarkChange({ target: { value: newVal } });
-              }
-            }}
-          >
-            +{sfx}
-          </Tag>
-        ))}
-      </div>
 
       {/* ── Common fields ── */}
       <Form.Item name="model" label={t('dmpPerfEntryModel')} rules={[{ required: true }]}>
@@ -408,26 +386,51 @@ function RemarkRegistryTab({ stationId, selection }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = none, 'new' = new form
-  const [dateRange, setDateRange] = useState([null, null]);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importFileRef = useRef(null);
 
   const load = useCallback(async () => {
     if (!stationId) return;
     setLoading(true);
     try {
-      const [from, to] = dateRange;
-      const data = await fetchPerfEntries(stationId, {
-        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
-        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
-      });
+      const data = await fetchPerfEntries(stationId);
       setEntries(data);
     } catch (err) {
       notification.error({ message: err.message });
     } finally {
       setLoading(false);
     }
-  }, [stationId, dateRange]);
+  }, [stationId]);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      await exportPerfEntries(stationId);
+    } catch (err) {
+      notification.error({ message: t('dmpPerfExportFailed'), description: err.message });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const result = await importPerfEntries(stationId, file);
+      notification.success({ message: t('dmpPerfImportSuccess'), description: `${result.imported} mục đã nhập${result.skipped ? `, ${result.skipped} bỏ qua` : ''}` });
+      load();
+    } catch (err) {
+      notification.error({ message: t('dmpPerfImportFailed'), description: err.message });
+    } finally {
+      setImporting(false);
+      if (importFileRef.current) importFileRef.current.value = '';
+    }
+  };
 
   const handleDelete = async (id) => {
     try {
@@ -517,12 +520,27 @@ function RemarkRegistryTab({ stationId, selection }) {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Alert type="info" showIcon message={t('dmpPerfHint')} />
       <Space wrap>
-        <DatePicker.RangePicker
-          value={dateRange}
-          onChange={setDateRange}
-          allowClear
+        <Button
+          icon={<DownloadOutlined />}
+          loading={exporting}
+          onClick={handleExport}
+        >
+          {t('dmpPerfExportExcel')}
+        </Button>
+        <Button
+          icon={<UploadOutlined />}
+          loading={importing}
+          onClick={() => importFileRef.current?.click()}
+        >
+          {t('dmpPerfImportExcel')}
+        </Button>
+        <input
+          ref={importFileRef}
+          type="file"
+          accept=".xlsx"
+          style={{ display: 'none' }}
+          onChange={handleImportFile}
         />
-        <Button onClick={load} loading={loading}>{t('dm2000Search')}</Button>
         <Button icon={<PlusOutlined />} onClick={() => setEditingId('new')}>
           {t('dmpPerfAddEntry')}
         </Button>

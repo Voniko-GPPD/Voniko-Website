@@ -5396,12 +5396,13 @@ async def upload_dmp_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
-def _extract_made_date_from_remark(remark: str) -> Optional[str]:
+def _extract_made_date_from_remark(remark: Optional[str]) -> Optional[str]:
     """Extract a manufacture date from a DDMMYY prefix in *remark*.
 
     If the remark starts with a 6-digit token in DDMMYY format
-    (e.g. ``"160226 LR6 UD501"``), converts it to a ``YYYY-MM-DD`` string
-    using the same sliding-window century logic as elsewhere in the codebase.
+    (e.g. ``"160226 LR6 UD501"``), converts it to a ``YYYY-MM-DD`` string.
+    The century is chosen by picking whichever of 1900+YY or 2000+YY is
+    closest to the current year (ties go to 2000s).
     Returns ``None`` when no valid DDMMYY prefix is found.
     """
     tokens = (remark or "").strip().split()
@@ -5414,8 +5415,9 @@ def _extract_made_date_from_remark(remark: str) -> Optional[str]:
         dd = int(first[0:2])
         mm = int(first[2:4])
         yy = int(first[4:6])
-        cur_yy = date.today().year % 100
-        century = 2000 if (yy - cur_yy) % 100 <= 50 else 1900
+        cur_year = date.today().year
+        # Choose the century whose year is closest to today; prefer 2000s on ties.
+        century = 2000 if abs(2000 + yy - cur_year) <= abs(1900 + yy - cur_year) else 1900
         return date(century + yy, mm, dd).strftime("%Y-%m-%d")
     except (ValueError, TypeError):
         return None

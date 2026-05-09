@@ -6107,7 +6107,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date and the
         # date-based lookup yields no results, but the corresponding para_pub row
         # can still be identified by its bz value.
-        if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
+        # Skip the DMP bz-LIKE search when the entry is Q-marked (Every Quarter).
+        # Q-marked entries reference DM2000 "every quarter" archives specifically;
+        # searching DMP with the stripped remark would find unrelated DMP batches
+        # that happen to share the base remark text, shadowing the DM2000 data.
+        if not batch_rows and entry.raw_remark and entry.raw_remark.strip() and not _remark_has_quarter(entry.raw_remark):
             _remark_search = entry.raw_remark.strip()
             # Strip trailing frequency-variant tokens ("15", "Q") so that a
             # remark data entry "LR6 UD501 UD502" finds both the daily batch
@@ -6257,6 +6261,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # either a DMP batch or a DM2000 archive transparently.
             if entry.raw_remark and entry.raw_remark.strip():
                 _fb_remark = entry.raw_remark.strip()
+                # Build a search key with Q and 15 tokens stripped — mirrors the DMP
+                # bz-LIKE search (which also strips these tokens) so that an entry
+                # "LR6 HP501 Q" finds DM2000 archives regardless of whether their
+                # bz field contains the Q suffix or not (e.g. after a user removes Q
+                # from the archive's remark in DM Historic the entry still resolves).
+                _fb_remark_search = " ".join(
+                    t for t in _fb_remark.split() if t.upper() not in {"15", "Q"}
+                ).strip() or _fb_remark
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.
@@ -6298,7 +6310,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         # Search by full remark first (finds only the exact composite archives,
                         # prevents per-grade archives from overwriting composite-archive data
                         # when multiple archives from the same date match the token).
-                        _feg_rows: list[dict] = _fb_search_archname(_fb_remark)
+                        # Use the stripped remark (without Q/15) so that archives are found
+                        # regardless of whether their bz includes the Q/15 suffix or not.
+                        _feg_rows: list[dict] = _fb_search_archname(_fb_remark_search)
                         if not _feg_rows and _feg_token:
                             # Token fallback: used when no archive matches the full remark
                             # (e.g. remark was entered differently in DM2000 vs the UI form).
@@ -6410,12 +6424,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _fb_arch_rows2: list[dict] = []
                 try:
                     _fb_arch_rows2 = _read_dm2000_ls(
-                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
+                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark_search,)
                     )
                 except pyodbc.Error:
                     pass
                 if not _fb_arch_rows2:
-                    _fb_esc2 = _escape_sql_wildcards(_fb_remark)
+                    _fb_esc2 = _escape_sql_wildcards(_fb_remark_search)
                     try:
                         _fb_arch_rows2 = _read_dm2000_ls(
                             "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fb_esc2}%",)

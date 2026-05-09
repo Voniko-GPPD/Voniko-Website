@@ -1225,6 +1225,21 @@ def _remark_has_quarter(raw_remark: Optional[str]) -> bool:
     return "Q" in raw_remark.strip().upper().split()
 
 
+def _strip_frequency_tokens(raw_remark: str) -> str:
+    """Return *raw_remark* with standalone frequency-variant tokens removed.
+
+    Strips ``'Q'`` (Every Quarter) and ``'15'`` (Every 15 days) so that a
+    search key derived from ``"LR6 UD501 UD502 Q"`` or
+    ``"LR6 UD501 UD502 15"`` matches the base remark ``"LR6 UD501 UD502"``
+    when looking up archives or batches.  Returns the original string when
+    stripping would leave it empty.
+    """
+    stripped = " ".join(
+        t for t in raw_remark.split() if t.upper() not in {"15", "Q"}
+    ).strip()
+    return stripped or raw_remark
+
+
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
 
@@ -6112,17 +6127,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # searching DMP with the stripped remark would find unrelated DMP batches
         # that happen to share the base remark text, shadowing the DM2000 data.
         if not batch_rows and entry.raw_remark and entry.raw_remark.strip() and not _remark_has_quarter(entry.raw_remark):
-            _remark_search = entry.raw_remark.strip()
-            # Strip trailing frequency-variant tokens ("15", "Q") so that a
-            # remark data entry "LR6 UD501 UD502" finds both the daily batch
+            # Strip frequency-variant tokens ("15", "Q") so that a remark data
+            # entry "LR6 UD501 UD502" finds both the daily batch
             # (bz="LR6 UD501 UD502") and the every-15-days batch
             # (bz="LR6 UD501 UD502 15") without needing a separate registry
             # entry per variant.  The is15d / isQuarter flag is then derived
             # from the matched batch's own bz value at write time.
-            # The set contains uppercase strings; .upper() on each token ensures
-            # case-insensitive matching (handles "q" as well as "Q", etc.).
-            _remark_tokens = [t for t in _remark_search.split() if t.upper() not in {"15", "Q"}]
-            _remark_search = " ".join(_remark_tokens).strip()
+            _remark_search = _strip_frequency_tokens(entry.raw_remark.strip())
             if _remark_search:
                 # Leading wildcard is intentional: bz values in the database may
                 # contain characters before the remark text.
@@ -6266,9 +6277,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 # "LR6 HP501 Q" finds DM2000 archives regardless of whether their
                 # bz field contains the Q suffix or not (e.g. after a user removes Q
                 # from the archive's remark in DM Historic the entry still resolves).
-                _fb_remark_search = " ".join(
-                    t for t in _fb_remark.split() if t.upper() not in {"15", "Q"}
-                ).strip() or _fb_remark
+                _fb_remark_search = _strip_frequency_tokens(_fb_remark)
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.

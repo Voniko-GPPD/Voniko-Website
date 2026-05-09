@@ -6035,6 +6035,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # becomes "LR6 UD501" and matches bz = "160226 LR6 UD501 UD502".
             _remark_tokens = _remark_search.split()
             if _remark_tokens and re.fullmatch(r"\d{6}", _remark_tokens[0]):
+                # Drop the leading DDMMYY date prefix
                 _remark_tokens = _remark_tokens[1:]
             # Strip trailing frequency-variant tokens ("15", "Q") so that a
             # remark data entry "LR6 UD501 UD502" finds both the daily batch
@@ -6042,7 +6043,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # (bz="LR6 UD501 UD502 15") without needing a separate registry
             # entry per variant.  The is15d / isQuarter flag is then derived
             # from the matched batch's own bz value at write time.
-            _remark_tokens = [t for t in _remark_tokens if t.upper() not in ("15", "Q")]
+            # The set contains uppercase strings; .upper() on each token ensures
+            # case-insensitive matching (handles "q" as well as "Q", etc.).
+            _remark_tokens = [t for t in _remark_tokens if t.upper() not in {"15", "Q"}]
             _remark_search = " ".join(_remark_tokens).strip()
             if _remark_search:
                 # Leading wildcard is intentional: bz values often contain a
@@ -6064,29 +6067,29 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # Pre-compute entry-level group structure once — all batches for this
             # entry share the same groups / model derived from entry.raw_remark and
             # entry.groups, so there is no need to recompute them per batch.
-            _remark_loai_by_chuyen_b: dict[str, str] = {}
+            _shared_loai_by_chuyen: dict[str, str] = {}
             if entry.raw_remark:
                 for _rg in _parse_bz_groups(entry.raw_remark):
                     if _rg.get("chuyen"):
-                        _remark_loai_by_chuyen_b[str(_rg["chuyen"])] = _rg["loai"]
-            _dmp_eff_groups_b = [
+                        _shared_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
+            _shared_eff_groups = [
                 {
-                    "loai": _remark_loai_by_chuyen_b.get(str(grp.chuyen or "").strip(), grp.loai),
+                    "loai": _shared_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
                     "chuyen": grp.chuyen,
                     "trays": list(grp.trays or []),
                     "_orig_idx": i,
                 }
                 for i, grp in enumerate(entry.groups)
             ]
-            _dmp_eff_groups_b = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups_b)
-            _n_groups_b = len(_dmp_eff_groups_b)
-            _auto_trays_b = _DMP_TRAY_ASSIGNMENT.get(_n_groups_b, [list(range(1, 10))])
-            _dmp_model_upper_b = entry.model.strip().upper()
-            _dmp_no_chuyen_b = {"LR61", "9V", "6LR61"}
-            if not _dmp_eff_groups_b and _dmp_model_upper_b in _dmp_no_chuyen_b:
-                _dmp_eff_groups_b = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
-                _n_groups_b = 1
-                _auto_trays_b = [list(range(1, 10))]
+            _shared_eff_groups = _sort_eff_groups_for_tray_assignment(_shared_eff_groups)
+            _shared_n_groups = len(_shared_eff_groups)
+            _shared_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_shared_n_groups, [list(range(1, 10))])
+            _shared_model_upper = entry.model.strip().upper()
+            _shared_no_chuyen = {"LR61", "9V", "6LR61"}
+            if not _shared_eff_groups and _shared_model_upper in _shared_no_chuyen:
+                _shared_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+                _shared_n_groups = 1
+                _shared_auto_trays = [list(range(1, 10))]
 
             # Process every matching batch so that a single remark-data entry
             # "LR6 UD501 UD502" generates separate rows for both the daily batch
@@ -6128,7 +6131,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 # a 15-day variant (bz ends with " 15") or a standard daily entry.
                 # entry.raw_remark is also checked for backward compatibility with
                 # registry entries that still carry the "15" or "Q" token.
-                _batch_bz_b = str(_dm2000_get_value(batch, "bz") or "").strip()
+                batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
 
                 # Determine row label (date or special)
                 if entry.special_type in _SPECIAL_TYPE_LABEL:
@@ -6136,15 +6139,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 else:
                     row_label = fdrq or entry.batch_id
 
-                for g_idx, _dmp_grp in enumerate(_dmp_eff_groups_b):
+                for g_idx, _dmp_grp in enumerate(_shared_eff_groups):
                     _orig_idx = _dmp_grp.get("_orig_idx")
                     if _orig_idx is not None:
                         orig_grp = entry.groups[_orig_idx]
                         trays = (orig_grp.trays if orig_grp.trays else
-                                 (_auto_trays_b[g_idx] if g_idx < len(_auto_trays_b) else []))
+                                 (_shared_auto_trays[g_idx] if g_idx < len(_shared_auto_trays) else []))
                     else:
                         # Synthetic group for no-chuyen model with no configured groups
-                        trays = _auto_trays_b[g_idx] if g_idx < len(_auto_trays_b) else list(range(1, 10))
+                        trays = _shared_auto_trays[g_idx] if g_idx < len(_shared_auto_trays) else list(range(1, 10))
                     if not trays:
                         continue
 
@@ -6154,8 +6157,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     perf["hfsj_unit"] = hfsj_unit
 
                     # Determine sheet name
-                    model_upper = _dmp_model_upper_b
-                    no_chuyen_models = _dmp_no_chuyen_b
+                    model_upper = _shared_model_upper
+                    no_chuyen_models = _shared_no_chuyen
                     if model_upper in no_chuyen_models:
                         sheet_key = entry.model.strip()
                     else:
@@ -6168,7 +6171,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # Append "15d" marker when the batch's own bz contains a
                     # standalone "15" token (e.g. "LR6 UD501 UD502 15").
                     # entry.raw_remark is also checked for backward compatibility.
-                    if _remark_has_15d(_batch_bz_b) or _remark_has_15d(entry.raw_remark):
+                    if _remark_has_15d(batch_bz) or _remark_has_15d(entry.raw_remark):
                         fdfs_label = fdfs_label + " 15d"
 
                     row_key = (row_label, effective_loai)

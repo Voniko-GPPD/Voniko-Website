@@ -6760,9 +6760,18 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
-            # A row is a "quarter" row when any of its measured conditions was
-            # tagged by an entry whose remark contains a standalone "Q" token.
-            row_is_quarter = any(perf.get("_is_quarter", False) for perf in conditions.values())
+            # A row is a "quarter" (comprehensive measurement) row when:
+            # 1. Any condition has _is_quarter=True (explicit "Q" remark marker), OR
+            # 2. The row contains at least one condition from the "everymonth" frequency
+            #    group — indicating a comprehensive measurement day where periodic
+            #    (weekly + monthly) conditions were also tested alongside the daily ones.
+            #    Such days correspond to monthly or quarterly check-ups and should be
+            #    visible when the "Every Quarter" filter is selected.
+            _row_freq_groups = {freq_groups.get(c, "other") for c in conditions}
+            row_is_quarter = (
+                any(perf.get("_is_quarter", False) for perf in conditions.values())
+                or "everymonth" in _row_freq_groups
+            )
             rows.append({
                 "date": row_label,
                 "loai": loai,

@@ -774,18 +774,6 @@ function PerfViewTab({ stationId }) {
     }
   }, [stationId, dateRange, applyFilters, t]);
 
-  // Build a lookup map: "YYYY-MM-DD:loai" → entry, for EveryQuarter / is15d detection
-  const entryByDateLoai = useMemo(() => {
-    const map = {};
-    for (const e of entries) {
-      for (const g of (e.groups || [])) {
-        const key = `${e.report_date}:${g.loai}`;
-        if (!map[key]) map[key] = e;
-      }
-    }
-    return map;
-  }, [entries]);
-
   // Build Ant Design table columns for a given sheet, grouped by frequency block
   const buildColumns = useCallback((sheetKey) => {
     if (!sheetsData || !sheetsData[sheetKey]) return [];

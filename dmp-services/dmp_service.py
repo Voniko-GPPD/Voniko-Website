@@ -6707,11 +6707,11 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
             # A row is a "quarter" row when any of its measured conditions was
             # tagged by an entry whose remark contains a standalone "Q" token.
-            _row_is_quarter = any(perf.get("_is_quarter", False) for perf in conditions.values())
+            row_is_quarter = any(perf.get("_is_quarter", False) for perf in conditions.values())
             rows.append({
                 "date": row_label,
                 "loai": loai,
-                "is_quarter": _row_is_quarter,
+                "is_quarter": row_is_quarter,
                 "conditions": {
                     fdfs_label: {
                         "avg_hours": perf.get("avg_hours"),

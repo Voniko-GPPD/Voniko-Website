@@ -1085,7 +1085,7 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         "10ohm 24h/d-0.9V",
         "1000mA 24h/d-0.9V",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V 15",
         "3.9ohm 1h/d-0.8V",
         "3.9ohm 4m/h 8h/d-0.9V",
         "250mA 1h/d-0.9V",
@@ -1134,7 +1134,7 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
         "10ohm 24h/d-0.9V":                                    "everyday",
         "1000mA 24h/d-0.9V":                                   "everyday",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V":                "everyday",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V":                 "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V 15":             "everyday",
         "3.9ohm 1h/d-0.8V":                                    "everyweek",
         "3.9ohm 4m/h 8h/d-0.9V":                               "everyweek",
         "250mA 1h/d-0.9V":                                     "everyweek",
@@ -1179,6 +1179,51 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
 
 
+def _remove_outer_commas(s: str) -> str:
+    """Remove commas that are *outside* parentheses/brackets from *s*.
+
+    This normalises condition labels such as ``5.1ohm 4m/h,8h/d-0.9V``
+    (DM2000 style, comma as time-segment separator) so they compare equal to
+    ``5.1ohm 4m/h 8h/d-0.9V`` (template style, space as separator).
+    Commas *inside* brackets are preserved, e.g. ``(1500mW2s,650mW28s)``
+    is left untouched.
+    """
+    result: list[str] = []
+    depth = 0
+    for c in s:
+        if c == '(':
+            depth += 1
+            result.append(c)
+        elif c == ')':
+            depth -= 1
+            result.append(c)
+        elif c == ',' and depth == 0:
+            pass  # drop outer commas
+        else:
+            result.append(c)
+    return ''.join(result)
+
+
+_VSUF_NORM_RE = re.compile(r'-(\d+\.\d*?)(0+)([vV])$', re.IGNORECASE)
+
+
+def _normalize_voltage_suffix(s: str) -> str:
+    """Normalize trailing zeros in a voltage suffix.
+
+    Converts ``-0.900V`` → ``-0.9V``, ``-1.000V`` → ``-1V`` so that two
+    condition strings with identical voltages but differing decimal precision
+    compare equal after whitespace normalization.  The voltage *value* is
+    preserved so that different voltages (e.g. ``-0.6V`` vs ``-0.9V``) still
+    compare as unequal.
+    """
+    def _strip_zeros(m: re.Match) -> str:
+        # Remove trailing zeros from the decimal portion, then strip trailing "."
+        stripped = m.group(1).rstrip('0').rstrip('.')
+        return f'-{stripped}{m.group(3)}'
+
+    return _VSUF_NORM_RE.sub(_strip_zeros, s)
+
+
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
 
@@ -1186,6 +1231,15 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     intentionally omitted so that ``1000mA 10s/m 1h/d-0.9V`` does not
     incorrectly match ``1000mA 24h/d-0.9V`` via the shared ``1000mA`` prefix.
     Also normalises ``{}`` → ``()`` on both sides before comparing.
+
+    Comma normalisation: commas outside brackets (time-segment separators such
+    as the ``,`` in ``5.1ohm 4m/h,8h/d-0.9V``) are treated the same as spaces
+    so that DM2000-style labels match their template equivalents.
+
+    Voltage normalisation: trailing zeros in voltage suffixes are stripped so
+    that ``10ohm 24h/d-0.900V`` compares equal to ``10ohm 24h/d-0.9V``.
+    Two conditions with *different* voltages (e.g. ``-0.6V`` vs ``-0.9V``) are
+    never incorrectly considered equal.
     """
     c_norm = cond.translate(_BRACKET_NORM_TABLE)
     t_norm = tmpl.translate(_BRACKET_NORM_TABLE)
@@ -1201,9 +1255,10 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     if f == h:
         return True
 
-    # Whitespace-normalised match (spacing differences)
-    f_no_ws = re.sub(r'\s+', '', f)
-    h_no_ws = re.sub(r'\s+', '', h)
+    # Whitespace-normalised match (spacing differences).
+    # Also remove outer commas (e.g. "4m/h,8h/d" treated same as "4m/h 8h/d").
+    f_no_ws = _remove_outer_commas(re.sub(r'\s+', '', f))
+    h_no_ws = _remove_outer_commas(re.sub(r'\s+', '', h))
     if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
         return True
 
@@ -1212,15 +1267,20 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     # (older DM2000 label format) suffixes so that "10ohm 24h/d-0.900V"
     # and "10ohm 24h/d-0.9V" are considered equivalent.
     _vsuf = re.compile(r'(\s*-\s*|\s+to\s+)\d+\.?\d*\s*[vV]\s*$', re.IGNORECASE)
-    f_no_v = re.sub(r'\s+', '', _vsuf.sub('', f))
-    h_no_v = re.sub(r'\s+', '', _vsuf.sub('', h))
+    f_no_v = _remove_outer_commas(re.sub(r'\s+', '', _vsuf.sub('', f)))
+    h_no_v = _remove_outer_commas(re.sub(r'\s+', '', _vsuf.sub('', h)))
     if f_no_v and h_no_ws and f_no_v == h_no_ws:
         return True
     if f_no_ws and h_no_v and f_no_ws == h_no_v:
         return True
-    # Both sides voltage-stripped (handles differing decimal precision, e.g.
-    # "10ohm 24h/d-0.900V" vs "10ohm 24h/d-0.9V")
-    if f_no_v and h_no_v and f_no_v == h_no_v:
+
+    # Voltage-normalised match: normalise trailing zeros in voltage suffix so
+    # "10ohm 24h/d-0.900V" == "10ohm 24h/d-0.9V".  The voltage *value* is kept
+    # intact so two conditions with genuinely different voltages (e.g. "-0.6V"
+    # vs "-0.9V") are never incorrectly matched as equal.
+    f_norm_v = _remove_outer_commas(re.sub(r'\s+', '', _normalize_voltage_suffix(f)))
+    h_norm_v = _remove_outer_commas(re.sub(r'\s+', '', _normalize_voltage_suffix(h)))
+    if f_norm_v and h_norm_v and f_norm_v == h_norm_v:
         return True
 
     return False
@@ -1254,6 +1314,34 @@ def _get_condition_freq_group(cond: str, battery_type: str) -> str:
         if _perf_fdfs_matches_template(cond, tmpl_label):
             return group
     return "other"
+
+
+# Pattern to detect the LR6 watt-test condition (both daily and 15-day variants).
+_LR6_15D_COND_RE = re.compile(r'1500\s*mW', re.IGNORECASE)
+
+
+def _apply_15d_remark_suffix(fdfs: str, remark: str) -> str:
+    """Append ' 15' to *fdfs* when the remark marks a 15-day LR6 measurement.
+
+    The DM2000 / DMP remark for a batch measured every 15 days should contain
+    a standalone token ``"15"`` (e.g. ``"LR6 UD501 HP502 15"``).  When that
+    token is present and *fdfs* is the LR6 watt-based condition
+    ``(1500mW2s,650mW28s)10T/h,24h/d-1.05V``, the returned label is
+    ``(1500mW2s,650mW28s)10T/h,24h/d-1.05V 15`` so it appears as a distinct
+    column in the performance report, separate from the identically-named daily
+    measurement column.
+    """
+    if not remark or not fdfs:
+        return fdfs
+    # A standalone "15" token anywhere in the remark (case-insensitive).
+    tokens = remark.upper().split()
+    if "15" not in tokens:
+        return fdfs
+    # Only apply to the LR6 watt-test condition.
+    if not _LR6_15D_COND_RE.search(fdfs):
+        return fdfs
+    return fdfs.rstrip() + " 15"
+
 
 
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
@@ -5735,7 +5823,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _dm2k_model_up in _dm2k_no_ch
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
-                        _eg_fdfs_label = _eg_fdfs or _dm2k_eg["loai"]
+                        _eg_fdfs_label = _apply_15d_remark_suffix(
+                            _eg_fdfs or _dm2k_eg["loai"], _eg_arch_bz
+                        )
                         groups.setdefault(_eg_sheet, {}).setdefault(
                             (_eg_row_label, _dm2k_eg["loai"]), {}
                         )[_eg_fdfs_label] = _eg_perf
@@ -5903,7 +5993,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 else:
                     _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
-                _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
+                _dm2k_fdfs_label = _apply_15d_remark_suffix(
+                    _dm2k_fdfs or _dm2k_grp_loai, _dm2k_bz_raw
+                )
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
 
@@ -6003,6 +6095,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # RESULT column regardless of the actual test condition.
             if not fdfs:
                 fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
+            # Read batch remark (para_pub.bz) for the 15-day condition suffix check.
+            _dmp_batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
             # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
             _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
             _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
@@ -6159,7 +6253,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 if _fb_model_up in _fb_no_ch_m
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
-                            _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
+                            _feg_fdfs_label = _apply_15d_remark_suffix(
+                                _feg_fdfs or _fb_eg["loai"], _feg_arch_bz
+                            )
                             groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
                             )[_feg_fdfs_label] = _feg_perf
@@ -6286,7 +6382,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _fb_model_upper in _fb_no_chuyen
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
-                        _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
+                        _fb_fdfs_label = _apply_15d_remark_suffix(
+                            _fb_fdfs or _fb_grp_loai, _fb_bz_raw
+                        )
                         groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}
                         )[_fb_fdfs_label] = _fb_perf
@@ -6400,8 +6498,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # HP→HP, UD→UD) matched by chuyen.
             effective_loai = _dmp_grp["loai"]
 
-            # fdfs label for column matching
-            fdfs_label = fdfs if fdfs else effective_loai
+            # fdfs label for column matching; append " 15" suffix when the batch
+            # remark marks a 15-day LR6 watt measurement.
+            _dmp_remark_for_suffix = _dmp_batch_bz if batch_rows else (entry.raw_remark or "")
+            fdfs_label = _apply_15d_remark_suffix(
+                fdfs if fdfs else effective_loai, _dmp_remark_for_suffix
+            )
 
             row_key = (row_label, effective_loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf

@@ -1200,45 +1200,6 @@ def _sep_normalize(s: str) -> str:
     return s
 
 
-def _remark_has_15d(raw_remark: Optional[str]) -> bool:
-    """Return True when *raw_remark* contains a standalone ``'15'`` token.
-
-    A standalone ``'15'`` in the remark (e.g. ``"LR6 UD501 HP502 15"``) indicates
-    that this measurement entry uses the every-15-days variant of the
-    ``(1500mW2s,650mW28s)10T/h,24h/d`` discharge condition so that it is displayed
-    in a separate column from the daily variant of the same condition.
-    """
-    if not raw_remark:
-        return False
-    return "15" in raw_remark.strip().upper().split()
-
-
-def _remark_has_quarter(raw_remark: Optional[str]) -> bool:
-    """Return True when *raw_remark* contains a standalone ``'Q'`` token.
-
-    A standalone ``'Q'`` in the remark (e.g. ``"LR6 UD501 HP502 Q"``) marks an
-    Every-Quarter measurement so that the frontend can filter rows to show only
-    quarter entries when the "Every Quarter" frequency filter is selected.
-    """
-    if not raw_remark:
-        return False
-    return "Q" in raw_remark.strip().upper().split()
-
-
-def _strip_frequency_tokens(raw_remark: str) -> str:
-    """Return *raw_remark* with standalone frequency-variant tokens removed.
-
-    Strips ``'Q'`` (Every Quarter) and ``'15'`` (Every 15 days) so that a
-    search key derived from ``"LR6 UD501 UD502 Q"`` or
-    ``"LR6 UD501 UD502 15"`` matches the base remark ``"LR6 UD501 UD502"``
-    when looking up archives or batches.  Returns the original string when
-    stripping would leave it empty.
-    """
-    stripped = " ".join(
-        t for t in raw_remark.split() if t.upper() not in {"15", "Q"}
-    ).strip()
-    return stripped or raw_remark
-
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -1312,17 +1273,11 @@ def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
     *template_pos* is the 0-based position in the IEC template for *battery_type*,
     or ``len(template)`` when the condition is not found (unrecognised conditions
     are appended at the end, preserving their relative insertion order via *cond*).
-
-    Strips a trailing ``" 15d"`` marker (appended by ``_compute_dmp_perf_groups``
-    for every-15-days entries) before the template lookup so that the 15d variant
-    of a condition sorts immediately after its daily counterpart.
     """
-    # Strip "15d" suffix so the 15d variant maps to the same template position
-    _cond = cond[:-4] if cond.endswith(" 15d") else cond
     battery_type_upper = battery_type.strip().upper()
     template = _TEMPLATE_CONDITION_ORDER.get(battery_type_upper, [])
     for i, tmpl_entry in enumerate(template):
-        if _perf_fdfs_matches_template(_cond, tmpl_entry):
+        if _perf_fdfs_matches_template(cond, tmpl_entry):
             return (i, cond)
     return (len(template), cond)
 
@@ -1334,16 +1289,10 @@ def _get_condition_freq_group(cond: str, battery_type: str) -> str:
     Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
     minor variations in spacing, bracket style, or trailing voltage suffix are
     still correctly categorised.
-
-    Strips a trailing ``" 15d"`` marker (appended by ``_compute_dmp_perf_groups``
-    for every-15-days entries) before the lookup so the 15d variant inherits the
-    same frequency group as its base condition.
     """
-    # Strip "15d" suffix so the modified label still maps to the correct group
-    _cond = cond[:-4] if cond.endswith(" 15d") else cond
     freq_map = _CONDITION_FREQ_GROUP.get(battery_type.strip().upper(), {})
     for tmpl_label, group in freq_map.items():
-        if _perf_fdfs_matches_template(_cond, tmpl_label):
+        if _perf_fdfs_matches_template(cond, tmpl_label):
             return group
     return "other"
 
@@ -5717,10 +5666,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
         return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
 
     groups: dict[str, dict] = {}
-    # Tracks row_keys that had at least one Q-marked entry write to them.
-    # Stored separately so that a later non-Q entry cannot silently overwrite
-    # the True flag that was set by an earlier Q entry for the same row.
-    quarter_keys: dict[str, set] = {}
 
     for entry in payload.entries:
         if not (entry.batch_id or "").strip() and not entry.dm2000_archname:
@@ -5880,7 +5825,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _eg_tav = _get_tav_for_batteries(_eg_resolved, _eg_batys)
                         _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
                         _eg_perf["hfsj_unit"] = "hour"
-                        _eg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_eg_arch_bz)
                         _eg_sheet = (
                             entry.model.strip()
                             if _dm2k_model_up in _dm2k_no_ch
@@ -5891,8 +5835,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         groups.setdefault(_eg_sheet, {}).setdefault(
                             _eg_row_key, {}
                         )[_eg_fdfs_label] = _eg_perf
-                        if _eg_perf["_is_quarter"]:
-                            quarter_keys.setdefault(_eg_sheet, set()).add(_eg_row_key)
                 continue  # per-group DMP-mirroring done; skip single-archive + DMP paths
 
             # ── No explicit groups: single-archive path (unchanged) ─────────────────────────
@@ -6050,7 +5992,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_tav_map = _get_tav_for_batteries(_dm2k_resolved, _dm2k_batys)
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
-                _dm2k_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_dm2k_bz_raw)
 
                 _dm2k_grp_chuyen = _dm2k_eff_grp.get("chuyen") or ""
                 _dm2k_grp_loai = _dm2k_eff_grp.get("loai") or ""
@@ -6062,8 +6003,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
-                if _dm2k_perf["_is_quarter"]:
-                    quarter_keys.setdefault(_dm2k_sheet_key, set()).add(_dm2k_row_key)
 
             continue  # Skip DMP lookup path for this entry
 
@@ -6122,18 +6061,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date and the
         # date-based lookup yields no results, but the corresponding para_pub row
         # can still be identified by its bz value.
-        # Skip the DMP bz-LIKE search when the entry is Q-marked (Every Quarter).
-        # Q-marked entries reference DM2000 "every quarter" archives specifically;
-        # searching DMP with the stripped remark would find unrelated DMP batches
-        # that happen to share the base remark text, shadowing the DM2000 data.
-        if not batch_rows and entry.raw_remark and entry.raw_remark.strip() and not _remark_has_quarter(entry.raw_remark):
-            # Strip frequency-variant tokens ("15", "Q") so that a remark data
-            # entry "LR6 UD501 UD502" finds both the daily batch
-            # (bz="LR6 UD501 UD502") and the every-15-days batch
-            # (bz="LR6 UD501 UD502 15") without needing a separate registry
-            # entry per variant.  The is15d / isQuarter flag is then derived
-            # from the matched batch's own bz value at write time.
-            _remark_search = _strip_frequency_tokens(entry.raw_remark.strip())
+        if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
+            _remark_search = entry.raw_remark.strip()
             if _remark_search:
                 # Leading wildcard is intentional: bz values in the database may
                 # contain characters before the remark text.
@@ -6214,10 +6143,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     except (TypeError, ValueError):
                         ep_v = None
 
-                # The batch's own bz field determines whether this measurement is
-                # a 15-day variant (bz ends with " 15") or a standard daily entry.
-                # entry.raw_remark is also checked for backward compatibility with
-                # registry entries that still carry the "15" or "Q" token.
+                # The batch's own bz field is kept for data context only.
                 batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
 
                 # Determine row label (date or special)
@@ -6242,7 +6168,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # resolved para_pub.id so that the para_singl lookup succeeds.
                     perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
                     perf["hfsj_unit"] = hfsj_unit
-                    perf["_is_quarter"] = _remark_has_quarter(batch_bz) or _remark_has_quarter(entry.raw_remark)
 
                     # Determine sheet name
                     model_upper = _shared_model_upper
@@ -6254,30 +6179,17 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
                     effective_loai = _dmp_grp["loai"]
 
-                    # fdfs label for column matching
                     fdfs_label = fdfs if fdfs else effective_loai
-                    # Append "15d" marker when the batch's own bz contains a
-                    # standalone "15" token (e.g. "LR6 UD501 UD502 15").
-                    # entry.raw_remark is also checked for backward compatibility.
-                    if _remark_has_15d(batch_bz) or _remark_has_15d(entry.raw_remark):
-                        fdfs_label = fdfs_label + " 15d"
 
                     row_key = (row_label, effective_loai)
                     groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
-                    if perf["_is_quarter"]:
-                        quarter_keys.setdefault(sheet_key, set()).add(row_key)
         else:
             # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
             # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
             # either a DMP batch or a DM2000 archive transparently.
             if entry.raw_remark and entry.raw_remark.strip():
                 _fb_remark = entry.raw_remark.strip()
-                # Build a search key with Q and 15 tokens stripped — mirrors the DMP
-                # bz-LIKE search (which also strips these tokens) so that an entry
-                # "LR6 HP501 Q" finds DM2000 archives regardless of whether their
-                # bz field contains the Q suffix or not (e.g. after a user removes Q
-                # from the archive's remark in DM Historic the entry still resolves).
-                _fb_remark_search = _strip_frequency_tokens(_fb_remark)
+                _fb_remark_search = _fb_remark
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.
@@ -6319,8 +6231,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         # Search by full remark first (finds only the exact composite archives,
                         # prevents per-grade archives from overwriting composite-archive data
                         # when multiple archives from the same date match the token).
-                        # Use the stripped remark (without Q/15) so that archives are found
-                        # regardless of whether their bz includes the Q/15 suffix or not.
                         _feg_rows: list[dict] = _fb_search_archname(_fb_remark_search)
                         if not _feg_rows and _feg_token:
                             # Token fallback: used when no archive matches the full remark
@@ -6409,24 +6319,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _feg_tav = _get_tav_for_batteries(_feg_resolved, _feg_batys)
                             _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
                             _feg_perf["hfsj_unit"] = "hour"
-                            _feg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_feg_arch_bz)
                             _feg_sheet = (
                                 entry.model.strip()
                                 if _fb_model_up in _fb_no_ch_m
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
                             _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
-                            # Append "15d" marker when the entry remark contains "15"
-                            # so that the every-15-days measurement appears as a
-                            # separate column from the daily variant.
-                            if _remark_has_15d(entry.raw_remark):
-                                _feg_fdfs_label = _feg_fdfs_label + " 15d"
                             _feg_row_key = (_feg_row_label, _fb_eg["loai"])
                             groups.setdefault(_feg_sheet, {}).setdefault(
                                 _feg_row_key, {}
                             )[_feg_fdfs_label] = _feg_perf
-                            if _feg_perf["_is_quarter"]:
-                                quarter_keys.setdefault(_feg_sheet, set()).add(_feg_row_key)
                     continue  # _fb_ per-group DMP-mirroring done; skip rest of DMP path
 
                 # No explicit groups: single-archive path
@@ -6545,7 +6447,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
                         _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
                         _fb_perf["hfsj_unit"] = "hour"
-                        _fb_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark) or _remark_has_quarter(_fb_bz_raw)
                         _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""
                         _fb_grp_loai = _fb_eff_grp.get("loai") or ""
                         _fb_sheet = (
@@ -6554,15 +6455,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
                         _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
-                        # Append "15d" marker when the entry remark contains "15"
-                        if _remark_has_15d(entry.raw_remark):
-                            _fb_fdfs_label = _fb_fdfs_label + " 15d"
                         _fb_row_key = (_fb_row_label, _fb_grp_loai)
                         groups.setdefault(_fb_sheet, {}).setdefault(
                             _fb_row_key, {}
                         )[_fb_fdfs_label] = _fb_perf
-                        if _fb_perf["_is_quarter"]:
-                            quarter_keys.setdefault(_fb_sheet, set()).add(_fb_row_key)
                     continue  # DM2000 path handled; skip rest of DMP path
 
             # Both DMP and DM2000 lookups failed.
@@ -6644,7 +6540,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
                 perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
                 perf["hfsj_unit"] = hfsj_unit
-                perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
 
                 model_upper = _dmp_model_upper
                 no_chuyen_models = _dmp_no_chuyen_models
@@ -6656,15 +6551,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 effective_loai = _dmp_grp["loai"]
 
                 fdfs_label = fdfs if fdfs else effective_loai
-                if _remark_has_15d(entry.raw_remark):
-                    fdfs_label = fdfs_label + " 15d"
 
                 row_key = (row_label, effective_loai)
                 groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
-                if perf["_is_quarter"]:
-                    quarter_keys.setdefault(sheet_key, set()).add(row_key)
 
-    return groups, quarter_keys
+    return groups
 
 
 @app.post("/dmp-perf-report/generate")
@@ -6677,7 +6568,7 @@ def generate_dmp_perf_report(payload: DmpPerfReportRequest):
     if not payload.entries:
         raise HTTPException(status_code=400, detail="entries must not be empty")
 
-    groups, _ = _compute_dmp_perf_groups(payload)
+    groups = _compute_dmp_perf_groups(payload)
 
     if not groups:
         raise HTTPException(
@@ -6738,7 +6629,7 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
     # skip_not_found=True: entries with no matching DMP data are omitted from the
     # web preview so the table does not show spurious empty rows or columns whose
     # header is the battery grade (e.g. "UD+") rather than the real test condition.
-    groups, quarter_keys = _compute_dmp_perf_groups(payload, skip_not_found=True)
+    groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
 
     sheets: dict = {}
     for sheet_key, date_type_map in groups.items():
@@ -6802,15 +6693,9 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
-            # A row is a "quarter" (Every Quarter) row only when at least one
-            # entry with a standalone "Q" token in raw_remark contributed to it.
-            # The quarter_keys dict is populated during _compute_dmp_perf_groups
-            # and is immune to later non-Q entries overwriting the flag.
-            row_is_quarter = (row_label, loai) in quarter_keys.get(sheet_key, set())
             rows.append({
                 "date": row_label,
                 "loai": loai,
-                "is_quarter": row_is_quarter,
                 "conditions": {
                     fdfs_label: {
                         "avg_hours": perf.get("avg_hours"),

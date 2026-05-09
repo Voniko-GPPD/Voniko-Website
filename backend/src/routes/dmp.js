@@ -1002,7 +1002,7 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
             }
           }
         }
-        if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 8).replace(/-/g, '');
+        if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 10).replace(/-/g, '');
         if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
 
         const id = getCell(row, 'id') || uuidv4();

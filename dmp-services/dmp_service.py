@@ -1213,6 +1213,18 @@ def _remark_has_15d(raw_remark: Optional[str]) -> bool:
     return "15" in raw_remark.strip().upper().split()
 
 
+def _remark_has_quarter(raw_remark: Optional[str]) -> bool:
+    """Return True when *raw_remark* contains a standalone ``'Q'`` token.
+
+    A standalone ``'Q'`` in the remark (e.g. ``"LR6 UD501 HP502 Q"``) marks an
+    Every-Quarter measurement so that the frontend can filter rows to show only
+    quarter entries when the "Every Quarter" frequency filter is selected.
+    """
+    if not raw_remark:
+        return False
+    return "Q" in raw_remark.strip().upper().split()
+
+
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
 
@@ -5795,6 +5807,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _eg_tav = _get_tav_for_batteries(_eg_resolved, _eg_batys)
                         _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
                         _eg_perf["hfsj_unit"] = "hour"
+                        _eg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
                         _eg_sheet = (
                             entry.model.strip()
                             if _dm2k_model_up in _dm2k_no_ch
@@ -5960,6 +5973,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_tav_map = _get_tav_for_batteries(_dm2k_resolved, _dm2k_batys)
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
+                _dm2k_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
 
                 _dm2k_grp_chuyen = _dm2k_eff_grp.get("chuyen") or ""
                 _dm2k_grp_loai = _dm2k_eff_grp.get("loai") or ""
@@ -6155,6 +6169,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     # resolved para_pub.id so that the para_singl lookup succeeds.
                     perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
                     perf["hfsj_unit"] = hfsj_unit
+                    perf["_is_quarter"] = _remark_has_quarter(batch_bz) or _remark_has_quarter(entry.raw_remark)
 
                     # Determine sheet name
                     model_upper = _shared_model_upper
@@ -6307,6 +6322,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _feg_tav = _get_tav_for_batteries(_feg_resolved, _feg_batys)
                             _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
                             _feg_perf["hfsj_unit"] = "hour"
+                            _feg_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
                             _feg_sheet = (
                                 entry.model.strip()
                                 if _fb_model_up in _fb_no_ch_m
@@ -6437,6 +6453,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
                         _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
                         _fb_perf["hfsj_unit"] = "hour"
+                        _fb_perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
                         _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""
                         _fb_grp_loai = _fb_eff_grp.get("loai") or ""
                         _fb_sheet = (
@@ -6532,6 +6549,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
                 perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
                 perf["hfsj_unit"] = hfsj_unit
+                perf["_is_quarter"] = _remark_has_quarter(entry.raw_remark)
 
                 model_upper = _dmp_model_upper
                 no_chuyen_models = _dmp_no_chuyen_models
@@ -6687,9 +6705,13 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
 
         rows = []
         for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
+            # A row is a "quarter" row when any of its measured conditions was
+            # tagged by an entry whose remark contains a standalone "Q" token.
+            _row_is_quarter = any(perf.get("_is_quarter", False) for perf in conditions.values())
             rows.append({
                 "date": row_label,
                 "loai": loai,
+                "is_quarter": _row_is_quarter,
                 "conditions": {
                     fdfs_label: {
                         "avg_hours": perf.get("avg_hours"),

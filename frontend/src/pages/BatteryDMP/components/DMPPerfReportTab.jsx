@@ -882,18 +882,13 @@ function PerfViewTab({ stationId }) {
     return [...fixedCols, ...freqCols];
   }, [sheetsData, t, filterFreq]);
 
-  // When filterFreq === 'quarter', filter rows to only show those where a matching entry has "Q" in remark
+  // When filterFreq === 'quarter', filter rows to only show those flagged as quarter rows by the backend
   const getVisibleRows = useCallback((sheetKey) => {
     if (!sheetsData || !sheetsData[sheetKey]) return [];
     const rows = sheetsData[sheetKey].rows || [];
     if (filterFreq !== 'quarter') return rows;
-    return rows.filter((row) => {
-      const entry = entryByDateLoai[`${row.date}:${row.loai}`];
-      if (!entry) return false;
-      const remark = (entry.raw_remark || '').toUpperCase();
-      return remark.split(/\s+/).includes('Q');
-    });
-  }, [sheetsData, filterFreq, entryByDateLoai]);
+    return rows.filter((row) => row.is_quarter);
+  }, [sheetsData, filterFreq]);
 
   const sheetKeys = Object.keys(sheetsData || {});
 
@@ -995,10 +990,8 @@ function PerfViewTab({ stationId }) {
               scroll={{ x: 'max-content' }}
               bordered
               rowClassName={(row) => {
-                const entry = entryByDateLoai[`${row.date}:${row.loai}`];
-                const isQuarter = entry && (entry.raw_remark || '').toUpperCase().split(/\s+/).includes('Q');
                 if (SPECIAL_ROW_LABELS.has(row.date)) return 'perf-special-row';
-                if (isQuarter) return 'perf-quarter-row';
+                if (row.is_quarter) return 'perf-quarter-row';
                 return '';
               }}
               style={{ borderRadius: 0 }}

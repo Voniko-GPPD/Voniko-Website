@@ -1204,7 +1204,7 @@ def _remove_outer_commas(s: str) -> str:
     return ''.join(result)
 
 
-_VSUF_NORM_RE = re.compile(r'-(\d+\.\d*?)(0+)([vV])$', re.IGNORECASE)
+_VSUF_NORM_RE = re.compile(r'-(\d+\.\d*?)(0*)([vV])$', re.IGNORECASE)
 
 
 def _normalize_voltage_suffix(s: str) -> str:
@@ -1266,11 +1266,16 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     # Handles both "-0.9V" (template / DMP jstj format) and " to 0.900V"
     # (older DM2000 label format) suffixes so that "10ohm 24h/d-0.900V"
     # and "10ohm 24h/d-0.9V" are considered equivalent.
+    # Each branch strips the voltage from *one* side only, intentionally, so that
+    # two conditions with genuinely different voltages (e.g. "20ohm 24h/d-0.6V"
+    # vs the template "20ohm 24h/d-0.9V") are never matched as equal.
     _vsuf = re.compile(r'(\s*-\s*|\s+to\s+)\d+\.?\d*\s*[vV]\s*$', re.IGNORECASE)
     f_no_v = _remove_outer_commas(re.sub(r'\s+', '', _vsuf.sub('', f)))
     h_no_v = _remove_outer_commas(re.sub(r'\s+', '', _vsuf.sub('', h)))
+    # f voltage-stripped, h intact: condition has voltage but template header omits it.
     if f_no_v and h_no_ws and f_no_v == h_no_ws:
         return True
+    # h voltage-stripped, f intact: template has voltage but condition does not.
     if f_no_ws and h_no_v and f_no_ws == h_no_v:
         return True
 

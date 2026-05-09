@@ -1185,7 +1185,9 @@ def _sep_normalize(s: str) -> str:
     """Normalize separator characters in a condition label for fuzzy matching.
 
     Removes whitespace and commas (used as condition-part separators by both the
-    DMP software and DM2000, e.g. ``"5.1ohm 4m/h,8h/d"`` vs ``"5.1ohm 4m/h 8h/d"``),
+    DMP software and DM2000, e.g. ``"5.1ohm 4m/h,8h/d"`` vs ``"5.1ohm 4m/h 8h/d"``;
+    the ``+`` quantifier in ``[\\s,]+`` collapses multiple consecutive separators
+    into a single removal),
     and removes periods that are **not** part of a decimal number (e.g. the period
     in ``"1s/60m.24h/d"`` is a separator and is removed, while the ``"."`` in
     ``"3.9ohm"`` or ``"7.5V"`` is a decimal point and is preserved because it is

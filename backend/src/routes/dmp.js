@@ -786,30 +786,12 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
   if (!station_id || !model) {
     return res.status(400).json({ error: 'station_id and model are required' });
   }
-  // Derive batch_id and report_date from raw_remark when not supplied by the client.
-  // Expected format: "DDMMYY <battery> <group>…" where the first token is a 6-digit date.
-  // For DM2000 entries (dm2000_archname set), batch_id/report_date defaults are still computed
-  // but are not used for data lookup (the archname is used instead).
-  let effectiveBatchId = batch_id;
-  let effectiveDate = report_date;
-  if (!effectiveBatchId || !effectiveDate) {
-    const firstToken = (raw_remark || '').trim().split(/\s+/)[0] || '';
-    if (/^\d{6}$/.test(firstToken)) {
-      const day = parseInt(firstToken.substring(0, 2), 10);
-      const month = parseInt(firstToken.substring(2, 4), 10);
-      const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
-      const candidate = new Date(year, month - 1, day);
-      const isValid = candidate.getFullYear() === year
-        && candidate.getMonth() === month - 1
-        && candidate.getDate() === day;
-      if (isValid) {
-        if (!effectiveBatchId) effectiveBatchId = firstToken;
-        if (!effectiveDate) effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      }
-    }
-    if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 8).replace(/-/g, '');
-    if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
-  }
+  // batch_id and report_date are no longer derived from a DDMMYY remark prefix.
+  // The Python perf-report service identifies the matching para_pub batch via
+  // raw_remark (bz LIKE) and reads the made date directly from para_singl.scrq,
+  // so these columns are just placeholders to satisfy the NOT NULL constraint.
+  const effectiveBatchId = batch_id || '';
+  const effectiveDate = report_date || new Date().toISOString().slice(0, 10);
   try {
     const id = uuidv4();
     db.prepare(`
@@ -940,34 +922,11 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
         return { loai, chuyen, trays: [] };
       }).filter(Boolean) : [];
 
-      // Derive batch_id from raw_remark or report_date
-      let effectiveBatchId = null;
-      let effectiveDate = report_date || null;
-      if (raw_remark) {
-        const firstToken = raw_remark.trim().split(/\s+/)[0] || '';
-        if (/^\d{6}$/.test(firstToken)) {
-          const day = parseInt(firstToken.substring(0, 2), 10);
-          const month = parseInt(firstToken.substring(2, 4), 10);
-          const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
-          const candidate = new Date(year, month - 1, day);
-          const isValid = candidate.getFullYear() === year
-            && candidate.getMonth() === month - 1
-            && candidate.getDate() === day;
-          if (isValid) {
-            effectiveBatchId = firstToken;
-            if (!effectiveDate) {
-              effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-            }
-          }
-        }
-      }
-      if (!effectiveBatchId) {
-        // Produce a DDMMYY batch ID from the report_date (YYYY-MM-DD) or today
-        const dateStr = effectiveDate || new Date().toISOString().slice(0, 10);
-        const [y, m, d] = dateStr.split('-');
-        effectiveBatchId = `${d}${m}${y.slice(2)}`;
-      }
-      if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
+      // batch_id and report_date are placeholders only; the perf-report
+      // service identifies the para_pub batch via raw_remark (bz LIKE) and
+      // reads the made date directly from para_singl.scrq.
+      const effectiveBatchId = '';
+      const effectiveDate = report_date || new Date().toISOString().slice(0, 10);
 
       // Duplicate check: skip if an identical entry already exists
       const groupsJson = JSON.stringify(groups);

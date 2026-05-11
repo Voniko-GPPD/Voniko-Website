@@ -902,6 +902,7 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
     const col = (name) => headers.indexOf(name);
 
     const inserted = [];
+    const skipped = [];
     const errors = [];
     sheet.eachRow((row, rowNum) => {
       if (rowNum === 1) return;
@@ -968,17 +969,31 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
       }
       if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
 
+      // Duplicate check: skip if an identical entry already exists
+      const groupsJson = JSON.stringify(groups);
+      let existing = null;
+      if (raw_remark) {
+        existing = db.prepare(
+          'SELECT id FROM dmp_perf_entries WHERE station_id = ? AND raw_remark = ? LIMIT 1'
+        ).get(stationId, raw_remark);
+      } else {
+        existing = db.prepare(
+          'SELECT id FROM dmp_perf_entries WHERE station_id = ? AND batch_id = ? AND model = ? AND groups_json = ? LIMIT 1'
+        ).get(stationId, effectiveBatchId, model, groupsJson);
+      }
+      if (existing) { skipped.push(existing.id); return; }
+
       const id = uuidv4();
       db.prepare(`
         INSERT INTO dmp_perf_entries
           (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, dm2000_archname, created_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, stationId, effectiveBatchId, effectiveDate, model, JSON.stringify(groups),
+      `).run(id, stationId, effectiveBatchId, effectiveDate, model, groupsJson,
         special_type, raw_remark || null, notes || null, null, req.user.id);
       inserted.push(id);
     });
 
-    res.json({ ok: true, imported: inserted.length, errors });
+    res.json({ ok: true, imported: inserted.length, skipped: skipped.length, errors });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1015,6 +1030,26 @@ router.put('/perf-entries/:id', authenticateToken, (req, res) => {
     );
     if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dmp/perf-entries — delete ALL entries for a station (admin only, requires password)
+router.delete('/perf-entries', authenticateToken, requireAdmin, async (req, res) => {
+  const { getDb } = require('../models/database');
+  const bcrypt = require('bcryptjs');
+  const db = getDb();
+  const { stationId, password } = req.body || {};
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  if (!password) return res.status(400).json({ error: 'password is required' });
+  try {
+    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(403).json({ error: 'Incorrect password' });
+    const result = db.prepare('DELETE FROM dmp_perf_entries WHERE station_id = ?').run(stationId);
+    res.json({ ok: true, deleted: result.changes });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

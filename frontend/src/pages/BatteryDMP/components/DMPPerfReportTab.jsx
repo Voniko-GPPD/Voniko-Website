@@ -7,6 +7,7 @@ import {
   Empty,
   Form,
   Input,
+  Modal,
   Popconfirm,
   Select,
   Space,
@@ -30,6 +31,7 @@ import {
 import dayjs from 'dayjs';
 import {
   createPerfEntry,
+  deleteAllPerfEntries,
   deletePerfEntry,
   downloadDmpPerfReport,
   exportPerfEntries,
@@ -41,7 +43,9 @@ import {
   updatePerfEntry,
   uploadDmpPerfTemplate,
 } from '../../../api/dmpApi';
+import { useAuth } from '../../../contexts/AuthContext';
 import { useLang } from '../../../contexts/LangContext';
+
 
 const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang', 'quarter'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
@@ -387,11 +391,15 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
 
 function RemarkRegistryTab({ stationId, selection }) {
   const { t } = useLang();
+  const { isAdmin } = useAuth();
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = none, 'new' = new form
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [deleteAllVisible, setDeleteAllVisible] = useState(false);
+  const [deleteAllPassword, setDeleteAllPassword] = useState('');
+  const [deletingAll, setDeletingAll] = useState(false);
   const importRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -419,6 +427,25 @@ function RemarkRegistryTab({ stationId, selection }) {
     }
   };
 
+  const handleDeleteAll = async () => {
+    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
+    if (!deleteAllPassword) { notification.warning({ message: t('dmpPerfDeleteAllPasswordRequired') }); return; }
+    setDeletingAll(true);
+    try {
+      const result = await deleteAllPerfEntries(stationId, deleteAllPassword);
+      notification.success({
+        message: t('dmpPerfDeleteAllSuccess').replace('{count}', result.deleted ?? 0),
+      });
+      setDeleteAllVisible(false);
+      setDeleteAllPassword('');
+      load();
+    } catch (err) {
+      notification.error({ message: t('dmpPerfDeleteAllFailed'), description: err.message });
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   const handleAddFromBatch = () => {
     if (!selection?.id) return;
     setEditingId('new');
@@ -443,9 +470,11 @@ function RemarkRegistryTab({ stationId, selection }) {
     setImporting(true);
     try {
       const result = await importPerfEntries(stationId, file);
-      notification.success({
-        message: t('dmpPerfImportSuccess').replace('{count}', result.imported ?? 0),
-      });
+      const imported = result.imported ?? 0;
+      const skipped = result.skipped ?? 0;
+      let msg = t('dmpPerfImportSuccess').replace('{count}', imported);
+      if (skipped > 0) msg += ` (${t('dmpPerfImportSkipped').replace('{count}', skipped)})`;
+      notification.success({ message: msg });
       load();
     } catch (err) {
       notification.error({ message: t('dmpPerfImportFailed'), description: err.message });
@@ -549,6 +578,15 @@ function RemarkRegistryTab({ stationId, selection }) {
             {t('dmpPerfAddFromBatch')}
           </Button>
         )}
+        {isAdmin && (
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => { setDeleteAllPassword(''); setDeleteAllVisible(true); }}
+          >
+            {t('dmpPerfDeleteAllEntries')}
+          </Button>
+        )}
       </Space>
 
       {loading ? <Spin /> : entries.length === 0 ? (
@@ -563,6 +601,28 @@ function RemarkRegistryTab({ stationId, selection }) {
           scroll={{ x: 900 }}
         />
       )}
+
+      <Modal
+        open={deleteAllVisible}
+        title={t('dmpPerfDeleteAllTitle')}
+        onCancel={() => { setDeleteAllVisible(false); setDeleteAllPassword(''); }}
+        onOk={handleDeleteAll}
+        okText={t('dmpPerfDeleteAllConfirmBtn')}
+        okButtonProps={{ danger: true, loading: deletingAll }}
+        cancelText={t('dmpPerfCancelEntry')}
+        destroyOnClose
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Typography.Text type="danger">{t('dmpPerfDeleteAllWarning')}</Typography.Text>
+          <Input.Password
+            placeholder={t('dmpPerfDeleteAllPasswordPlaceholder')}
+            value={deleteAllPassword}
+            onChange={(e) => setDeleteAllPassword(e.target.value)}
+            onPressEnter={handleDeleteAll}
+            autoFocus
+          />
+        </Space>
+      </Modal>
     </Space>
   );
 }

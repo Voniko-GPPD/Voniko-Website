@@ -192,6 +192,14 @@ export async function deletePerfEntry(id) {
   return res.json();
 }
 
+export async function deleteAllPerfEntries(stationId, password) {
+  const res = await apiFetch(`${BASE}/perf-entries`, {
+    method: 'DELETE',
+    body: JSON.stringify({ stationId, password }),
+  });
+  return res.json();
+}
+
 export async function fetchDmpPerfTemplates(stationId) {
   const res = await apiFetch(`${BASE}/dmp-perf-templates?stationId=${encodeURIComponent(stationId)}`);
   const data = await res.json();

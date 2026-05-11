@@ -4630,7 +4630,7 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
                         continue
                     if math.isnan(f_val):
                         continue
-                    tav.append({"sj": row.get("dy"), "minutes": val})
+                    tav.append({"sj": row.get("dy"), "minutes": f_val})
                 if tav:
                     full_data[i] = tav
     except (pyodbc.Error, HTTPException):
@@ -4657,7 +4657,7 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
                             continue
                         if math.isnan(f_val):
                             continue
-                        tav.append({"sj": row.get("sj"), "minutes": val})
+                        tav.append({"sj": row.get("sj"), "minutes": f_val})
                     if tav:
                         full_data[i] = tav
         except (pyodbc.Error, HTTPException):

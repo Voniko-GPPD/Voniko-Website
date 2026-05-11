@@ -902,7 +902,7 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
     const col = (name) => headers.indexOf(name);
 
     const inserted = [];
-    const skipped = [];
+    let skippedCount = 0;
     const errors = [];
     sheet.eachRow((row, rowNum) => {
       if (rowNum === 1) return;
@@ -981,7 +981,7 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
           'SELECT id FROM dmp_perf_entries WHERE station_id = ? AND batch_id = ? AND model = ? AND groups_json = ? LIMIT 1'
         ).get(stationId, effectiveBatchId, model, groupsJson);
       }
-      if (existing) { skipped.push(existing.id); return; }
+      if (existing) { skippedCount += 1; return; }
 
       const id = uuidv4();
       db.prepare(`
@@ -993,7 +993,7 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
       inserted.push(id);
     });
 
-    res.json({ ok: true, imported: inserted.length, skipped: skipped.length, errors });
+    res.json({ ok: true, imported: inserted.length, skipped: skippedCount, errors });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1045,7 +1045,7 @@ router.delete('/perf-entries', authenticateToken, requireAdmin, async (req, res)
   if (!password) return res.status(400).json({ error: 'password is required' });
   try {
     const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(401).json({ error: 'User not found' });
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(403).json({ error: 'Incorrect password' });
     const result = db.prepare('DELETE FROM dmp_perf_entries WHERE station_id = ?').run(stationId);

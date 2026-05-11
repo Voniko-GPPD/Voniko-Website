@@ -5526,11 +5526,11 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     tokens = (bz or "").strip().upper().split()
     start = 1 if (tokens and re.fullmatch(r"\d{6}", tokens[0])) else 0
     for tok in tokens[start:]:
-        if re.fullmatch(r"UDP\d+", tok):
+        if re.fullmatch(r"UDP\d*", tok):
             groups.append({"loai": "UD+", "chuyen": tok[3:]})
-        elif re.fullmatch(r"HP\d+", tok):
+        elif re.fullmatch(r"HP\d*", tok):
             groups.append({"loai": "HP", "chuyen": tok[2:]})
-        elif re.fullmatch(r"UD\d+", tok):
+        elif re.fullmatch(r"UD\d*", tok):
             groups.append({"loai": "UD", "chuyen": tok[2:]})
     return groups
 
@@ -6142,9 +6142,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # For no-chuyen models (LR61, 9V, 6LR61) with no configured groups,
             # synthesize one empty group covering all batteries so the entry is
-            # not silently skipped.
+            # not silently skipped.  Derive the loai from raw_remark when available
+            # so that entries saved without an explicit group still display the
+            # correct battery grade.
             if not _dm2k_eff_groups and model_upper in no_chuyen_models:
-                _dm2k_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+                _synth_loai_dm2k = ""
+                if entry.raw_remark:
+                    _synth_parsed_dm2k = _parse_bz_groups(entry.raw_remark)
+                    if _synth_parsed_dm2k:
+                        _synth_loai_dm2k = _synth_parsed_dm2k[0].get("loai", "")
+                _dm2k_eff_groups = [{"loai": _synth_loai_dm2k, "chuyen": "", "trays": [], "_orig_idx": None}]
                 _dm2k_auto_trays = [_dm2k_all_batys]
 
             for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
@@ -6651,8 +6658,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _dmp_no_chuyen_models = {"LR61", "9V", "6LR61"}
         # For no-chuyen models with no configured groups, synthesize one empty
         # group covering all batteries so the entry is not silently skipped.
+        # Derive the loai from raw_remark when available so that entries saved
+        # without an explicit group still display the correct battery grade.
         if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
-            _dmp_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+            _synth_loai = ""
+            if entry.raw_remark:
+                _synth_parsed = _parse_bz_groups(entry.raw_remark)
+                if _synth_parsed:
+                    _synth_loai = _synth_parsed[0].get("loai", "")
+            _dmp_eff_groups = [{"loai": _synth_loai, "chuyen": "", "trays": [], "_orig_idx": None}]
             n_groups = 1
             auto_trays = [list(range(1, 10))]
 

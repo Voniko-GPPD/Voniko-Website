@@ -2240,6 +2240,10 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
 def _read_telemetry_multi(cdmc: str, channels: list[int]) -> dict[int, list[dict]]:
     """Read vidata for multiple *channels* from a single *cdmc* file.
 
+    *channels* are battery/tray numbers (the ``baty`` column in the vidata
+    table, values 1-9), identical to the *channel* parameter of
+    :func:`_read_telemetry`.
+
     Uses **one** shadow copy for all channels instead of one per channel, which
     is the key performance optimisation for :func:`_dmp_compute_group_perf`:
     all trays in a DMP batch typically share the same cdmc file, so batching

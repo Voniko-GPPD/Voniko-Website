@@ -3157,14 +3157,14 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
             f"SELECT {select_cols} FROM ls_vtime WHERE cdid = ?",
             (archname,),
         )
-    except pyodbc.Error:
+    except (pyodbc.Error, HTTPException):
         # cdid-based schema failed; try archname-based schema
         try:
             baty_rows = _read_dm2000_ls(
                 "SELECT DISTINCT baty FROM ls_vtime WHERE archname = ? ORDER BY baty ASC",
                 (archname,),
             )
-        except pyodbc.Error:
+        except (pyodbc.Error, HTTPException):
             return []
         result = []
         for row in baty_rows:
@@ -6480,7 +6480,15 @@ def get_dmp_perf_data(payload: DmpPerfReportRequest):
     # skip_not_found=True: entries with no matching DMP data are omitted from the
     # web preview so the table does not show spurious empty rows or columns whose
     # header is the battery grade (e.g. "UD+") rather than the real test condition.
-    groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
+    try:
+        groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("get_dmp_perf_data: unexpected error computing perf groups")
+        raise HTTPException(
+            status_code=500, detail=f"Error computing performance data: {exc}"
+        ) from exc
 
     sheets: dict = {}
     for sheet_key, date_type_map in groups.items():

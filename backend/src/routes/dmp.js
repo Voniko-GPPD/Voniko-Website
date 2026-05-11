@@ -1076,7 +1076,7 @@ router.get('/dmp-perf-templates', authenticateToken, async (req, res, next) => {
     const r = await axios.get(`${stationUrl}/dmp-perf-templates`, { timeout: 10000 });
     res.json(r.data);
   } catch (err) {
-    next(err);
+    handleProxyError(err, res, next);
   }
 });
 
@@ -1097,7 +1097,7 @@ router.post('/dmp-perf-template/upload', authenticateToken, upload.single('file'
     });
     res.json(r.data);
   } catch (err) {
-    next(err);
+    handleProxyError(err, res, next);
   }
 });
 
@@ -1115,6 +1115,15 @@ router.post('/dmp-perf-report/generate', authenticateToken, async (req, res, nex
     res.setHeader('Content-Disposition', disposition);
     res.send(Buffer.from(r.data));
   } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try {
+        return res.status(err.response.status).json(JSON.parse(msg));
+      } catch {
+        return res.status(err.response.status).send(msg);
+      }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
     next(err);
   }
 });
@@ -1127,7 +1136,7 @@ router.post('/dmp-perf-data', authenticateToken, async (req, res, next) => {
     const r = await axios.post(`${stationUrl}/dmp-perf-data`, req.body, { timeout: 120000 });
     res.json(r.data);
   } catch (err) {
-    next(err);
+    handleProxyError(err, res, next);
   }
 });
 

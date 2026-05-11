@@ -787,6 +787,7 @@ export default {
   dmpPerfFreqEveryquarter: 'Every Quarter（每季度）',
   dmpPerfFreqOther: '其他',
   dmpPerfViewFilterFreq: '测试频率',
+  dmpPerfViewFilterYear: '年份',
   dmpPerfSpecialQuarter: '季度行（全条件测试日）',
   dmpPerfViewFreqAll: '所有频率',
   dmpPerfExportEntries: '导出到Excel',

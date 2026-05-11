@@ -771,7 +771,7 @@ function PerfViewTab({ stationId }) {
   const [entries, setEntries] = useState([]);
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
-  const [dateRange, setDateRange] = useState([null, null]);
+  const [selectedYear, setSelectedYear] = useState(null);
   const [filterModel, setFilterModel] = useState(null);
   const [filterLoai, setFilterLoai] = useState(null);
   const [filterChuyen, setFilterChuyen] = useState(null);
@@ -779,15 +779,14 @@ function PerfViewTab({ stationId }) {
   const [sheetsData, setSheetsData] = useState(null); // { [sheetKey]: {rows, conditions, freq_groups} }
   const [activeSheet, setActiveSheet] = useState(null);
 
-  // Load entries from SQLite (used on mount and when date range changes)
+  // Load entries from SQLite (used on mount and when year selection changes)
   const loadEntries = useCallback(async () => {
     if (!stationId) return;
     setLoadingEntries(true);
     try {
-      const [from, to] = dateRange;
       const data = await fetchPerfEntries(stationId, {
-        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
-        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
+        dateFrom: selectedYear ? selectedYear.startOf('year').format('YYYY-MM-DD') : undefined,
+        dateTo: selectedYear ? selectedYear.endOf('year').format('YYYY-MM-DD') : undefined,
       });
       setEntries(data);
     } catch (err) {
@@ -795,7 +794,7 @@ function PerfViewTab({ stationId }) {
     } finally {
       setLoadingEntries(false);
     }
-  }, [stationId, dateRange]);
+  }, [stationId, selectedYear]);
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
@@ -833,10 +832,9 @@ function PerfViewTab({ stationId }) {
     setSheetsData(null);
     let freshEntries = [];
     try {
-      const [from, to] = dateRange;
       freshEntries = await fetchPerfEntries(stationId, {
-        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
-        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
+        dateFrom: selectedYear ? selectedYear.startOf('year').format('YYYY-MM-DD') : undefined,
+        dateTo: selectedYear ? selectedYear.endOf('year').format('YYYY-MM-DD') : undefined,
       });
       setEntries(freshEntries);
     } catch (err) {
@@ -877,7 +875,7 @@ function PerfViewTab({ stationId }) {
     } finally {
       setLoadingData(false);
     }
-  }, [stationId, dateRange, applyFilters, t]);
+  }, [stationId, selectedYear, applyFilters, t]);
 
   // Build a lookup map: "YYYY-MM-DD:loai" → entry, for EveryQuarter / is15d detection
   const entryByDateLoai = useMemo(() => {
@@ -1035,10 +1033,12 @@ function PerfViewTab({ stationId }) {
         bodyStyle={{ padding: '12px 16px' }}
       >
         <Space wrap size={8}>
-          <DatePicker.RangePicker
-            value={dateRange}
-            onChange={setDateRange}
+          <DatePicker
+            picker="year"
+            value={selectedYear}
+            onChange={setSelectedYear}
             allowClear
+            placeholder={t('dmpPerfViewFilterYear')}
           />
           <Select
             allowClear

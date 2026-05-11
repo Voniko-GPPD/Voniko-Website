@@ -5781,10 +5781,68 @@ def _compute_dmp_perf_groups(  # noqa: C901
     """
 
     def _to_date(v) -> str:
-        if v and hasattr(v, "strftime"):
-            return v.strftime("%Y-%m-%d")
-        s = str(v or "").strip()[:10].replace("/", "-")
-        return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
+        """Normalise a date value to canonical ``YYYY-MM-DD``.
+
+        Returns ``""`` when the input cannot be interpreted as a real date.
+
+        Handles datetime-like objects plus the date string formats the Access
+        databases actually emit:
+
+          * ``YYYY-MM-DD`` and ``YYYY-M-D`` (DMP ``para_pub.fdrq`` style)
+          * ``YYYY/M/D``  and ``YYYY/MM/DD`` (DM2000 ``ls_jb_cs.scrq`` style,
+            e.g. ``"2026/1/15"``)
+          * ``M/D/YYYY``  and ``MM/DD/YYYY`` (DMP ``para_singl.scrq`` style,
+            e.g. ``"7/31/2024"``)
+          * ``D/M/YYYY``  is only inferred when the first component is ``> 12``
+            (otherwise it is ambiguous with M/D/YYYY and we prefer the latter,
+            which is what the database actually uses).
+
+        Garbage like ``"20265/7/10"`` or ``"None"`` is rejected and returns
+        ``""`` so callers can fall back to a different field instead of
+        propagating a bogus row label.
+        """
+        if v is None:
+            return ""
+        if hasattr(v, "strftime"):
+            try:
+                return v.strftime("%Y-%m-%d")
+            except (ValueError, AttributeError):
+                return ""
+        s = str(v).strip()
+        if not s or s.lower() in ("none", "null"):
+            return ""
+        # Strip any time portion ("2024-07-12 15:30:00" or ISO "2024-07-12T15:30")
+        s = s.split()[0].split("T")[0]
+        for sep in ("-", "/"):
+            if sep not in s:
+                continue
+            parts = s.split(sep)
+            if len(parts) != 3:
+                continue
+            try:
+                a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
+            except (ValueError, TypeError):
+                continue
+            # YYYY-M-D (or YYYY/M/D): first component is a 4-digit year
+            if 1900 <= a <= 2999 and 1 <= b <= 12 and 1 <= c <= 31:
+                try:
+                    return date(a, b, c).strftime("%Y-%m-%d")
+                except ValueError:
+                    return ""
+            # M/D/YYYY: third component is a 4-digit year, first <= 12
+            if 1900 <= c <= 2999 and 1 <= a <= 12 and 1 <= b <= 31:
+                try:
+                    return date(c, a, b).strftime("%Y-%m-%d")
+                except ValueError:
+                    return ""
+            # D/M/YYYY: third component is a 4-digit year, first > 12 (unambiguous)
+            if 1900 <= c <= 2999 and 13 <= a <= 31 and 1 <= b <= 12:
+                try:
+                    return date(c, b, a).strftime("%Y-%m-%d")
+                except ValueError:
+                    return ""
+            return ""
+        return ""
 
     groups: dict[str, dict] = {}
 

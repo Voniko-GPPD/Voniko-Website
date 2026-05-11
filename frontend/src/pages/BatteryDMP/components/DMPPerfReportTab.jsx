@@ -138,7 +138,11 @@ const PERF_DATA_BATCH_SIZE = 30;
  * Merge two /dmp-perf-data "sheets" objects together.
  *
  * Each sheet has: rows[], conditions[], freq_groups{}, units{}.
- * - rows are concatenated (different entries produce different date+loai rows)
+ * - rows are deduplicated by (date, loai): when both batches contain a row
+ *   for the same (date, loai) pair, their `conditions` dicts are merged
+ *   (earlier batches take precedence on per-condition conflicts). This
+ *   prevents duplicate rows when several SQLite entries on the same made
+ *   date land in different parallel batches and resolve to the same archive.
  * - conditions are unioned preserving the insertion order from earlier batches
  * - freq_groups and units are merged (earlier batches take precedence for conflicts)
  */
@@ -148,7 +152,28 @@ function mergeSheetsData(acc, incoming) {
     if (!result[key]) {
       result[key] = { rows: [], conditions: [], freq_groups: {}, units: {} };
     }
-    result[key].rows = [...result[key].rows, ...(sheet.rows || [])];
+    // Build an index of existing rows by (date, loai) so we can merge new
+    // rows into the matching one instead of appending duplicates.
+    const rowIndex = new Map();
+    result[key].rows.forEach((r, idx) => {
+      rowIndex.set(`${r.date}::${r.loai}`, idx);
+    });
+    for (const r of sheet.rows || []) {
+      const k = `${r.date}::${r.loai}`;
+      const existingIdx = rowIndex.get(k);
+      if (existingIdx === undefined) {
+        rowIndex.set(k, result[key].rows.length);
+        result[key].rows.push({ ...r, conditions: { ...(r.conditions || {}) } });
+      } else {
+        const existing = result[key].rows[existingIdx];
+        // Earlier batches win on per-condition conflicts (matches the
+        // freq_groups/units precedence below).
+        existing.conditions = {
+          ...(r.conditions || {}),
+          ...(existing.conditions || {}),
+        };
+      }
+    }
     const existingConds = new Set(result[key].conditions);
     for (const cond of sheet.conditions || []) {
       if (!existingConds.has(cond)) {

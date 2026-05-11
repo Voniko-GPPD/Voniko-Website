@@ -1200,23 +1200,6 @@ def _sep_normalize(s: str) -> str:
     return s
 
 
-def _strip_frequency_tokens(raw_remark: str) -> str:
-    """Return *raw_remark* with standalone frequency-variant tokens removed.
-
-    Strips ``'Q'`` (Every Quarter) and ``'15'`` (Every 15 days) so that a
-    search key derived from ``"LR6 UD501 UD502 Q"`` or
-    ``"LR6 UD501 UD502 15"`` matches the base remark ``"LR6 UD501 UD502"``
-    when looking up archives or batches.  Returns the original string when
-    stripping would leave it empty.
-
-    Used **only for search-key computation** — the display layer (column
-    names, row flags) no longer uses Q/15 tokens at all.
-    """
-    stripped = " ".join(
-        t for t in raw_remark.split() if t.upper() not in {"15", "Q"}
-    ).strip()
-    return stripped or raw_remark
-
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -6079,13 +6062,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # date-based lookup yields no results, but the corresponding para_pub row
         # can still be identified by its bz value.
         if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
-            # Strip standalone Q/15 frequency tokens so that a remark like
-            # "LR6 UD501 UD502 Q" still finds DMP batches whose bz field
-            # contains "LR6 UD501 UD502" (without the Q suffix).
-            _remark_search = _strip_frequency_tokens(entry.raw_remark.strip())
+            _remark_search = entry.raw_remark.strip()
+            # Strip leading 6-digit DDMMYY date prefix so "160226 LR6 UD501"
+            # becomes "LR6 UD501" and matches bz = "160226 LR6 UD501 UD502".
+            _remark_tokens = _remark_search.split()
+            if _remark_tokens and re.fullmatch(r"\d{6}", _remark_tokens[0]):
+                _remark_search = " ".join(_remark_tokens[1:]).strip()
             if _remark_search:
-                # Leading wildcard is intentional: bz values in the database may
-                # contain characters before the remark text.
+                # Leading wildcard is intentional: bz values often contain a
+                # DDMMYY date prefix before the remark text (e.g. "160226 LR6 UD501").
                 _bz_pattern = f"%{_remark_search}%"
                 _bz_sql = (
                     "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
@@ -6100,121 +6085,48 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )
 
         if batch_rows:
-            # Pre-compute entry-level group structure once — all batches for this
-            # entry share the same groups / model derived from entry.raw_remark and
-            # entry.groups, so there is no need to recompute them per batch.
-            _shared_loai_by_chuyen: dict[str, str] = {}
-            if entry.raw_remark:
-                for _rg in _parse_bz_groups(entry.raw_remark):
-                    if _rg.get("chuyen"):
-                        _shared_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
-            _shared_eff_groups = [
-                {
-                    "loai": _shared_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
-                    "chuyen": grp.chuyen,
-                    "trays": list(grp.trays or []),
-                    "_orig_idx": i,
-                }
-                for i, grp in enumerate(entry.groups)
-            ]
-            _shared_eff_groups = _sort_eff_groups_for_tray_assignment(_shared_eff_groups)
-            _shared_n_groups = len(_shared_eff_groups)
-            _shared_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_shared_n_groups, [list(range(1, 10))])
-            _shared_model_upper = entry.model.strip().upper()
-            _shared_no_chuyen = {"LR61", "9V", "6LR61"}
-            if not _shared_eff_groups and _shared_model_upper in _shared_no_chuyen:
-                _shared_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
-                _shared_n_groups = 1
-                _shared_auto_trays = [list(range(1, 10))]
+            batch = batch_rows[0]
+            # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
+            # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
+            actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
-            # Process every matching batch so that a single remark-data entry
-            # "LR6 UD501 UD502" generates separate rows for both the daily batch
-            # (bz="LR6 UD501 UD502") and the every-15-days batch
-            # (bz="LR6 UD501 UD502 15") without requiring distinct registry entries.
-            for batch in batch_rows:
-                # Resolve the actual para_pub.id so that _dmp_compute_group_perf
-                # can look up the matching para_singl rows (sid = para_pub.id).
-                actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
+            fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
+            fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
+            # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
+            # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
+            # This allows _perf_fdfs_matches_header to find the correct column in the
+            # Excel template (e.g. "1500mW,(1500mW2s,650mW28s)10T/h,24h/d") instead of
+            # falling through to the position-based fallback that writes to the first
+            # RESULT column regardless of the actual test condition.
+            if not fdfs:
+                fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
+            # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
+            _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
+            _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
+            _HFSJ_MINUTE = {"minute", "minutes", "phút", "m", "min", "phu"}
+            if _hfsj_raw in _HFSJ_TIMES:
+                hfsj_unit = "times"
+            elif _hfsj_raw in _HFSJ_MINUTE:
+                hfsj_unit = "minute"
+            else:
+                hfsj_unit = "hour"
+            zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
 
-                fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
-                fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
-                # When para_pub.fdfs is empty (DMP often leaves it blank), fall back
-                # to para_pub.jstj (discharge test condition).
-                if not fdfs:
-                    fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
-                # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
-                _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
-                _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
-                _HFSJ_MINUTE = {"minute", "minutes", "phút", "m", "min", "phu"}
-                if _hfsj_raw in _HFSJ_TIMES:
-                    hfsj_unit = "times"
-                elif _hfsj_raw in _HFSJ_MINUTE:
-                    hfsj_unit = "minute"
-                else:
-                    hfsj_unit = "hour"
-                zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
-
-                # Parse endpoint voltage
-                ep_v: Optional[float] = None
-                if zzdy_raw:
-                    tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
-                    try:
-                        ep_v = float(tok)
-                    except (TypeError, ValueError):
-                        ep_v = None
-
-                # The batch's own bz field is kept for data context only.
-                batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
-
-                # Determine row label (date or special)
-                if entry.special_type in _SPECIAL_TYPE_LABEL:
-                    row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
-                else:
-                    row_label = fdrq or entry.batch_id
-
-                for g_idx, _dmp_grp in enumerate(_shared_eff_groups):
-                    _orig_idx = _dmp_grp.get("_orig_idx")
-                    if _orig_idx is not None:
-                        orig_grp = entry.groups[_orig_idx]
-                        trays = (orig_grp.trays if orig_grp.trays else
-                                 (_shared_auto_trays[g_idx] if g_idx < len(_shared_auto_trays) else []))
-                    else:
-                        # Synthetic group for no-chuyen model with no configured groups
-                        trays = _shared_auto_trays[g_idx] if g_idx < len(_shared_auto_trays) else list(range(1, 10))
-                    if not trays:
-                        continue
-
-                    # Compute performance values for this group's trays using the
-                    # resolved para_pub.id so that the para_singl lookup succeeds.
-                    perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
-                    perf["hfsj_unit"] = hfsj_unit
-
-                    # Determine sheet name
-                    model_upper = _shared_model_upper
-                    no_chuyen_models = _shared_no_chuyen
-                    if model_upper in no_chuyen_models:
-                        sheet_key = entry.model.strip()
-                    else:
-                        sheet_key = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
-
-                    effective_loai = _dmp_grp["loai"]
-
-                    fdfs_label = fdfs if fdfs else effective_loai
-
-                    row_key = (row_label, effective_loai)
-                    groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+            # Parse endpoint voltage
+            ep_v: Optional[float] = None
+            if zzdy_raw:
+                tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
+                try:
+                    ep_v = float(tok)
+                except (TypeError, ValueError):
+                    ep_v = None
         else:
             # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
             # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
             # either a DMP batch or a DM2000 archive transparently.
             if entry.raw_remark and entry.raw_remark.strip():
                 _fb_remark = entry.raw_remark.strip()
-                # Strip standalone Q/15 frequency tokens from the search key so
-                # that DM2000 archives are found regardless of whether the remark
-                # carried a "Q" or "15" suffix.  The display layer no longer uses
-                # these tokens (no quarter flag, no 15d column suffix), so stripping
-                # them here is safe — it only affects archive lookup, not rendering.
-                _fb_remark_search = _strip_frequency_tokens(_fb_remark)
+                _fb_remark_search = _fb_remark
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.
@@ -6515,70 +6427,92 @@ def _compute_dmp_perf_groups(  # noqa: C901
             else:
                 fdrq = entry.batch_id
 
-            # Determine row label (date or special)
-            if entry.special_type in _SPECIAL_TYPE_LABEL:
-                row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+
+        # Determine row label (date or special) using fdrq set above in either
+        # the "batch found" or "both failed" code paths.
+        if entry.special_type in _SPECIAL_TYPE_LABEL:
+            row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+        else:
+            row_label = fdrq or entry.batch_id
+
+        # Re-derive authoritative loai by chuyen from raw_remark so that stored
+        # entries with an incorrect loai in groups_json still display the correct
+        # battery grade.  Example: raw_remark "LR6 UDP501 HP503" yields the
+        # mapping {"501": "UD+", "503": "HP"}.  If raw_remark is absent or a
+        # chuyen has no match, the stored grp.loai is used as fallback.
+        _remark_loai_by_chuyen: dict[str, str] = {}
+        _remark_bz_groups: list[dict] = []
+        if entry.raw_remark:
+            _remark_bz_groups = _parse_bz_groups(entry.raw_remark)
+            for _rg in _remark_bz_groups:
+                if _rg.get("chuyen"):
+                    _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
+
+        # Build a sortable eff_groups list for the DMP path and sort by
+        # production-line (chuyen) number so that the positional tray
+        # assignment always maps the lower-numbered line to the lower physical
+        # tray slots — regardless of battery grade or entry order.
+        _dmp_eff_groups = [
+            {
+                "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
+                "chuyen": grp.chuyen,
+                "trays": list(grp.trays or []),
+                "_orig_idx": i,
+            }
+            for i, grp in enumerate(entry.groups)
+        ]
+        _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups)
+        n_groups = len(_dmp_eff_groups)
+        auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+
+        # Hoist model/no-chuyen check outside the loop so the synthetic-group
+        # path (LR61/9V with no configured groups) shares the same variable.
+        _dmp_model_upper = entry.model.strip().upper()
+        _dmp_no_chuyen_models = {"LR61", "9V", "6LR61"}
+        # For no-chuyen models with no configured groups, synthesize one empty
+        # group covering all batteries so the entry is not silently skipped.
+        if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
+            _dmp_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+            n_groups = 1
+            auto_trays = [list(range(1, 10))]
+
+        for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
+            _orig_idx = _dmp_grp.get("_orig_idx")
+            if _orig_idx is not None:
+                orig_grp = entry.groups[_orig_idx]
+                trays = (orig_grp.trays if orig_grp.trays else
+                         (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
             else:
-                row_label = fdrq or entry.batch_id
+                # Synthetic group for no-chuyen model with no configured groups
+                trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
+            if not trays:
+                continue
 
-            # Re-derive authoritative loai by chuyen from raw_remark.
-            _remark_loai_by_chuyen: dict[str, str] = {}
-            _remark_bz_groups: list[dict] = []
-            if entry.raw_remark:
-                _remark_bz_groups = _parse_bz_groups(entry.raw_remark)
-                for _rg in _remark_bz_groups:
-                    if _rg.get("chuyen"):
-                        _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
+            # Compute performance values for this group's trays using the resolved
+            # para_pub.id (actual_batch_id) so that the para_singl lookup succeeds.
+            perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
+            perf["hfsj_unit"] = hfsj_unit
 
-            # Build a sortable eff_groups list for the DMP path.
-            _dmp_eff_groups = [
-                {
-                    "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
-                    "chuyen": grp.chuyen,
-                    "trays": list(grp.trays or []),
-                    "_orig_idx": i,
-                }
-                for i, grp in enumerate(entry.groups)
-            ]
-            _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups)
-            n_groups = len(_dmp_eff_groups)
-            auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+            # Determine sheet name
+            model_upper = _dmp_model_upper
+            # Models without production-line requirement use only the model name
+            no_chuyen_models = _dmp_no_chuyen_models
+            if model_upper in no_chuyen_models:
+                sheet_key = entry.model.strip()
+            else:
+                sheet_key = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
 
-            _dmp_model_upper = entry.model.strip().upper()
-            _dmp_no_chuyen_models = {"LR61", "9V", "6LR61"}
-            if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
-                _dmp_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
-                n_groups = 1
-                auto_trays = [list(range(1, 10))]
+            # Use loai from raw_remark (re-parsed) when available so that entries
+            # whose groups_json was saved with an incorrect loai are displayed with
+            # the correct battery grade derived from the remark token (UDP→UD+,
+            # HP→HP, UD→UD) matched by chuyen.
+            effective_loai = _dmp_grp["loai"]
 
-            for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
-                _orig_idx = _dmp_grp.get("_orig_idx")
-                if _orig_idx is not None:
-                    orig_grp = entry.groups[_orig_idx]
-                    trays = (orig_grp.trays if orig_grp.trays else
-                             (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
-                else:
-                    # Synthetic group for no-chuyen model with no configured groups
-                    trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
-                if not trays:
-                    continue
+            # fdfs label for column matching
+            fdfs_label = fdfs if fdfs else effective_loai
 
-                perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
-                perf["hfsj_unit"] = hfsj_unit
-
-                model_upper = _dmp_model_upper
-                no_chuyen_models = _dmp_no_chuyen_models
-                if model_upper in no_chuyen_models:
-                    sheet_key = entry.model.strip()
-                else:
-                    sheet_key = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
-
-                effective_loai = _dmp_grp["loai"]
-
-                fdfs_label = fdfs if fdfs else effective_loai
-
-                row_key = (row_label, effective_loai)
-                groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+            row_key = (row_label, effective_loai)
+            groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
 
     return groups
 

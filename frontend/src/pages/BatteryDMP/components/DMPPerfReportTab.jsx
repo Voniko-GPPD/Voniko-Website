@@ -239,12 +239,12 @@ function parseRemark(raw) {
     const tok = tokens[i];
     if (batteryRe.test(tok)) {
       model = tok;
-    } else if (/^UDP\d+$/.test(tok)) {
+    } else if (/^UDP\d*$/.test(tok)) {
       // Trays are assigned positionally (not by type) — leave empty for auto-assignment
       groups.push({ loai: 'UD+', chuyen: tok.substring(3), trays: [] });
-    } else if (/^HP\d+$/.test(tok)) {
+    } else if (/^HP\d*$/.test(tok)) {
       groups.push({ loai: 'HP', chuyen: tok.substring(2), trays: [] });
-    } else if (/^UD\d+$/.test(tok)) {
+    } else if (/^UD\d*$/.test(tok)) {
       // Trays are assigned positionally (not by type) — leave empty for auto-assignment
       groups.push({ loai: 'UD', chuyen: tok.substring(2), trays: [] });
     } else if (tok === 'Q') {
@@ -1037,10 +1037,15 @@ function PerfViewTab({ stationId }) {
     return [...fixedCols, ...freqCols];
   }, [sheetsData, t, filterFreq]);
 
-  // When filterFreq === 'quarter', filter rows to only show those where a matching entry has "Q" in remark
+  // When filterFreq === 'quarter', filter rows to only show those where a matching entry has "Q" in remark.
+  // When selectedYear is set, also filter rows so only rows whose displayed date falls in that year are shown.
   const getVisibleRows = useCallback((sheetKey) => {
     if (!sheetsData || !sheetsData[sheetKey]) return [];
-    const rows = sheetsData[sheetKey].rows || [];
+    let rows = sheetsData[sheetKey].rows || [];
+    if (selectedYear) {
+      const yr = String(selectedYear.year());
+      rows = rows.filter((row) => String(row.date || '').startsWith(yr));
+    }
     if (filterFreq !== 'quarter') return rows;
     return rows.filter((row) => {
       const entry = entryByDateLoai[`${row.date}:${row.loai}`];
@@ -1048,7 +1053,7 @@ function PerfViewTab({ stationId }) {
       const remark = (entry.raw_remark || '').toUpperCase();
       return remark.split(/\s+/).includes('Q');
     });
-  }, [sheetsData, filterFreq, entryByDateLoai]);
+  }, [sheetsData, filterFreq, entryByDateLoai, selectedYear]);
 
   const sheetKeys = Object.keys(sheetsData || {});
 

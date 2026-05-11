@@ -1,0 +1,4 @@
+tray_id,image_path,ground_truth_count,predicted_count,capture_session,lighting_condition,tray_type,model_version
+tray_0001,/path/to/tray_0001.jpg,120,118,session_2026_04_24_a,bright,standard,best.onnx@baseline
+tray_0002,/path/to/tray_0002.jpg,120,123,session_2026_04_24_b,low_light,reflective,best.onnx@baseline
+tray_0003,/path/to/tray_0003.jpg,120,120,session_2026_04_24_b,low_light,standard,best.onnx@baseline

@@ -1,0 +1,950 @@
+const express = require('express');
+const axios = require('axios');
+const multer = require('multer');
+const FormData = require('form-data');
+const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { upsertStation, getStations, resolveUrl } = require('../utils/stationRegistry');
+const logger = require('../utils/logger');
+
+const router = express.Router();
+
+// In-memory multer for proxying uploaded files to the DMP station
+const upload = multer({ storage: multer.memoryStorage() });
+
+// POST /api/dmp/register — called by dmp_service.py heartbeat, no auth
+router.post('/register', (req, res) => {
+  const { name, url } = req.body || {};
+  if (!name || !url) return res.status(400).json({ error: 'name and url are required' });
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return res.status(400).json({ error: 'url must be http(s)' });
+    }
+  } catch (_) {
+    return res.status(400).json({ error: 'Invalid url' });
+  }
+  const id = upsertStation(name, url, 'dmp');
+  logger.info('DMP station registered', { id, name });
+  res.json({ ok: true, id });
+});
+
+// GET /api/dmp/stations — list all registered DMP stations
+router.get('/stations', authenticateToken, (req, res) => {
+  res.json({ stations: getStations('dmp') });
+});
+
+// Helper: resolve station URL or return 404
+function getStationUrl(stationId, res) {
+  if (!stationId) {
+    res.status(400).json({ error: 'stationId is required' });
+    return null;
+  }
+  const url = resolveUrl(stationId);
+  if (!url) {
+    res.status(404).json({ error: 'Station not found or offline' });
+    return null;
+  }
+  return url;
+}
+
+/**
+ * Unified proxy error handler for DMP station routes.
+ * - Forwards HTTP error responses from the station as-is.
+ * - Returns 503 when the station is unreachable (network/timeout error).
+ * - Delegates unexpected errors to Express's next() handler.
+ * @param {Error} err - Axios error
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ */
+function handleProxyError(err, res, next) {
+  if (err.response) return res.status(err.response.status).json(err.response.data);
+  if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+  next(err);
+}
+
+// GET /api/dmp/batches/years?stationId=
+router.get('/batches/years', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/batches/years`, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/batches?stationId=
+router.get('/batches', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/batches`, {
+      params: { year: req.query.year },
+      timeout: 30000,
+    });
+    const data = r.data;
+    // Merge user-provided overrides (serialno, remarks) stored in SQLite.
+    // SQLite override always takes precedence when non-null/non-empty so that
+    // web edits are immediately reflected.
+    if (data && Array.isArray(data.batches) && data.batches.length > 0 && req.query.stationId) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const stationId = req.query.stationId;
+        const overrides = db
+          .prepare('SELECT batch_id, serialno, remarks FROM dmp_batch_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) {
+            overrideMap[ov.batch_id] = ov;
+          }
+          data.batches = data.batches.map((batch) => {
+            const ov = overrideMap[String(batch.id)];
+            if (!ov) return batch;
+            return {
+              ...batch,
+              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (batch.serialno ?? null),
+              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (batch.remarks ?? null),
+            };
+          });
+        }
+      } catch (overrideErr) {
+        // Non-fatal: if SQLite read fails, return unmerged data
+        void overrideErr;
+      }
+    }
+    res.json(data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/batches/:batchId/channels?stationId=
+router.get('/batches/:batchId/channels', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/batches/${encodeURIComponent(req.params.batchId)}/channels`, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/telemetry?stationId=&cdmc=&channel=
+router.get('/telemetry', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/telemetry`, {
+      params: { cdmc: req.query.cdmc, channel: req.query.channel },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/changes?stationId=&since=
+router.get('/changes', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/changes`, {
+      params: { since: req.query.since },
+      timeout: 15000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/stats?stationId=&cdmc=&channel=
+router.get('/stats', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/stats`, {
+      params: { cdmc: req.query.cdmc, channel: req.query.channel },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// GET /api/dmp/templates?stationId=
+router.get('/templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/templates`, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) {
+    handleProxyError(err, res, next);
+  }
+});
+
+// POST /api/dmp/report-simple — proxy basic xlsx download (no template required)
+router.post('/report-simple', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/report-simple`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try {
+        return res.status(err.response.status).json(JSON.parse(msg));
+      } catch {
+        return res.status(err.response.status).send(msg);
+      }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
+// POST /api/dmp/report — proxy xlsx binary download
+router.post('/report', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/report`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try {
+        return res.status(err.response.status).json(JSON.parse(msg));
+      } catch {
+        return res.status(err.response.status).send(msg);
+      }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
+// ─── DM2000 Historic Database Proxy Routes ───────────────────────────────
+
+router.get('/dm2000/archives', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives`, {
+      params: {
+        date_from: req.query.date_from,
+        date_to: req.query.date_to,
+        type_filter: req.query.type_filter,
+        name_filter: req.query.name_filter,
+        mfr_filter: req.query.mfr_filter,
+        serial_filter: req.query.serial_filter,
+        dis_condition_filter: req.query.dis_condition_filter,
+        keyword: req.query.keyword,
+        limit: req.query.limit,
+      },
+      timeout: 90000,
+    });
+    const data = r.data;
+    // Merge user-provided overrides (serialno, remarks) stored in SQLite.
+    // SQLite override always takes precedence when non-null/non-empty so that
+    // web edits are immediately reflected.  The Access DB value is only used
+    // as a fallback when the user has not yet set a web override.
+    if (data && Array.isArray(data.archives) && data.archives.length > 0 && req.query.stationId) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const stationId = req.query.stationId;
+        const overrides = db
+          .prepare('SELECT archname, serialno, remarks FROM dm2000_archive_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) {
+            overrideMap[ov.archname] = ov;
+          }
+          data.archives = data.archives.map((archive) => {
+            const ov = overrideMap[archive.archname];
+            if (!ov) return archive;
+            return {
+              ...archive,
+              // SQLite override wins when non-null/non-empty; Access DB value is
+              // used as a fallback when the user has not set a web override.
+              serialno: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (archive.serialno ?? null),
+              remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (archive.remarks ?? null),
+              _has_override: true,
+            };
+          });
+        }
+      } catch (overrideErr) {
+        // Non-fatal: if SQLite read fails, return unmerged data
+        void overrideErr;
+      }
+    }
+    res.json(data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/dis-condition-options', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/dis-condition-options`, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/batteries', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/batteries`, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/curve', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/curve`, {
+      params: { baty: req.query.baty },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/average-curve', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/average-curve`, { timeout: 180000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/stats', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/stats`, {
+      params: { baty: req.query.baty },
+      timeout: 120000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/daily-voltage', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/daily-voltage`, {
+      params: { baty: req.query.baty },
+      timeout: 60000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/archives/:archname/time-at-voltage', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/time-at-voltage`, {
+      params: { baty: req.query.baty },
+      timeout: 15000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/config', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/config`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.get('/dm2000/templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+// GET /api/dmp/dm2000/archives/:archname/schema?stationId= — diagnostic: return raw column names from ls_jb_cs
+router.get('/dm2000/archives/:archname/schema', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/archives/${encodeURIComponent(req.params.archname)}/schema`, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+// POST /api/dmp/dm2000/refresh-archives — force-refresh archives cache after manual Access edits
+router.post('/dm2000/refresh-archives', authenticateToken, async (req, res, next) => {
+  const { stationId, ...body } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/refresh-archives`, body, { timeout: 30000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+router.post('/dm2000/report', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/report`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dm2000_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try { return res.status(err.response.status).json(JSON.parse(msg)); }
+      catch { return res.status(err.response.status).send(msg); }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
+router.post('/dm2000/report-simple', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/report-simple`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dm2000_preview.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try { return res.status(err.response.status).json(JSON.parse(msg)); }
+      catch { return res.status(err.response.status).send(msg); }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
+router.post('/dm2000/perf-report', authenticateToken, async (req, res, next) => {
+  const { stationId, ...reportBody } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    // Inject SQLite overrides (serialno, remarks) into each entry so the
+    // perf-report generator uses web-edited values for sheet-name derivation.
+    if (stationId && Array.isArray(reportBody.entries) && reportBody.entries.length > 0) {
+      try {
+        const { getDb } = require('../models/database');
+        const db = getDb();
+        const overrides = db
+          .prepare('SELECT archname, serialno, remarks FROM dm2000_archive_overrides WHERE station_id = ?')
+          .all(stationId);
+        if (overrides.length > 0) {
+          const overrideMap = {};
+          for (const ov of overrides) { overrideMap[ov.archname] = ov; }
+          reportBody.entries = reportBody.entries.map((entry) => {
+            const ov = overrideMap[entry.archname];
+            if (!ov) return entry;
+            return {
+              ...entry,
+              override_serial_no: (ov.serialno != null && ov.serialno !== '') ? ov.serialno : (entry.override_serial_no ?? null),
+              override_remarks: (ov.remarks != null && ov.remarks !== '') ? ov.remarks : (entry.override_remarks ?? null),
+            };
+          });
+        }
+      } catch (overrideErr) {
+        // Non-fatal: proceed without overrides
+        void overrideErr;
+      }
+    }
+    const r = await axios.post(`${stationUrl}/dm2000/perf-report`, reportBody, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="perf_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    if (err.response) {
+      const msg = Buffer.from(err.response.data).toString('utf8');
+      try { return res.status(err.response.status).json(JSON.parse(msg)); }
+      catch { return res.status(err.response.status).send(msg); }
+    }
+    if (err.request) return res.status(503).json({ error: 'DMP station unreachable' });
+    next(err);
+  }
+});
+
+// GET /api/dmp/dm2000/perf-templates?stationId=
+router.get('/dm2000/perf-templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dm2000/perf-templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+// POST /api/dmp/dm2000/perf-template/upload?stationId=
+router.post('/dm2000/perf-template/upload', authenticateToken, upload.single('file'), async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const form = new FormData();
+    form.append('file', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const r = await axios.post(`${stationUrl}/dm2000/perf-template/upload`, form, {
+      headers: form.getHeaders(),
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) { handleProxyError(err, res, next); }
+});
+
+// ─── DM2000 Dropdown Options (Type / Manufacturer) ───────────────────────────
+
+// GET /api/dmp/dm2000/options?field=type|manufacturer
+router.get('/dm2000/options', authenticateToken, (req, res) => {
+  const { field } = req.query;
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const rows = field
+      ? db.prepare('SELECT id, field, value FROM dm2000_options WHERE field = ? ORDER BY value ASC').all(field)
+      : db.prepare('SELECT id, field, value FROM dm2000_options ORDER BY field, value ASC').all();
+    res.json({ options: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/dm2000/options — admin only
+router.post('/dm2000/options', authenticateToken, requireAdmin, (req, res) => {
+  const { field, value } = req.body || {};
+  if (!field || !['type', 'manufacturer'].includes(field)) {
+    return res.status(400).json({ error: 'field must be "type" or "manufacturer"' });
+  }
+  if (!value || typeof value !== 'string' || !value.trim()) {
+    return res.status(400).json({ error: 'value is required' });
+  }
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const db = getDb();
+  try {
+    const id = uuidv4();
+    db.prepare('INSERT OR IGNORE INTO dm2000_options (id, field, value, created_by) VALUES (?, ?, ?, ?)')
+      .run(id, field, value.trim(), req.user.id);
+    const row = db.prepare('SELECT id, field, value FROM dm2000_options WHERE field = ? AND value = ?').get(field, value.trim());
+    res.json({ option: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dmp/dm2000/options/:id — admin only
+router.delete('/dm2000/options/:id', authenticateToken, requireAdmin, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const result = db.prepare('DELETE FROM dm2000_options WHERE id = ?').run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Option not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DM2000 Archive Overrides (serialno + remarks stored in local SQLite) ────
+
+// GET /api/dmp/dm2000/archive-overrides?stationId=&archname=
+router.get('/dm2000/archive-overrides', authenticateToken, (req, res) => {
+  const { stationId, archname } = req.query;
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    if (archname) {
+      const row = db.prepare(
+        'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'
+      ).get(stationId, archname);
+      return res.json({ override: row || null });
+    }
+    const rows = db.prepare(
+      'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ?'
+    ).all(stationId);
+    res.json({ overrides: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/dm2000/archive-overrides — upsert serialno/remarks for one archive
+router.put('/dm2000/archive-overrides', authenticateToken, (req, res) => {
+  const { stationId, archname, serialno, remarks } = req.body || {};
+  if (!stationId || !archname) return res.status(400).json({ error: 'stationId and archname are required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    db.prepare(`
+      INSERT INTO dm2000_archive_overrides (station_id, archname, serialno, remarks, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now') || 'Z')
+      ON CONFLICT(station_id, archname) DO UPDATE SET
+        serialno = excluded.serialno,
+        remarks = excluded.remarks,
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now', 'utc') || 'Z'
+    `).run(stationId, archname, serialno ?? null, remarks ?? null, req.user.id);
+    const row = db.prepare(
+      'SELECT archname, serialno, remarks, updated_at FROM dm2000_archive_overrides WHERE station_id = ? AND archname = ?'
+    ).get(stationId, archname);
+
+    // Fire-and-forget: write remark/serialno back to the live Access database so
+    // that performance-report queries (which read directly from Access) see the
+    // updated values.  Failure is non-fatal — the SQLite override above still
+    // serves as a display-layer fallback.
+    const stationUrl = resolveUrl(stationId);
+    if (stationUrl) {
+      axios.post(`${stationUrl}/dm2000/update-archive-meta`, {
+        archname,
+        remarks: remarks ?? null,
+        serialno: serialno ?? null,
+      }, { timeout: 10000 }).catch((err) => {
+        logger.warn('DM2000 archive-meta write-back to Access failed', {
+          archname,
+          stationId,
+          error: err.message,
+        });
+      });
+    }
+
+    res.json({ override: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/dm2000/update-archive-meta — write bz/dcph directly to live Access DB
+router.post('/dm2000/update-archive-meta', authenticateToken, async (req, res, next) => {
+  const { stationId, ...body } = req.body || {};
+  const stationUrl = getStationUrl(stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dm2000/update-archive-meta`, body, { timeout: 15000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── DMP Batch Overrides (serialno + remarks stored in local SQLite) ──────────
+
+// GET /api/dmp/batch-overrides?stationId=&batchId=
+router.get('/batch-overrides', authenticateToken, (req, res) => {
+  const { stationId, batchId } = req.query;
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    if (batchId) {
+      const row = db.prepare(
+        'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ? AND batch_id = ?'
+      ).get(stationId, batchId);
+      return res.json({ override: row || null });
+    }
+    const rows = db.prepare(
+      'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ?'
+    ).all(stationId);
+    res.json({ overrides: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/batch-overrides — upsert serialno/remarks for one DMP batch
+router.put('/batch-overrides', authenticateToken, (req, res) => {
+  const { stationId, batchId, serialno, remarks } = req.body || {};
+  if (!stationId || !batchId) return res.status(400).json({ error: 'stationId and batchId are required' });
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    db.prepare(`
+      INSERT INTO dmp_batch_overrides (station_id, batch_id, serialno, remarks, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now', 'utc') || 'Z')
+      ON CONFLICT(station_id, batch_id) DO UPDATE SET
+        serialno = excluded.serialno,
+        remarks = excluded.remarks,
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now', 'utc') || 'Z'
+    `).run(stationId, batchId, serialno ?? null, remarks ?? null, req.user.id);
+    const row = db.prepare(
+      'SELECT batch_id, serialno, remarks, updated_at FROM dmp_batch_overrides WHERE station_id = ? AND batch_id = ?'
+    ).get(stationId, batchId);
+
+    // Fire-and-forget: write remark/serialno back to the live Access database so
+    // that performance-report queries (which read directly from Access) see the
+    // updated values.  Failure is non-fatal — the SQLite override above still
+    // serves as a display-layer fallback.
+    const stationUrl = resolveUrl(stationId);
+    if (stationUrl) {
+      axios.post(`${stationUrl}/update-batch-meta`, {
+        batch_id: batchId,
+        remarks: remarks ?? null,
+        serialno: serialno ?? null,
+      }, { timeout: 10000 }).catch((err) => {
+        logger.warn('DMP batch-meta write-back to Access failed', {
+          batchId,
+          stationId,
+          error: err.message,
+        });
+      });
+    }
+
+    res.json({ override: row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DMP Performance Report Entries (stored in local SQLite) ─────────────────
+
+// GET /api/dmp/perf-entries?stationId=&dateFrom=&dateTo=
+router.get('/perf-entries', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  const { stationId, dateFrom, dateTo } = req.query;
+  try {
+    let sql = 'SELECT * FROM dmp_perf_entries WHERE 1=1';
+    const params = [];
+    if (stationId) { sql += ' AND station_id = ?'; params.push(stationId); }
+    if (dateFrom) { sql += ' AND report_date >= ?'; params.push(dateFrom); }
+    if (dateTo) { sql += ' AND report_date <= ?'; params.push(dateTo); }
+    sql += ' ORDER BY report_date DESC, created_at DESC';
+    const rows = db.prepare(sql).all(...params);
+    const entries = rows.map((r) => ({
+      ...r,
+      groups: JSON.parse(r.groups_json || '[]'),
+    }));
+    res.json({ entries });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/perf-entries — create a new entry
+router.post('/perf-entries', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const db = getDb();
+  const { station_id, batch_id, report_date, model, groups, special_type, raw_remark, notes, dm2000_archname } = req.body || {};
+  if (!station_id || !model) {
+    return res.status(400).json({ error: 'station_id and model are required' });
+  }
+  // Derive batch_id and report_date from raw_remark when not supplied by the client.
+  // Expected format: "DDMMYY <battery> <group>…" where the first token is a 6-digit date.
+  // For DM2000 entries (dm2000_archname set), batch_id/report_date defaults are still computed
+  // but are not used for data lookup (the archname is used instead).
+  let effectiveBatchId = batch_id;
+  let effectiveDate = report_date;
+  if (!effectiveBatchId || !effectiveDate) {
+    const firstToken = (raw_remark || '').trim().split(/\s+/)[0] || '';
+    if (/^\d{6}$/.test(firstToken)) {
+      const day = parseInt(firstToken.substring(0, 2), 10);
+      const month = parseInt(firstToken.substring(2, 4), 10);
+      const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
+      const candidate = new Date(year, month - 1, day);
+      const isValid = candidate.getFullYear() === year
+        && candidate.getMonth() === month - 1
+        && candidate.getDate() === day;
+      if (isValid) {
+        if (!effectiveBatchId) effectiveBatchId = firstToken;
+        if (!effectiveDate) effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+    }
+    if (!effectiveBatchId) effectiveBatchId = new Date().toISOString().slice(2, 8).replace(/-/g, '');
+    if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
+  }
+  try {
+    const id = uuidv4();
+    db.prepare(`
+      INSERT INTO dmp_perf_entries
+        (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, dm2000_archname, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      station_id,
+      effectiveBatchId,
+      effectiveDate,
+      model,
+      JSON.stringify(groups || []),
+      special_type || 'normal',
+      raw_remark || null,
+      notes || null,
+      dm2000_archname || null,
+      req.user.id,
+    );
+    res.json({ ok: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/dmp/perf-entries/:id — update an entry
+router.put('/perf-entries/:id', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  const { batch_id, report_date, model, groups, special_type, raw_remark, notes, dm2000_archname } = req.body || {};
+  try {
+    const result = db.prepare(`
+      UPDATE dmp_perf_entries SET
+        batch_id = COALESCE(?, batch_id),
+        report_date = COALESCE(?, report_date),
+        model = COALESCE(?, model),
+        groups_json = COALESCE(?, groups_json),
+        special_type = COALESCE(?, special_type),
+        raw_remark = ?,
+        notes = ?,
+        dm2000_archname = ?,
+        updated_at = datetime('now') || 'Z'
+      WHERE id = ?
+    `).run(
+      batch_id || null,
+      report_date || null,
+      model || null,
+      groups !== undefined ? JSON.stringify(groups) : null,
+      special_type || null,
+      raw_remark || null,
+      notes || null,
+      dm2000_archname || null,
+      req.params.id,
+    );
+    if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dmp/perf-entries/:id — delete an entry
+router.delete('/perf-entries/:id', authenticateToken, (req, res) => {
+  const { getDb } = require('../models/database');
+  const db = getDb();
+  try {
+    const result = db.prepare('DELETE FROM dmp_perf_entries WHERE id = ?').run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dmp/dmp-perf-templates?stationId=
+router.get('/dmp-perf-templates', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.get(`${stationUrl}/dmp-perf-templates`, { timeout: 10000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dmp/dmp-perf-template/upload?stationId=
+router.post('/dmp-perf-template/upload', authenticateToken, upload.single('file'), async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const form = new FormData();
+    form.append('file', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype,
+    });
+    const r = await axios.post(`${stationUrl}/dmp-perf-template/upload`, form, {
+      headers: form.getHeaders(),
+      timeout: 30000,
+    });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dmp/dmp-perf-report/generate?stationId= — generate DMP perf report
+router.post('/dmp-perf-report/generate', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dmp-perf-report/generate`, req.body, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+    });
+    const disposition = r.headers['content-disposition'] || 'attachment; filename="dmp_perf_report.xlsx"';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', disposition);
+    res.send(Buffer.from(r.data));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/dmp/dmp-perf-data?stationId= — get DMP perf data as JSON for web preview
+router.post('/dmp-perf-data', authenticateToken, async (req, res, next) => {
+  const stationUrl = getStationUrl(req.query.stationId, res);
+  if (!stationUrl) return;
+  try {
+    const r = await axios.post(`${stationUrl}/dmp-perf-data`, req.body, { timeout: 120000 });
+    res.json(r.data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;

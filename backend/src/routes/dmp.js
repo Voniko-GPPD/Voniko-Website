@@ -835,6 +835,155 @@ router.post('/perf-entries', authenticateToken, (req, res) => {
   }
 });
 
+// GET /api/dmp/perf-entries/export?stationId= — export all entries as Excel
+router.get('/perf-entries/export', authenticateToken, async (req, res) => {
+  const { getDb } = require('../models/database');
+  const ExcelJS = require('exceljs');
+  const db = getDb();
+  const { stationId } = req.query;
+  try {
+    let sql = 'SELECT * FROM dmp_perf_entries WHERE 1=1';
+    const params = [];
+    if (stationId) { sql += ' AND station_id = ?'; params.push(stationId); }
+    sql += ' ORDER BY report_date ASC, created_at ASC';
+    const rows = db.prepare(sql).all(...params);
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Remark Data');
+    sheet.columns = [
+      { header: 'report_date', key: 'report_date', width: 14 },
+      { header: 'model', key: 'model', width: 10 },
+      { header: 'groups', key: 'groups', width: 30 },
+      { header: 'special_type', key: 'special_type', width: 14 },
+      { header: 'raw_remark', key: 'raw_remark', width: 30 },
+      { header: 'notes', key: 'notes', width: 30 },
+    ];
+    for (const row of rows) {
+      const groups = JSON.parse(row.groups_json || '[]');
+      const groupsText = groups.map((g) => `${g.loai} ${g.chuyen}`.trim()).join('; ');
+      sheet.addRow({
+        report_date: row.report_date || '',
+        model: row.model || '',
+        groups: groupsText,
+        special_type: row.special_type || 'normal',
+        raw_remark: row.raw_remark || '',
+        notes: row.notes || '',
+      });
+    }
+
+    const buf = await workbook.xlsx.writeBuffer();
+    const filename = `remark_data_${stationId || 'all'}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dmp/perf-entries/import?stationId= — import entries from Excel
+router.post('/perf-entries/import', authenticateToken, upload.single('file'), async (req, res) => {
+  const { getDb } = require('../models/database');
+  const { v4: uuidv4 } = require('uuid');
+  const ExcelJS = require('exceljs');
+  const db = getDb();
+  const { stationId } = req.query;
+  if (!stationId) return res.status(400).json({ error: 'stationId is required' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(req.file.buffer);
+    const sheet = workbook.worksheets[0];
+    if (!sheet) return res.status(400).json({ error: 'No worksheet found' });
+
+    // Read headers from the first row
+    const headers = [];
+    sheet.getRow(1).eachCell((cell) => { headers.push(String(cell.value || '').trim().toLowerCase()); });
+    const col = (name) => headers.indexOf(name);
+
+    const inserted = [];
+    const errors = [];
+    sheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const getValue = (name) => {
+        const idx = col(name);
+        if (idx < 0) return '';
+        const cell = row.getCell(idx + 1);
+        if (cell.value == null) return '';
+        if (cell.value instanceof Date) return cell.value.toISOString().slice(0, 10);
+        return String(cell.value).trim();
+      };
+
+      const report_date = getValue('report_date');
+      const model = getValue('model');
+      const groupsText = getValue('groups');
+      const special_type = getValue('special_type') || 'normal';
+      const raw_remark = getValue('raw_remark');
+      const notes = getValue('notes');
+
+      if (!model) { errors.push({ row: rowNum, error: 'model is required' }); return; }
+
+      // Parse groups: "UD 501; UD+ 502; HP 503"
+      const groups = groupsText ? groupsText.split(';').map((s) => {
+        const part = s.trim();
+        if (!part) return null;
+        let loai; let chuyen;
+        if (part.startsWith('UD+ ')) { loai = 'UD+'; chuyen = part.slice(4).trim(); }
+        else if (part.startsWith('UD ')) { loai = 'UD'; chuyen = part.slice(3).trim(); }
+        else if (part.startsWith('HP ')) { loai = 'HP'; chuyen = part.slice(3).trim(); }
+        else {
+          const sp = part.indexOf(' ');
+          loai = sp > 0 ? part.slice(0, sp) : part;
+          chuyen = sp > 0 ? part.slice(sp + 1) : '';
+        }
+        return { loai, chuyen, trays: [] };
+      }).filter(Boolean) : [];
+
+      // Derive batch_id from raw_remark or report_date
+      let effectiveBatchId = null;
+      let effectiveDate = report_date || null;
+      if (raw_remark) {
+        const firstToken = raw_remark.trim().split(/\s+/)[0] || '';
+        if (/^\d{6}$/.test(firstToken)) {
+          const day = parseInt(firstToken.substring(0, 2), 10);
+          const month = parseInt(firstToken.substring(2, 4), 10);
+          const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
+          const candidate = new Date(year, month - 1, day);
+          const isValid = candidate.getFullYear() === year
+            && candidate.getMonth() === month - 1
+            && candidate.getDate() === day;
+          if (isValid) {
+            effectiveBatchId = firstToken;
+            if (!effectiveDate) {
+              effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            }
+          }
+        }
+      }
+      if (!effectiveBatchId) {
+        // Produce a DDMMYY batch ID from the report_date (YYYY-MM-DD) or today
+        const dateStr = effectiveDate || new Date().toISOString().slice(0, 10);
+        const [y, m, d] = dateStr.split('-');
+        effectiveBatchId = `${d}${m}${y.slice(2)}`;
+      }
+      if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
+
+      const id = uuidv4();
+      db.prepare(`
+        INSERT INTO dmp_perf_entries
+          (id, station_id, batch_id, report_date, model, groups_json, special_type, raw_remark, notes, dm2000_archname, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, stationId, effectiveBatchId, effectiveDate, model, JSON.stringify(groups),
+        special_type, raw_remark || null, notes || null, null, req.user.id);
+      inserted.push(id);
+    });
+
+    res.json({ ok: true, imported: inserted.length, errors });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // PUT /api/dmp/perf-entries/:id — update an entry
 router.put('/perf-entries/:id', authenticateToken, (req, res) => {
   const { getDb } = require('../models/database');

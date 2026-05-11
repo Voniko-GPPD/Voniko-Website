@@ -859,14 +859,19 @@ function PerfViewTab({ stationId }) {
         raw_remark: e.raw_remark || null,
         dm2000_archname: e.dm2000_archname || null,
       }));
-      // Process in batches to avoid timeouts when there are many entries.
-      // Each entry requires multiple ODBC queries to the Access database, so
-      // sending all 200+ entries at once can exceed the backend timeout.
-      let mergedSheets = {};
+      // Split payload into fixed-size batches and fire all requests in parallel.
+      // Sequential batching used to be required to avoid the 120 s backend timeout
+      // but the persistent MDB cache (no per-request file copy) means each batch
+      // now completes well within that limit, so we can safely parallelise.
+      const batches = [];
       for (let i = 0; i < payload.length; i += PERF_DATA_BATCH_SIZE) {
-        const batch = payload.slice(i, i + PERF_DATA_BATCH_SIZE);
-        // eslint-disable-next-line no-await-in-loop
-        const data = await fetchDmpPerfData({ stationId, entries: batch });
+        batches.push(payload.slice(i, i + PERF_DATA_BATCH_SIZE));
+      }
+      const batchResults = await Promise.all(
+        batches.map((batch) => fetchDmpPerfData({ stationId, entries: batch })),
+      );
+      let mergedSheets = {};
+      for (const data of batchResults) {
         mergedSheets = mergeSheetsData(mergedSheets, data.sheets || {});
       }
       setSheetsData(mergedSheets);

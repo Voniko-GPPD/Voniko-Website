@@ -6229,8 +6229,21 @@ def _compute_dmp_perf_groups(  # noqa: C901
             actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
             # Prefer para_singl.scrq (made/sample date) over para_pub.fdrq (start date).
-            # Try an int cast first so a single query works for both string and numeric sid.
+            # Many DMP installations use a sequential integer for para_singl.sid that
+            # does NOT match para_pub.id; in those schemas para_singl.cdmc holds the
+            # archive name which equals para_pub.id, so a cdmc-keyed lookup resolves
+            # the made date when the sid lookup yields nothing.  This mirrors the
+            # multi-key fallback that get_batches (Load Data tab) already performs.
             fdrq = ""
+
+            def _pick_first_scrq(rows: list) -> str:
+                for _r in rows or []:
+                    _v = _dm2000_get_value(_r, "scrq")
+                    if _v is not None and not _dmp_is_empty(str(_v)):
+                        return _to_date(_v)
+                return ""
+
+            # Try an int cast first so a single query works for both string and numeric sid.
             try:
                 _sid_param: object = actual_batch_id
                 try:
@@ -6240,15 +6253,28 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _singl_scrq_rows = _read_dmpdata(
                     "SELECT scrq FROM para_singl WHERE sid = ?", (_sid_param,)
                 )
-                if _singl_scrq_rows:
-                    _first_scrq = _dm2000_get_value(_singl_scrq_rows[0], "scrq")
-                    if _first_scrq and not _dmp_is_empty(str(_first_scrq)):
-                        fdrq = _to_date(_first_scrq)
+                fdrq = _pick_first_scrq(_singl_scrq_rows)
             except pyodbc.Error as exc:
                 logger.debug(
                     "_compute_dmp_perf_groups: could not fetch para_singl.scrq for sid=%s: %s",
                     actual_batch_id, exc,
                 )
+
+            # Fallback: keyed by para_singl.cdmc (archive filename).  Some schemas
+            # store the para_pub.id-equivalent in cdmc rather than sid.
+            if not fdrq:
+                try:
+                    _singl_scrq_rows_cdmc = _read_dmpdata(
+                        "SELECT scrq FROM para_singl WHERE cdmc = ?",
+                        (str(actual_batch_id),),
+                    )
+                    fdrq = _pick_first_scrq(_singl_scrq_rows_cdmc)
+                except pyodbc.Error as exc:
+                    logger.debug(
+                        "_compute_dmp_perf_groups: could not fetch para_singl.scrq for cdmc=%s: %s",
+                        actual_batch_id, exc,
+                    )
+
             if not fdrq:
                 fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
             fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()

@@ -5798,7 +5798,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
     groups: dict[str, dict] = {}
     # Request-scoped caches: avoid redundant ODBC round-trips when multiple
     # remark entries share the same batch_id (common with 200-entry datasets).
-    _para_pub_cache: dict[str, list] = {}   # raw _bid → batch_rows
+    _para_pub_cache: dict[str, list] = {}   # batch_id → para_pub rows
     _singl_cache: dict[str, list] = {}      # actual_batch_id → para_singl rows
 
     for entry in payload.entries:

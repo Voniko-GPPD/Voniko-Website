@@ -1200,6 +1200,23 @@ def _sep_normalize(s: str) -> str:
     return s
 
 
+def _strip_frequency_tokens(raw_remark: str) -> str:
+    """Return *raw_remark* with standalone frequency-variant tokens removed.
+
+    Strips ``'Q'`` (Every Quarter) and ``'15'`` (Every 15 days) so that a
+    search key derived from ``"LR6 UD501 UD502 Q"`` or
+    ``"LR6 UD501 UD502 15"`` matches the base remark ``"LR6 UD501 UD502"``
+    when looking up archives or batches.  Returns the original string when
+    stripping would leave it empty.
+
+    Used **only for search-key computation** — the display layer (column
+    names, row flags) no longer uses Q/15 tokens at all.
+    """
+    stripped = " ".join(
+        t for t in raw_remark.split() if t.upper() not in {"15", "Q"}
+    ).strip()
+    return stripped or raw_remark
+
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -6062,7 +6079,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # date-based lookup yields no results, but the corresponding para_pub row
         # can still be identified by its bz value.
         if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
-            _remark_search = entry.raw_remark.strip()
+            # Strip standalone Q/15 frequency tokens so that a remark like
+            # "LR6 UD501 UD502 Q" still finds DMP batches whose bz field
+            # contains "LR6 UD501 UD502" (without the Q suffix).
+            _remark_search = _strip_frequency_tokens(entry.raw_remark.strip())
             if _remark_search:
                 # Leading wildcard is intentional: bz values in the database may
                 # contain characters before the remark text.
@@ -6189,7 +6209,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # either a DMP batch or a DM2000 archive transparently.
             if entry.raw_remark and entry.raw_remark.strip():
                 _fb_remark = entry.raw_remark.strip()
-                _fb_remark_search = _fb_remark
+                # Strip standalone Q/15 frequency tokens from the search key so
+                # that DM2000 archives are found regardless of whether the remark
+                # carried a "Q" or "15" suffix.  The display layer no longer uses
+                # these tokens (no quarter flag, no 15d column suffix), so stripping
+                # them here is safe — it only affects archive lookup, not rendering.
+                _fb_remark_search = _strip_frequency_tokens(_fb_remark)
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.

@@ -5895,8 +5895,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _eg_fdfs = _build_dm2000_condition_label(
                             _eg_fdfs_raw, _eg_load_res, _eg_ep_str, _dm2k_arch,
                         )
-                        _eg_startdate = _dm2000_get_value(_eg_arch, "startdate", "fdrq")
-                        _eg_fdrq = _to_date(_eg_startdate) if _eg_startdate else ""
+                        _eg_scrq_raw = _dm2000_get_value(_eg_arch, "scrq") or _dm2000_get_value(_eg_arch, "startdate", "fdrq")
+                        _eg_fdrq = _to_date(_eg_scrq_raw) if _eg_scrq_raw else ""
                         if entry.special_type in _SPECIAL_TYPE_LABEL:
                             _eg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
                         elif _eg_fdrq:
@@ -6014,12 +6014,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_fdfs_raw, _dm2k_load_res, _dm2k_ep_str, _dm2k_arch,
             )
 
-            # Determine row label — prefer the archive's own start date (fdrq) over
-            # entry.report_date, which is typically set to today when no date prefix
-            # was entered in the remark.  The DM2000 archive's fdrq is the actual
-            # test start date and should be used as the row label.
-            _dm2k_startdate_raw = _dm2000_get_value(_arch_meta, "startdate", "fdrq")
-            _dm2k_fdrq = _to_date(_dm2k_startdate_raw) if _dm2k_startdate_raw else ""
+            # Determine row label — prefer scrq (made/sample date) from ls_jb_cs over
+            # startdate/fdrq (start date), falling back to entry.report_date.
+            _dm2k_scrq_raw = _dm2000_get_value(_arch_meta, "scrq") or _dm2000_get_value(_arch_meta, "startdate", "fdrq")
+            _dm2k_fdrq = _to_date(_dm2k_scrq_raw) if _dm2k_scrq_raw else ""
             if entry.special_type in _SPECIAL_TYPE_LABEL:
                 _dm2k_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
             elif _dm2k_fdrq:
@@ -6205,7 +6203,29 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
             actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
-            fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
+            # Prefer para_singl.scrq (made/sample date) over para_pub.fdrq (start date).
+            # Try an int cast first so a single query works for both string and numeric sid.
+            fdrq = ""
+            try:
+                _sid_param: object = actual_batch_id
+                try:
+                    _sid_param = int(actual_batch_id)
+                except (ValueError, TypeError):
+                    pass
+                _singl_scrq_rows = _read_dmpdata(
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (_sid_param,)
+                )
+                if _singl_scrq_rows:
+                    _first_scrq = _dm2000_get_value(_singl_scrq_rows[0], "scrq")
+                    if _first_scrq and not _dmp_is_empty(str(_first_scrq)):
+                        fdrq = _to_date(_first_scrq)
+            except pyodbc.Error as exc:
+                logger.debug(
+                    "_compute_dmp_perf_groups: could not fetch para_singl.scrq for sid=%s: %s",
+                    actual_batch_id, exc,
+                )
+            if not fdrq:
+                fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
             fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
             # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
             # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
@@ -6319,8 +6339,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             _feg_fdfs = _build_dm2000_condition_label(
                                 _feg_fdfs_raw, _feg_load_res, _feg_ep_str, _fb_remark,
                             )
-                            _feg_startdate = _dm2000_get_value(_feg_arch, "startdate", "fdrq")
-                            _feg_fdrq = _to_date(_feg_startdate) if _feg_startdate else ""
+                            _feg_scrq_raw = _dm2000_get_value(_feg_arch, "scrq") or _dm2000_get_value(_feg_arch, "startdate", "fdrq")
+                            _feg_fdrq = _to_date(_feg_scrq_raw) if _feg_scrq_raw else ""
                             if entry.special_type in _SPECIAL_TYPE_LABEL:
                                 _feg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
                             elif _feg_fdrq:
@@ -6427,11 +6447,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_fdfs = _build_dm2000_condition_label(
                         _fb_fdfs_raw, _fb_load_res, _fb_ep_str, _fb_remark,
                     )
-                    # Determine row label — prefer the archive's own start date (fdrq)
-                    # over entry.report_date, which is typically set to today when no
-                    # date prefix was entered in the remark.
-                    _fb_startdate_raw = _dm2000_get_value(_fb_meta, "startdate", "fdrq")
-                    _fb_fdrq = _to_date(_fb_startdate_raw) if _fb_startdate_raw else ""
+                    # Determine row label — prefer scrq (made/sample date) over startdate/fdrq.
+                    _fb_scrq_raw = _dm2000_get_value(_fb_meta, "scrq") or _dm2000_get_value(_fb_meta, "startdate", "fdrq")
+                    _fb_fdrq = _to_date(_fb_scrq_raw) if _fb_scrq_raw else ""
                     if entry.special_type in _SPECIAL_TYPE_LABEL:
                         _fb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
                     elif _fb_fdrq:

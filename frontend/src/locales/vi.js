@@ -788,6 +788,7 @@ export default {
   dmpPerfFreqEveryquarter: 'Every Quarter (Hằng quý)',
   dmpPerfFreqOther: 'Khác',
   dmpPerfViewFilterFreq: 'Tần suất đo',
+  dmpPerfViewFilterYear: 'Năm',
   dmpPerfSpecialQuarter: 'Hàng quý (đo toàn bộ điều kiện)',
   dmpPerfViewFreqAll: 'Tất cả tần suất',
   dmpPerfExportEntries: 'Xuất ra Excel',

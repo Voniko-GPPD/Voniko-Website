@@ -788,6 +788,7 @@ export default {
   dmpPerfFreqEveryquarter: 'Every Quarter',
   dmpPerfFreqOther: 'Other',
   dmpPerfViewFilterFreq: 'Frequency',
+  dmpPerfViewFilterYear: 'Year',
   dmpPerfSpecialQuarter: 'Quarter (full test day)',
   dmpPerfViewFreqAll: 'All Frequencies',
   dmpPerfExportEntries: 'Export to Excel',

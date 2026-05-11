@@ -1133,9 +1133,11 @@ router.post('/dmp-perf-data', authenticateToken, async (req, res, next) => {
   const stationUrl = getStationUrl(req.query.stationId, res);
   if (!stationUrl) return;
   try {
-    // Use a generous timeout: each batch (≤30 entries) still requires multiple ODBC
+    // Use a generous timeout: each batch (≤30 entries) requires multiple ODBC
     // queries to the DM2000/DMP Access database.  300 s gives comfortable headroom
-    // for slow Access installations while the frontend ensures batches stay small.
+    // for slow Access installations.  The frontend sends batches in parallel so
+    // several requests may arrive concurrently; the backend semaphore serialises
+    // up to 3 concurrent ODBC connections at a time.
     const r = await axios.post(`${stationUrl}/dmp-perf-data`, req.body, { timeout: 300000 });
     res.json(r.data);
   } catch (err) {

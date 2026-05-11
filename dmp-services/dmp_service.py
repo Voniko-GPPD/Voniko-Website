@@ -5518,14 +5518,12 @@ def _parse_bz_groups(bz: str) -> list[dict]:
     * ``HP{n}``   →  ``{"loai": "HP",  "chuyen": "{n}"}``
     * ``UD{n}``   →  ``{"loai": "UD",  "chuyen": "{n}"}``
 
-    A leading 6-digit DDMMYY date token is skipped.  Unrecognised tokens (e.g.
-    model names like ``'LR6'``) are silently ignored.  Returns ``[]`` when no
-    group tokens are found.
+    Unrecognised tokens (e.g. model names like ``'LR6'``) are silently
+    ignored.  Returns ``[]`` when no group tokens are found.
     """
     groups: list[dict] = []
     tokens = (bz or "").strip().upper().split()
-    start = 1 if (tokens and re.fullmatch(r"\d{6}", tokens[0])) else 0
-    for tok in tokens[start:]:
+    for tok in tokens:
         if re.fullmatch(r"UDP\d*", tok):
             groups.append({"loai": "UD+", "chuyen": tok[3:]})
         elif re.fullmatch(r"HP\d*", tok):
@@ -6184,43 +6182,33 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             continue  # Skip DMP lookup path for this entry
 
-        # Fetch batch metadata from DMPDATA.mdb.
-        # batch_id may be a 6-digit DDMMYY date (the agreed convention for column-A
-        # queries) rather than a literal para_pub.id.  When it matches that pattern,
-        # convert it to a proper date and query by fdrq first; fall back to an id
-        # lookup so that actual para_pub.id values still work.
-        batch_rows = []
-        _bid = entry.batch_id.strip()
-        _ddmmyy_match = re.fullmatch(r"\d{6}", _bid)
-        if _ddmmyy_match:
-            _s = _bid
+        # Fetch batch metadata from DMPDATA.mdb.  Identify the matching
+        # para_pub row by raw_remark (bz LIKE) first since each test session
+        # has a unique remark; fall back to a literal id lookup so that
+        # entries whose batch_id is the actual para_pub.id still work.
+        batch_rows: list[dict] = []
+        if entry.raw_remark and entry.raw_remark.strip():
+            _remark_search = entry.raw_remark.strip()
+            # Leading wildcard tolerates legacy bz values that still carry an
+            # arbitrary prefix (e.g. older "160226 LR6 UD501") while the
+            # trailing wildcard matches composite remarks that include extra
+            # group tokens beyond the entry's own (e.g. bz = "LR6 UD501 UD502"
+            # for an entry whose remark is just "LR6 UD501").
+            _bz_pattern = f"%{_remark_search}%"
+            _bz_sql = (
+                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                " WHERE bz LIKE ? ORDER BY fdrq DESC"
+            )
             try:
-                _yy = int(_s[4:6])
-                # Sliding-window century: treat YY within 50 years of today as 2000s,
-                # anything older as 1900s (covers the practical 2000-2099 range of DMP data).
-                _cur_yy = date.today().year % 100
-                _century = 2000 if (_yy - _cur_yy) % 100 <= 50 else 1900
-                _qdate = date(_century + _yy, int(_s[2:4]), int(_s[0:2]))
-                try:
-                    batch_rows = _read_dmpdata(
-                        "SELECT * FROM para_pub WHERE fdrq = ?", (_qdate,)
-                    )
-                except pyodbc.Error:
-                    try:
-                        batch_rows = _read_dmpdata(
-                            "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub WHERE fdrq = ?",
-                            (_qdate,),
-                        )
-                    except pyodbc.Error as exc:
-                        logger.warning(
-                            "_compute_dmp_perf_groups: fdrq date query failed %s: %s",
-                            entry.batch_id, exc,
-                        )
-            except (ValueError, TypeError):
-                pass  # invalid DDMMYY — fall through to id lookup below
+                batch_rows = _read_dmpdata(_bz_sql, (_bz_pattern,))
+            except pyodbc.Error as exc:
+                logger.warning(
+                    "_compute_dmp_perf_groups: bz LIKE lookup failed '%s': %s",
+                    _remark_search, exc,
+                )
 
-        if not batch_rows:
-            # Direct id lookup (also handles non-DDMMYY batch_id values)
+        if not batch_rows and entry.batch_id and entry.batch_id.strip():
+            # Direct id lookup for entries whose batch_id is an actual para_pub.id.
             try:
                 batch_rows = _read_dmpdata(
                     "SELECT * FROM para_pub WHERE id = ?", (entry.batch_id,)
@@ -6234,38 +6222,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except pyodbc.Error as exc:
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
-        # Fallback: search para_pub.bz (remark field) using the raw_remark text.
-        # This handles the case where the user entered a remark without a date
-        # prefix (e.g. "LR6 UD501 UD502") so batch_id defaults to today's date
-        # and the date-based lookup yields no results, but the corresponding
-        # para_pub row can still be identified by its bz value.
-        if not batch_rows and entry.raw_remark and entry.raw_remark.strip():
-            _remark_search = entry.raw_remark.strip()
-            # Strip leading 6-digit DDMMYY date prefix so "160226 LR6 UD501"
-            # becomes "LR6 UD501" and matches bz = "160226 LR6 UD501 UD502".
-            _remark_tokens = _remark_search.split()
-            if _remark_tokens and re.fullmatch(r"\d{6}", _remark_tokens[0]):
-                _remark_search = " ".join(_remark_tokens[1:]).strip()
-            if _remark_search:
-                # Leading wildcard is intentional: bz values often contain a
-                # DDMMYY date prefix before the remark text (e.g. "160226 LR6 UD501").
-                _bz_pattern = f"%{_remark_search}%"
-                _bz_sql = (
-                    "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
-                    " WHERE bz LIKE ? ORDER BY fdrq DESC"
-                )
-                try:
-                    batch_rows = _read_dmpdata(_bz_sql, (_bz_pattern,))
-                except pyodbc.Error as exc:
-                    logger.warning(
-                        "_compute_dmp_perf_groups: bz LIKE lookup failed '%s': %s",
-                        _remark_search, exc,
-                    )
-
         if batch_rows:
             batch = batch_rows[0]
             # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
-            # up the matching para_singl rows (which use sid = para_pub.id, not DDMMYY).
+            # up the matching para_singl rows (which use sid = para_pub.id).
             actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
             # Prefer para_singl.scrq (made/sample date) over para_pub.fdrq (start date).
@@ -6601,18 +6561,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
             hfsj_unit = "hour"
             ep_v = None
 
-            # Derive a proper YYYY-MM-DD row label from the available fields.
-            # Priority: report_date (from SQLite) > DDMMYY conversion > raw batch_id.
+            # Derive a proper YYYY-MM-DD row label from entry.report_date when
+            # available; otherwise fall back to the raw batch_id.
             if entry.report_date:
                 fdrq = _to_date(entry.report_date) or entry.batch_id
-            elif _ddmmyy_match:
-                try:
-                    _yy2 = int(_bid[4:6])
-                    _cur_yy2 = date.today().year % 100
-                    _century2 = 2000 if (_yy2 - _cur_yy2) % 100 <= 50 else 1900
-                    fdrq = date(_century2 + _yy2, int(_bid[2:4]), int(_bid[0:2])).strftime("%Y-%m-%d")
-                except (ValueError, TypeError):
-                    fdrq = entry.batch_id
             else:
                 fdrq = entry.batch_id
 

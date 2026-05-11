@@ -123,9 +123,6 @@ function autoTrays(groupCount, groupIndex) {
   return [];
 }
 
-/** Matches exactly 6 digits — used to identify the DDMMYY date token in a remark. */
-const SIX_DIGIT_RE = /^\d{6}$/;
-
 /**
  * Maximum number of Remark Data entries sent per /dmp-perf-data request.
  * Batching prevents the 120-second backend timeout when the user has
@@ -188,12 +185,11 @@ function mergeSheetsData(acc, incoming) {
 }
 
 /**
- * Parses a remark string such as "160226 LR6 UD501 UDP504" into:
- *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}],
+ * Parses a remark string such as "LR6 UD501 UDP504" into:
+ *   { model: string|null, groups: [{loai, chuyen, trays}],
  *     isQuarter: bool, is15d: bool }
  *
  * Rules:
- *   - First token that is exactly 6 digits → DDMMYY date (optional)
  *   - Token matching battery family (LR6, LR03, 9V, …) → model
  *   - "UDP<n>" → { loai: 'UD+', chuyen: '<n>', trays: [] }
  *   - "HP<n>"  → { loai: 'HP',  chuyen: '<n>', trays: [] }
@@ -205,37 +201,17 @@ function mergeSheetsData(acc, incoming) {
  *   1 group → trays 1-9 | 2 groups → 1-4 / 6-9 | 3 groups → 1-3 / 4-6 / 7-9
  */
 function parseRemark(raw) {
-  if (!raw || !raw.trim()) return { date: null, model: null, groups: [], isQuarter: false, is15d: false };
+  if (!raw || !raw.trim()) return { model: null, groups: [], isQuarter: false, is15d: false };
 
   const tokens = raw.trim().toUpperCase().split(/\s+/);
-  let date = null;
   let model = null;
   const groups = [];
   let isQuarter = false;
   let is15d = false;
-  let start = 0;
-
-  // Optional 6-digit date prefix (DDMMYY)
-  if (SIX_DIGIT_RE.test(tokens[0])) {
-    const s = tokens[0];
-    const day = parseInt(s.substring(0, 2), 10);
-    const month = parseInt(s.substring(2, 4), 10);
-    const year = 2000 + parseInt(s.substring(4, 6), 10);
-    // Validate by round-tripping through Date to catch impossible dates (e.g. Feb 30)
-    const candidate = new Date(year, month - 1, day);
-    if (
-      candidate.getFullYear() === year
-      && candidate.getMonth() === month - 1
-      && candidate.getDate() === day
-    ) {
-      date = candidate;
-    }
-    start = 1;
-  }
 
   // LR\d{1,2} already covers LR6, LR03, LR61, etc.
   const batteryRe = /^(LR\d{1,2}|9V)$/;
-  for (let i = start; i < tokens.length; i++) {
+  for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (batteryRe.test(tok)) {
       model = tok;
@@ -256,7 +232,7 @@ function parseRemark(raw) {
     }
   }
 
-  return { date, model, groups, isQuarter, is15d };
+  return { model, groups, isQuarter, is15d };
 }
 
 // ─── Group editor ─────────────────────────────────────────────────────────────
@@ -361,23 +337,13 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       setSaving(true);
 
       const rawRemark = values.raw_remark || null;
-      const parsed = parseRemark(values.raw_remark);
-      // Use the date from the remark prefix (DDMMYY) as the report_date.
-      // When no date is present in the remark, leave report_date as null so
-      // the backend reads the made date (scrq) from the database instead of
-      // falling back to today's date.
-      const reportDate = parsed.date
-        ? dayjs(parsed.date).format('YYYY-MM-DD')
-        : null;
-      const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
-      const batchId = SIX_DIGIT_RE.test(remarkTokens[0])
-        ? remarkTokens[0]
-        : dayjs().format('DDMMYY');
-
+      // The made date (scrq) is read directly from the para_singl row that
+      // matches raw_remark, so report_date / batch_id are left null and the
+      // backend supplies a placeholder for the NOT NULL columns.
       const payload = {
         station_id: stationId,
-        batch_id: batchId,
-        report_date: reportDate,
+        batch_id: null,
+        report_date: null,
         model: values.model,
         groups,
         special_type: values.special_type || 'normal',

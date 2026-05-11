@@ -2237,6 +2237,94 @@ def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
     return rows
 
 
+def _read_telemetry_multi(cdmc: str, channels: list[int]) -> dict[int, list[dict]]:
+    """Read vidata for multiple *channels* from a single *cdmc* file.
+
+    *channels* are battery/tray numbers (the ``baty`` column in the vidata
+    table, values 1-9), identical to the *channel* parameter of
+    :func:`_read_telemetry`.
+
+    Uses **one** shadow copy for all channels instead of one per channel, which
+    is the key performance optimisation for :func:`_dmp_compute_group_perf`:
+    all trays in a DMP batch typically share the same cdmc file, so batching
+    reduces N file-copy + ODBC-connect cycles to just 1.
+
+    Checks *_TELEMETRY_CACHE* first; only the cache-miss channels cause actual
+    database I/O.  All results are written to the cache before returning.
+
+    Returns a ``dict`` mapping ``channel → row-list`` (TIM already in hours).
+    Channels that fail silently return an empty list; they are still included in
+    the returned dict with ``[]`` so callers can detect the miss.
+    """
+    result: dict[int, list[dict]] = {}
+    cache_misses: list[int] = []
+    now = time.time()
+
+    for ch in channels:
+        cache_key = (cdmc, ch)
+        with _TELEMETRY_CACHE_LOCK:
+            cached = _TELEMETRY_CACHE.get(cache_key)
+            if cached is not None:
+                rows, ts = cached
+                if now - ts < _TELEMETRY_CACHE_TTL:
+                    logger.debug("_read_telemetry_multi cache hit: cdmc=%r ch=%d", cdmc, ch)
+                    result[ch] = rows
+                    continue
+        cache_misses.append(ch)
+
+    if not cache_misses:
+        return result
+
+    try:
+        mdb_path = resolve_data_file(cdmc)
+    except HTTPException as exc:
+        logger.warning("_read_telemetry_multi: cdmc %r not found: %s", cdmc, exc)
+        for ch in cache_misses:
+            result[ch] = []
+        return result
+
+    try:
+        with shadow_copy(mdb_path) as copied:
+            for ch in cache_misses:
+                try:
+                    rows = _query_vidata_by_channel(copied, ch)
+                except HTTPException as exc:
+                    logger.warning(
+                        "_read_telemetry_multi: query failed ch=%d cdmc=%r: %s", ch, cdmc, exc
+                    )
+                    rows = []
+                except Exception as exc:
+                    logger.warning(
+                        "_read_telemetry_multi: unexpected error ch=%d cdmc=%r: %s", ch, cdmc, exc
+                    )
+                    rows = []
+                # Convert TIM from seconds to hours (same as _read_telemetry)
+                for row in rows:
+                    tim = row.get("TIM")
+                    if tim is not None and tim != "--":
+                        try:
+                            row["TIM"] = round(float(tim) / 3600, 6)
+                        except (TypeError, ValueError):
+                            pass
+                with _TELEMETRY_CACHE_LOCK:
+                    _TELEMETRY_CACHE[(cdmc, ch)] = (rows, time.time())
+                result[ch] = rows
+    except HTTPException as exc:
+        logger.warning(
+            "_read_telemetry_multi: shadow copy failed for cdmc=%r: %s", cdmc, exc
+        )
+        for ch in cache_misses:
+            result.setdefault(ch, [])
+    except Exception as exc:
+        logger.warning(
+            "_read_telemetry_multi: unexpected error for cdmc=%r: %s", cdmc, exc
+        )
+        for ch in cache_misses:
+            result.setdefault(ch, [])
+
+    return result
+
+
 def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:
     if table_name.lower() not in _SCHEMA_TABLE_WHITELIST:
         raise HTTPException(
@@ -5155,19 +5243,28 @@ def _dmp_compute_group_perf(
     # ``(h)``/``(m)`` columns, while ``count_list`` holds the cycle count
     # (1-based index of the first sample whose voltage drops to/below the
     # endpoint) used for DMP ``(t)`` columns ("số lần phóng điện").
+    #
+    # Batch telemetry reads by cdmc file: all trays that share the same cdmc
+    # are fetched with ONE shadow copy, avoiding N separate file-copy cycles.
+    cdmc_to_trays: dict[str, list[int]] = {}
+    for tray in trays:
+        cdmc_val = cdmc_by_baty.get(tray)
+        if cdmc_val:
+            cdmc_to_trays.setdefault(cdmc_val, []).append(tray)
+        else:
+            logger.debug(
+                "_dmp_compute_group_perf: no cdmc for tray %d in batch %s", tray, batch_id
+            )
+
+    telemetry_by_tray: dict[int, list[dict]] = {}
+    for cdmc_val, cdmc_trays in cdmc_to_trays.items():
+        batch = _read_telemetry_multi(cdmc_val, cdmc_trays)
+        telemetry_by_tray.update(batch)
+
     hours_list: list[float] = []
     count_list: list[int] = []
     for tray in trays:
-        cdmc = cdmc_by_baty.get(tray)
-        if not cdmc:
-            logger.debug("_dmp_compute_group_perf: no cdmc for tray %d in batch %s", tray, batch_id)
-            continue
-        try:
-            telemetry = _read_telemetry(cdmc, tray)  # TIM already in hours after this call
-        except HTTPException as exc:
-            logger.warning("_dmp_compute_group_perf: telemetry read failed tray=%d: %s", tray, exc)
-            continue
-
+        telemetry = telemetry_by_tray.get(tray, [])
         if not telemetry:
             continue
 
@@ -6061,7 +6158,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 _r2 = _read_dm2000_ls(_sql2, _par2)
                                 if _r2:
                                     return _r2
-                            except pyodbc.Error:
+                            except (pyodbc.Error, HTTPException):
                                 pass
                         return []
                     _fb_seen_pairs: set[tuple] = set()
@@ -6079,7 +6176,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 _feg_rows = _read_dm2000_ls(
                                     "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_feg_esc}%",)
                                 )
-                            except pyodbc.Error:
+                            except (pyodbc.Error, HTTPException):
                                 pass
                         if not _feg_rows:
                             continue
@@ -6171,7 +6268,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_arch_rows2 = _read_dm2000_ls(
                         "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
                     )
-                except pyodbc.Error:
+                except (pyodbc.Error, HTTPException):
                     pass
                 if not _fb_arch_rows2:
                     _fb_esc2 = _escape_sql_wildcards(_fb_remark)
@@ -6179,21 +6276,21 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_arch_rows2 = _read_dm2000_ls(
                             "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fb_esc2}%",)
                         )
-                    except pyodbc.Error:
+                    except (pyodbc.Error, HTTPException):
                         pass
                 if not _fb_arch_rows2:
                     try:
                         _fb_arch_rows2 = _read_dm2000_ls(
                             "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_fb_remark,)
                         )
-                    except pyodbc.Error:
+                    except (pyodbc.Error, HTTPException):
                         pass
                 if not _fb_arch_rows2:
                     try:
                         _fb_arch_rows2 = _read_dm2000_ls(
                             "SELECT * FROM ls_jb_cs WHERE archname = ?", (_fb_remark,)
                         )
-                    except pyodbc.Error:
+                    except (pyodbc.Error, HTTPException):
                         pass
                 if _fb_arch_rows2:
                     _fb_meta = _fb_arch_rows2[0]

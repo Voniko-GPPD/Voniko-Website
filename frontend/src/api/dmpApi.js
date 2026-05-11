@@ -261,6 +261,45 @@ export async function fetchDmpPerfData({ stationId, entries }) {
   return res.json();
 }
 
+export async function exportPerfEntries(stationId) {
+  const token = localStorage.getItem('accessToken');
+  const res = await fetch(`${BASE}/perf-entries/export?stationId=${encodeURIComponent(stationId)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Export failed');
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const nameMatch = disposition.match(/filename="([^"]+)"/);
+  const filename = nameMatch ? nameMatch[1] : 'remark_data.xlsx';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function importPerfEntries(stationId, file) {
+  const token = localStorage.getItem('accessToken');
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/perf-entries/import?stationId=${encodeURIComponent(stationId)}`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || err.error || 'Import failed');
+  }
+  return res.json();
+}
+
 export async function saveDmpBatchOverride(stationId, batchId, { serialno, remarks } = {}) {
   const res = await apiFetch(`${BASE}/batch-overrides`, {
     method: 'PUT',

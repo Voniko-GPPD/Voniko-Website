@@ -790,4 +790,9 @@ export default {
   dmpPerfViewFilterFreq: 'Frequency',
   dmpPerfSpecialQuarter: 'Quarter (full test day)',
   dmpPerfViewFreqAll: 'All Frequencies',
+  dmpPerfExportEntries: 'Export to Excel',
+  dmpPerfImportEntries: 'Import from Excel',
+  dmpPerfImportSuccess: 'Imported {count} entries',
+  dmpPerfImportFailed: 'Import failed',
+  dmpPerfExportFailed: 'Export failed',
 };

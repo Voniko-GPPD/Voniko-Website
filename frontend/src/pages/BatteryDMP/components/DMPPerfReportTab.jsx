@@ -32,10 +32,12 @@ import {
   createPerfEntry,
   deletePerfEntry,
   downloadDmpPerfReport,
+  exportPerfEntries,
   fetchDmpPerfData,
   fetchDmpPerfTemplates,
   fetchPerfEntries,
   fetchStations,
+  importPerfEntries,
   updatePerfEntry,
   uploadDmpPerfTemplate,
 } from '../../../api/dmpApi';
@@ -388,24 +390,22 @@ function RemarkRegistryTab({ stationId, selection }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = none, 'new' = new form
-  const [dateRange, setDateRange] = useState([null, null]);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
 
   const load = useCallback(async () => {
     if (!stationId) return;
     setLoading(true);
     try {
-      const [from, to] = dateRange;
-      const data = await fetchPerfEntries(stationId, {
-        dateFrom: from ? from.format('YYYY-MM-DD') : undefined,
-        dateTo: to ? to.format('YYYY-MM-DD') : undefined,
-      });
+      const data = await fetchPerfEntries(stationId);
       setEntries(data);
     } catch (err) {
       notification.error({ message: err.message });
     } finally {
       setLoading(false);
     }
-  }, [stationId, dateRange]);
+  }, [stationId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -422,6 +422,37 @@ function RemarkRegistryTab({ stationId, selection }) {
   const handleAddFromBatch = () => {
     if (!selection?.id) return;
     setEditingId('new');
+  };
+
+  const handleExport = async () => {
+    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
+    setExporting(true);
+    try {
+      await exportPerfEntries(stationId);
+    } catch (err) {
+      notification.error({ message: t('dmpPerfExportFailed'), description: err.message });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!stationId) { notification.warning({ message: t('dmpPerfSelectStation') }); return; }
+    setImporting(true);
+    try {
+      const result = await importPerfEntries(stationId, file);
+      notification.success({
+        message: t('dmpPerfImportSuccess').replace('{count}', result.imported ?? 0),
+      });
+      load();
+    } catch (err) {
+      notification.error({ message: t('dmpPerfImportFailed'), description: err.message });
+    } finally {
+      setImporting(false);
+      if (importRef.current) importRef.current.value = '';
+    }
   };
 
   const specialTag = (type) => {
@@ -497,12 +528,19 @@ function RemarkRegistryTab({ stationId, selection }) {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Alert type="info" showIcon message={t('dmpPerfHint')} />
       <Space wrap>
-        <DatePicker.RangePicker
-          value={dateRange}
-          onChange={setDateRange}
-          allowClear
+        <Button icon={<DownloadOutlined />} loading={exporting} onClick={handleExport}>
+          {t('dmpPerfExportEntries')}
+        </Button>
+        <Button icon={<UploadOutlined />} loading={importing} onClick={() => importRef.current?.click()}>
+          {t('dmpPerfImportEntries')}
+        </Button>
+        <input
+          ref={importRef}
+          type="file"
+          accept=".xlsx"
+          style={{ display: 'none' }}
+          onChange={handleImport}
         />
-        <Button onClick={load} loading={loading}>{t('dm2000Search')}</Button>
         <Button icon={<PlusOutlined />} onClick={() => setEditingId('new')}>
           {t('dmpPerfAddEntry')}
         </Button>

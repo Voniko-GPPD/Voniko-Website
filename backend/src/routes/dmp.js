@@ -945,19 +945,26 @@ router.post('/perf-entries/import', authenticateToken, upload.single('file'), as
       if (raw_remark) {
         const firstToken = raw_remark.trim().split(/\s+/)[0] || '';
         if (/^\d{6}$/.test(firstToken)) {
-          effectiveBatchId = firstToken;
-          if (!effectiveDate) {
-            const day = parseInt(firstToken.substring(0, 2), 10);
-            const month = parseInt(firstToken.substring(2, 4), 10);
-            const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
-            effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const day = parseInt(firstToken.substring(0, 2), 10);
+          const month = parseInt(firstToken.substring(2, 4), 10);
+          const year = 2000 + parseInt(firstToken.substring(4, 6), 10);
+          const candidate = new Date(year, month - 1, day);
+          const isValid = candidate.getFullYear() === year
+            && candidate.getMonth() === month - 1
+            && candidate.getDate() === day;
+          if (isValid) {
+            effectiveBatchId = firstToken;
+            if (!effectiveDate) {
+              effectiveDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            }
           }
         }
       }
       if (!effectiveBatchId) {
-        effectiveBatchId = effectiveDate
-          ? effectiveDate.replace(/-/g, '').slice(2, 8)
-          : new Date().toISOString().slice(2, 10).replace(/-/g, '');
+        // Produce a DDMMYY batch ID from the report_date (YYYY-MM-DD) or today
+        const dateStr = effectiveDate || new Date().toISOString().slice(0, 10);
+        const [y, m, d] = dateStr.split('-');
+        effectiveBatchId = `${d}${m}${y.slice(2)}`;
       }
       if (!effectiveDate) effectiveDate = new Date().toISOString().slice(0, 10);
 

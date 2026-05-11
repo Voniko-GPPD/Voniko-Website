@@ -264,7 +264,7 @@ export async function fetchDmpPerfData({ stationId, entries }) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || err.error || 'Failed to load performance data');
+    throw new Error(err.message || err.error || err.detail || 'Failed to load performance data');
   }
   return res.json();
 }

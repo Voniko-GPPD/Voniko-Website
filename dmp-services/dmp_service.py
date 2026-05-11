@@ -91,6 +91,12 @@ _DM2000_BATTERIES_CACHE_TTL: float = 60.0  # seconds
 _DM2000_STATS_CACHE: dict[tuple, tuple[dict, float]] = {}
 _DM2000_STATS_CACHE_LOCK = threading.Lock()
 _DM2000_STATS_CACHE_TTL: float = 300.0  # seconds
+# Cache for full time-at-voltage data per archive (all batteries, all voltage thresholds).
+# Populated by _load_vtime_for_archive and reused by both _get_batys_for_archive and
+# _get_tav_for_batteries to avoid repeated ODBC queries for the same archive.
+_DM2000_TAV_CACHE: dict[str, tuple[dict, float]] = {}
+_DM2000_TAV_CACHE_LOCK = threading.Lock()
+_DM2000_TAV_CACHE_TTL: float = 120.0  # seconds
 _DM2000_CACHE_MAX_ENTRIES: int = 100
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
@@ -241,6 +247,8 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
                     _DM2000_BATTERIES_CACHE.clear()
+                with _DM2000_TAV_CACHE_LOCK:
+                    _DM2000_TAV_CACHE.clear()
                 with _DM2000_STATS_CACHE_LOCK:
                     _DM2000_STATS_CACHE.clear()
                 with _DM2000_CURVE_CACHE_LOCK:
@@ -276,6 +284,8 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
                     _DM2000_BATTERIES_CACHE.clear()
+                with _DM2000_TAV_CACHE_LOCK:
+                    _DM2000_TAV_CACHE.clear()
                 with _DM2000_STATS_CACHE_LOCK:
                     _DM2000_STATS_CACHE.clear()
                 with _DM2000_CURVE_CACHE_LOCK:
@@ -353,6 +363,8 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                     _DM2000_ARCHIVES_CACHE.clear()
                 with _DM2000_BATTERIES_CACHE_LOCK:
                     _DM2000_BATTERIES_CACHE.clear()
+                with _DM2000_TAV_CACHE_LOCK:
+                    _DM2000_TAV_CACHE.clear()
                 with _DM2000_STATS_CACHE_LOCK:
                     _DM2000_STATS_CACHE.clear()
                 with _DM2000_CURVE_CACHE_LOCK:
@@ -369,6 +381,8 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             _DM2000_ARCHIVES_CACHE.clear()
         with _DM2000_BATTERIES_CACHE_LOCK:
             _DM2000_BATTERIES_CACHE.clear()
+        with _DM2000_TAV_CACHE_LOCK:
+            _DM2000_TAV_CACHE.clear()
         with _DM2000_STATS_CACHE_LOCK:
             _DM2000_STATS_CACHE.clear()
 
@@ -3560,6 +3574,8 @@ def refresh_dm2000_archives():
     # file copy succeeded, so the very next query reads fresh data from DB.
     with _DM2000_ARCHIVES_CACHE_LOCK:
         _DM2000_ARCHIVES_CACHE.clear()
+    with _DM2000_TAV_CACHE_LOCK:
+        _DM2000_TAV_CACHE.clear()
     return {"status": "ok", "cache_path": _DM2000_LS_CACHE_PATH}
 
 
@@ -3668,6 +3684,8 @@ def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
     _dm2000_refresh_ls_cache(force=True)
     with _DM2000_ARCHIVES_CACHE_LOCK:
         _DM2000_ARCHIVES_CACHE.clear()
+    with _DM2000_TAV_CACHE_LOCK:
+        _DM2000_TAV_CACHE.clear()
 
     return {"status": "ok", "updated": rows_updated}
 
@@ -4566,8 +4584,107 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
 
 # ─── Performance Monitoring Report ──────────────────────────────────────────
 
+def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
+    """Load ALL time-at-voltage data for an archive in a single ODBC query.
+
+    Returns a dict mapping battery channel number → [{sj, minutes}, ...] where
+    each entry is one voltage threshold row.  Rows where the time column is NULL,
+    empty, or ``"--"`` are omitted so callers see only meaningful data points.
+
+    Results are cached (TTL=``_DM2000_TAV_CACHE_TTL`` s) so repeated calls for
+    the same archive within the same request — e.g. ``_get_batys_for_archive``
+    followed by ``_get_tav_for_batteries`` — hit the cache instead of querying
+    the database again.
+
+    Schema tried (in order):
+    1. ``ls_vtime cdid-based`` — SELECT dy, time1..time9 WHERE cdid=? (primary)
+    2. ``ls_timev cdid-based`` — SELECT sj, tim_vot1..tim_vot9 WHERE cdid=?
+    """
+    with _DM2000_TAV_CACHE_LOCK:
+        cached = _DM2000_TAV_CACHE.get(archname)
+        if cached is not None:
+            data, ts = cached
+            if time.time() - ts < _DM2000_TAV_CACHE_TTL:
+                return data
+
+    full_data: dict[int, list[dict]] = {}
+
+    # Try 1: ls_vtime cdid-based — fetch all time columns in one query.
+    # This replaces the original loop that issued one SELECT per battery channel.
+    vtime_cols = ", ".join(f"time{i}" for i in range(1, 10))
+    try:
+        rows = _read_dm2000_ls(
+            f"SELECT dy, {vtime_cols} FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+            (archname,),
+        )
+        if rows:
+            for i in range(1, 10):
+                tav: list[dict] = []
+                for row in rows:
+                    val = row.get(f"time{i}")
+                    if val is None or str(val).strip() in ("", "--", "None"):
+                        continue
+                    try:
+                        f_val = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isnan(f_val):
+                        continue
+                    tav.append({"sj": row.get("dy"), "minutes": val})
+                if tav:
+                    full_data[i] = tav
+    except (pyodbc.Error, HTTPException):
+        pass
+
+    if not full_data:
+        # Try 2: ls_timev cdid-based — same single-query bulk approach.
+        timev_cols = ", ".join(f"tim_vot{i}" for i in range(1, 10))
+        try:
+            rows = _read_dm2000_ls(
+                f"SELECT sj, {timev_cols} FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                (archname,),
+            )
+            if rows:
+                for i in range(1, 10):
+                    tav = []
+                    for row in rows:
+                        val = row.get(f"tim_vot{i}")
+                        if val is None or str(val).strip() in ("", "--", "None"):
+                            continue
+                        try:
+                            f_val = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isnan(f_val):
+                            continue
+                        tav.append({"sj": row.get("sj"), "minutes": val})
+                    if tav:
+                        full_data[i] = tav
+        except (pyodbc.Error, HTTPException):
+            pass
+
+    # Cache the result (empty dict is also cached to avoid re-querying on
+    # archives whose cdid schemas are absent; legacy archname path is handled
+    # outside this function).
+    with _DM2000_TAV_CACHE_LOCK:
+        _cache_set_with_cap(_DM2000_TAV_CACHE, archname, (full_data, time.time()))
+
+    return full_data
+
+
 def _get_batys_for_archive(archname: str) -> list[int]:
-    """Return sorted list of battery numbers that have data in the archive."""
+    """Return sorted list of battery numbers that have data in the archive.
+
+    Uses ``_load_vtime_for_archive`` so the TAV data is also cached for the
+    subsequent ``_get_tav_for_batteries`` call, eliminating a redundant query.
+    Falls back to ``ls_pam2`` when no vtime data is found for the archive.
+    """
+    full_data = _load_vtime_for_archive(archname)
+    if full_data:
+        return sorted(b for b, tav in full_data.items() if tav)
+
+    # Fallback: derive from _derive_dm2000_batteries_from_vtime (archname schema)
+    # then from ls_pam2.
     rows = _derive_dm2000_batteries_from_vtime(archname)
     if not rows:
         try:
@@ -4592,45 +4709,43 @@ def _get_batys_for_archive(archname: str) -> list[int]:
 def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[dict]]:
     """Return time-at-voltage data for each battery number in batys.
 
-    Query order (cdid-based schema first, archname-based last):
-    1. ls_vtime cdid-based  — ``SELECT dy AS sj, time{b} AS minutes FROM ls_vtime WHERE cdid = ?``
-       User-confirmed primary data source.
-    2. ls_timev cdid-based  — ``SELECT sj, tim_vot{b} AS minutes FROM ls_timev WHERE cdid = ?``
-       Alternative cdid schema used by some DM2000 versions.
-    3. ls_timev archname-based — ``SELECT * FROM ls_timev WHERE archname = ? AND baty = ?``
-       Legacy archname schema fallback.
+    Prefers the TAV cache populated by ``_load_vtime_for_archive`` (cdid-based
+    schemas) so that within the same request the ls_vtime table is queried only
+    once per archive instead of once per battery.
+
+    Falls back to the legacy per-battery ``ls_timev archname``-based query when
+    both cdid schemas returned no data (rare, older DM2000 installations).
     """
+    if not batys:
+        return {}
+
+    # Use cache populated by _load_vtime_for_archive (cdid-based schemas).
+    with _DM2000_TAV_CACHE_LOCK:
+        cached = _DM2000_TAV_CACHE.get(archname)
+        if cached is not None:
+            full_data, ts = cached
+            if time.time() - ts < _DM2000_TAV_CACHE_TTL:
+                if full_data:
+                    return {b: full_data.get(b, []) for b in batys}
+                # Cache contains empty dict → cdid schemas absent; fall through
+                # to legacy per-battery queries below.
+
+    # Cache miss: load cdid-based data now.
+    full_data = _load_vtime_for_archive(archname)
+    if full_data:
+        return {b: full_data.get(b, []) for b in batys}
+
+    # Legacy fallback: ls_timev archname-based schema (one query per battery).
     result: dict[int, list[dict]] = {}
     for b in batys:
         tav: list[dict] = []
-        # Try 1: ls_vtime cdid-based (primary — confirmed by user as correct data source)
-        time_col = f"time{b}"
         try:
             tav = _read_dm2000_ls(
-                f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
-                (archname,),
+                "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+                (archname, b),
             )
         except (pyodbc.Error, HTTPException):
             pass
-        if not tav:
-            # Try 2: ls_timev cdid-based
-            tim_col = f"tim_vot{b}"
-            try:
-                tav = _read_dm2000_ls(
-                    f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
-                    (archname,),
-                )
-            except (pyodbc.Error, HTTPException):
-                pass
-        if not tav:
-            # Try 3: ls_timev archname-based (legacy schema)
-            try:
-                tav = _read_dm2000_ls(
-                    "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
-                    (archname, b),
-                )
-            except (pyodbc.Error, HTTPException):
-                pass
         result[b] = tav
     return result
 

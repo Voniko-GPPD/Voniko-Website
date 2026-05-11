@@ -127,6 +127,42 @@ function autoTrays(groupCount, groupIndex) {
 const SIX_DIGIT_RE = /^\d{6}$/;
 
 /**
+ * Maximum number of Remark Data entries sent per /dmp-perf-data request.
+ * Batching prevents the 120-second backend timeout when the user has
+ * many entries (e.g. 200), since each entry requires multiple ODBC queries
+ * to the DM2000 / DMP Access database.
+ */
+const PERF_DATA_BATCH_SIZE = 30;
+
+/**
+ * Merge two /dmp-perf-data "sheets" objects together.
+ *
+ * Each sheet has: rows[], conditions[], freq_groups{}, units{}.
+ * - rows are concatenated (different entries produce different date+loai rows)
+ * - conditions are unioned preserving the insertion order from earlier batches
+ * - freq_groups and units are merged (earlier batches take precedence for conflicts)
+ */
+function mergeSheetsData(acc, incoming) {
+  const result = { ...acc };
+  for (const [key, sheet] of Object.entries(incoming || {})) {
+    if (!result[key]) {
+      result[key] = { rows: [], conditions: [], freq_groups: {}, units: {} };
+    }
+    result[key].rows = [...result[key].rows, ...(sheet.rows || [])];
+    const existingConds = new Set(result[key].conditions);
+    for (const cond of sheet.conditions || []) {
+      if (!existingConds.has(cond)) {
+        result[key].conditions.push(cond);
+        existingConds.add(cond);
+      }
+    }
+    result[key].freq_groups = { ...(sheet.freq_groups || {}), ...result[key].freq_groups };
+    result[key].units = { ...(sheet.units || {}), ...result[key].units };
+  }
+  return result;
+}
+
+/**
  * Parses a remark string such as "160226 LR6 UD501 UDP504" into:
  *   { date: Date|null, model: string|null, groups: [{loai, chuyen, trays}],
  *     isQuarter: bool, is15d: bool }
@@ -823,9 +859,18 @@ function PerfViewTab({ stationId }) {
         raw_remark: e.raw_remark || null,
         dm2000_archname: e.dm2000_archname || null,
       }));
-      const data = await fetchDmpPerfData({ stationId, entries: payload });
-      setSheetsData(data.sheets || {});
-      const sheetKeys = Object.keys(data.sheets || {});
+      // Process in batches to avoid timeouts when there are many entries.
+      // Each entry requires multiple ODBC queries to the Access database, so
+      // sending all 200+ entries at once can exceed the backend timeout.
+      let mergedSheets = {};
+      for (let i = 0; i < payload.length; i += PERF_DATA_BATCH_SIZE) {
+        const batch = payload.slice(i, i + PERF_DATA_BATCH_SIZE);
+        // eslint-disable-next-line no-await-in-loop
+        const data = await fetchDmpPerfData({ stationId, entries: batch });
+        mergedSheets = mergeSheetsData(mergedSheets, data.sheets || {});
+      }
+      setSheetsData(mergedSheets);
+      const sheetKeys = Object.keys(mergedSheets);
       setActiveSheet(sheetKeys[0] || null);
     } catch (err) {
       notification.error({ message: t('dmpPerfViewTab'), description: err.message });

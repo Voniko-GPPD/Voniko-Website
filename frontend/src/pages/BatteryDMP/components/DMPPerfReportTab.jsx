@@ -337,9 +337,13 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
 
       const rawRemark = values.raw_remark || null;
       const parsed = parseRemark(values.raw_remark);
+      // Use the date from the remark prefix (DDMMYY) as the report_date.
+      // When no date is present in the remark, leave report_date as null so
+      // the backend reads the made date (scrq) from the database instead of
+      // falling back to today's date.
       const reportDate = parsed.date
         ? dayjs(parsed.date).format('YYYY-MM-DD')
-        : dayjs().format('YYYY-MM-DD');
+        : null;
       const remarkTokens = (values.raw_remark || '').trim().split(/\s+/);
       const batchId = SIX_DIGIT_RE.test(remarkTokens[0])
         ? remarkTokens[0]
@@ -857,14 +861,19 @@ function PerfViewTab({ stationId }) {
         raw_remark: e.raw_remark || null,
         dm2000_archname: e.dm2000_archname || null,
       }));
-      // Process in batches to avoid timeouts when there are many entries.
-      // Each entry requires multiple ODBC queries to the Access database, so
-      // sending all 200+ entries at once can exceed the backend timeout.
-      let mergedSheets = {};
+      // Send all batches in parallel to utilise the backend's concurrent
+      // ODBC query slots and avoid the latency of sequential round-trips.
+      // Promise.all preserves insertion order, so mergeSheetsData receives
+      // results in the same order as the original payload slices.
+      const batches = [];
       for (let i = 0; i < payload.length; i += PERF_DATA_BATCH_SIZE) {
-        const batch = payload.slice(i, i + PERF_DATA_BATCH_SIZE);
-        // eslint-disable-next-line no-await-in-loop
-        const data = await fetchDmpPerfData({ stationId, entries: batch });
+        batches.push(payload.slice(i, i + PERF_DATA_BATCH_SIZE));
+      }
+      const batchResults = await Promise.all(
+        batches.map((batch) => fetchDmpPerfData({ stationId, entries: batch })),
+      );
+      let mergedSheets = {};
+      for (const data of batchResults) {
         mergedSheets = mergeSheetsData(mergedSheets, data.sheets || {});
       }
       setSheetsData(mergedSheets);

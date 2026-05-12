@@ -205,43 +205,52 @@ def test_strip_remark_suffixes(
     assert is_15d == expected_15d
 
 
-def test_lr6_route_fdfs_label_routes_to_daily_by_default() -> None:
+def test_lr6_route_fdfs_labels_routes_to_daily_by_default() -> None:
     """Default (is_15d=False) routes the LR6 1500mW2s/650mW28s condition to
-    the daily column — both the bare condition and the legacy
-    ``-1.05V``/``-1.0V`` voltage-suffixed forms collapse to the same key."""
+    the daily column ONLY — both the bare condition and the legacy
+    ``-1.05V``/``-1.0V`` voltage-suffixed forms collapse to the same key.
+    Quarterly measurements (``Q`` without ``15``) follow this path so they
+    write only into the normal daily column."""
     daily = m._LR6_1500MW_DAILY_LABEL
     for raw in (
         "(1500mW2s,650mW28s)10T/h,24h/d",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
     ):
-        assert m._lr6_route_fdfs_label(raw, "LR6", False) == daily
+        assert m._lr6_route_fdfs_labels(raw, "LR6", False) == [daily]
 
 
-def test_lr6_route_fdfs_label_routes_to_15d_when_flagged() -> None:
+def test_lr6_route_fdfs_labels_writes_both_columns_when_15d() -> None:
+    """A 15-day measurement (``is_15d=True``) on the LR6 1500mW2s/650mW28s
+    condition writes the result into BOTH the daily column and the
+    dedicated 15-day column at the same time.  Daily comes first so the
+    on-screen left-to-right column ordering ``Daily | 15-day`` is preserved
+    when callers iterate insertion order."""
+    daily = m._LR6_1500MW_DAILY_LABEL
     fifteen = m._LR6_1500MW_15D_LABEL
     for raw in (
         "(1500mW2s,650mW28s)10T/h,24h/d",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
     ):
-        assert m._lr6_route_fdfs_label(raw, "LR6", True) == fifteen
+        assert m._lr6_route_fdfs_labels(raw, "LR6", True) == [daily, fifteen]
 
 
-def test_lr6_route_fdfs_label_only_applies_to_lr6() -> None:
+def test_lr6_route_fdfs_labels_only_applies_to_lr6() -> None:
     """The 15-day cadence column is LR6-only — non-LR6 models always pass
     the label through unchanged regardless of is_15d."""
     raw = "(1500mW2s,650mW28s)10T/h,24h/d"
     for fam in ("LR03", "LR61", "9V"):
-        assert m._lr6_route_fdfs_label(raw, fam, True) == raw
-        assert m._lr6_route_fdfs_label(raw, fam, False) == raw
+        assert m._lr6_route_fdfs_labels(raw, fam, True) == [raw]
+        assert m._lr6_route_fdfs_labels(raw, fam, False) == [raw]
 
 
-def test_lr6_route_fdfs_label_passes_unrelated_conditions_through() -> None:
+def test_lr6_route_fdfs_labels_passes_unrelated_conditions_through() -> None:
     """Conditions that don't match the 1500mW2s/650mW28s base condition are
-    returned unchanged for LR6 too, regardless of the is_15d flag."""
+    returned unchanged for LR6 too, regardless of the is_15d flag (the
+    15-day column is exclusive to the 1500mW2s/650mW28s condition)."""
     for raw in ("10ohm 24h/d-0.9V", "1000mA 24h/d-0.9V", "3.9ohm 1h/d-0.8V"):
-        assert m._lr6_route_fdfs_label(raw, "LR6", True) == raw
-        assert m._lr6_route_fdfs_label(raw, "LR6", False) == raw
+        assert m._lr6_route_fdfs_labels(raw, "LR6", True) == [raw]
+        assert m._lr6_route_fdfs_labels(raw, "LR6", False) == [raw]
 
 
 def test_lr6_template_has_daily_then_15d_slots() -> None:

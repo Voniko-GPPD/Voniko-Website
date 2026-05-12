@@ -1449,6 +1449,29 @@ def _resolve_entry_flags(entry) -> tuple[str, bool, bool]:
     return (clean, is_quarter, is_15d)
 
 
+def _merge_bz_suffix_flags(
+    is_quarter: bool, is_15d: bool, bz: Optional[str]
+) -> tuple[bool, bool]:
+    """OR the ``Q`` / ``15`` flag suffixes parsed from a master ``bz`` value
+    into the existing entry-derived flags.
+
+    The ``bz`` column on ``para_pub`` (DMP) and ``ls_jb_cs`` (DM2000) is the
+    canonical source of truth for the discharge-condition routing flags: the
+    operator edits it via the DM management page and that value is what every
+    other column on the perf report is derived from.  Without this merge, a
+    perf-entry whose ``raw_remark`` was created before the ``15`` / ``Q``
+    suffix was added to ``bz`` would still route to the wrong column.
+
+    Empty / missing ``bz`` values are a no-op: the entry-level flags are
+    returned unchanged.  This preserves the previous behaviour for callers
+    that have not yet adopted the ``bz`` column read.
+    """
+    if not bz:
+        return (is_quarter, is_15d)
+    _, bz_q, bz_15d = _strip_remark_suffixes(str(bz))
+    return (is_quarter or bz_q, is_15d or bz_15d)
+
+
 # Matches the standalone ``15D`` (or ``15d``) column marker used to distinguish
 # the LR6 15-day-cadence column from the adjacent daily column.  Used by
 # ``_perf_fdfs_matches_header`` to prevent cross-matching between the two columns.
@@ -6347,7 +6370,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
                         _eg_fdfs_labels = _lr6_route_fdfs_labels(
-                            _eg_fdfs or _dm2k_eg["loai"], entry.model, _is_15d
+                            _eg_fdfs or _dm2k_eg["loai"], entry.model,
+                            _merge_bz_suffix_flags(_is_quarter, _is_15d, _eg_arch_bz)[1],
                         )
                         _eg_target = groups.setdefault(_eg_sheet, {}).setdefault(
                             (_eg_row_label, _dm2k_eg["loai"]), {}
@@ -6524,7 +6548,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
                 _dm2k_fdfs_labels = _lr6_route_fdfs_labels(
-                    _dm2k_fdfs or _dm2k_grp_loai, entry.model, _is_15d
+                    _dm2k_fdfs or _dm2k_grp_loai, entry.model,
+                    _merge_bz_suffix_flags(_is_quarter, _is_15d, _dm2k_bz_raw)[1],
                 )
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 _dm2k_target = groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})
@@ -6640,6 +6665,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # RESULT column regardless of the actual test condition.
             if not fdfs:
                 fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
+            # The ``bz`` column on the matched para_pub row is the canonical
+            # source of truth for the ``Q`` / ``15`` routing flags (operators
+            # edit it via the DM management page).  Merge any flag suffix on
+            # bz into the entry-derived flags so that adding ``15`` to bz
+            # routes the result to the LR6 15D column, even when the original
+            # perf-entry's raw_remark predates the suffix edit.
+            _batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
+            _is_quarter, _is_15d = _merge_bz_suffix_flags(
+                _is_quarter, _is_15d, _batch_bz
+            )
             # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
             _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
             _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
@@ -6797,7 +6832,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
                             _feg_fdfs_labels = _lr6_route_fdfs_labels(
-                                _feg_fdfs or _fb_eg["loai"], entry.model, _is_15d
+                                _feg_fdfs or _fb_eg["loai"], entry.model,
+                                _merge_bz_suffix_flags(_is_quarter, _is_15d, _feg_arch_bz)[1],
                             )
                             _feg_target = groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
@@ -6926,7 +6962,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
                         _fb_fdfs_labels = _lr6_route_fdfs_labels(
-                            _fb_fdfs or _fb_grp_loai, entry.model, _is_15d
+                            _fb_fdfs or _fb_grp_loai, entry.model,
+                            _merge_bz_suffix_flags(_is_quarter, _is_15d, _fb_bz_raw)[1],
                         )
                         _fb_target = groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}

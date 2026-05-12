@@ -8,7 +8,10 @@ if (isProduction && (!jwtSecret || jwtSecret === 'plc-control-dev-secret-key')) 
 
 module.exports = {
   port: parseInt(process.env.PORT) || 3001,
-  host: process.env.HOST || '0.0.0.0',
+  // Default to 127.0.0.1 to avoid Windows EACCES errors when port falls in
+  // a reserved range (Hyper-V/WSL/Docker). Override with HOST=0.0.0.0 in
+  // .env to expose the service on the LAN.
+  host: process.env.HOST || '127.0.0.1',
   jwt: {
     secret: jwtSecret || 'plc-control-dev-secret-key',
     expiresIn: process.env.JWT_EXPIRES_IN || '8h',

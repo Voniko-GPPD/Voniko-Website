@@ -1483,6 +1483,18 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # to the daily column instead of the dedicated 15D column.
     if bool(_15D_COL_PATTERN.search(f)) != bool(_15D_COL_PATTERN.search(h)):
         return False
+    # When both sides carry the ``15D`` marker, strip it (and surrounding
+    # whitespace) from both before the remaining comparisons.  This lets the
+    # end-anchored voltage-suffix regex operate on a string that ends with the
+    # voltage (e.g. "–1.05V") rather than "–1.05V 15D", which the ``$``-anchored
+    # pattern cannot strip.  Without this step the canonical label
+    # "(1500mW2s,650mW28s)10T/h,24h/d 15D" would not match the template column
+    # header "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D" because the embedded
+    # voltage precedes the 15D marker, so neither the exact match nor the
+    # voltage-stripping branch could unify the two strings.
+    if _15D_COL_PATTERN.search(f):
+        f = _15D_COL_PATTERN.sub("", f).strip()
+        h = _15D_COL_PATTERN.sub("", h).strip()
     # Exact match after normalisation
     if f == h:
         return True

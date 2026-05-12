@@ -299,3 +299,35 @@ def test_perf_fdfs_matches_header_does_not_cross_match_daily_and_15d() -> None:
     assert not m._perf_fdfs_matches_header(
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V", fifteen
     )
+
+
+def test_perf_fdfs_matches_header_15d_with_embedded_voltage() -> None:
+    """Regression: _perf_fdfs_matches_header must match the canonical 15D fdfs
+    label (no voltage suffix) against a template column header that embeds the
+    voltage suffix *before* the 15D marker.
+
+    The Excel template uses headers like
+    "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D" while the canonical routed
+    label is "(1500mW2s,650mW28s)10T/h,24h/d 15D" (no voltage, no space after
+    ``)``.  Before the fix the end-anchored voltage-strip regex could not strip
+    "-1.05V" because " 15D" followed it, so the match returned False and the
+    15D column in the generated Excel was left empty (Requests #237/#238/#239).
+    """
+    fifteen = m._LR6_1500MW_15D_LABEL  # "(1500mW2s,650mW28s)10T/h,24h/d 15D"
+
+    # Canonical 15D label vs template header with embedded voltage
+    assert m._perf_fdfs_matches_header(
+        fifteen, "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D"
+    )
+    assert m._perf_fdfs_matches_header(
+        fifteen, "(1500mW2s,650mW28s) 10T/h,24h/d-1.0V 15D"
+    )
+
+    # Cross-match checks must still be rejected even after the fix
+    daily = m._LR6_1500MW_DAILY_LABEL
+    assert not m._perf_fdfs_matches_header(
+        "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D", daily
+    )
+    assert not m._perf_fdfs_matches_header(
+        daily, "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D"
+    )

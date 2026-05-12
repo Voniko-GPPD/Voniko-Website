@@ -659,7 +659,18 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> 
                                 cursor = conn.cursor()
                                 cursor.execute(_inline_params(sql, params))
                             except (pyodbc.Error, ValueError) as inline_exc:
-                                logger.warning(
+                                # Use DEBUG for 07002 ("Too few parameters") because that
+                                # error means a column name is not recognised in this
+                                # database schema — the schema-probe multi-query pattern
+                                # in _read_dm2000_ls_multi intentionally tries both the
+                                # cdid-based and archname-based schemas and handles the
+                                # exception gracefully, so the WARNING level is misleading.
+                                log_level = (
+                                    logger.debug
+                                    if "07002" in str(inline_exc) or "07002" in str(exc)
+                                    else logger.warning
+                                )
+                                log_level(
                                     "Inline parameter fallback failed (%s); re-raising original execute error (%s)",
                                     inline_exc,
                                     exc,

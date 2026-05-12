@@ -5864,7 +5864,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
     groups: dict[str, dict] = {}
 
     for entry in payload.entries:
-        if not (entry.batch_id or "").strip() and not entry.dm2000_archname:
+        if (
+            not (entry.batch_id or "").strip()
+            and not (entry.raw_remark or "").strip()
+            and not entry.dm2000_archname
+        ):
             continue
 
         # ── DM2000 path: when dm2000_archname is set, read from DM2000 instead of DMP ──

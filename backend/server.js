@@ -185,10 +185,13 @@ const server = require('http').createServer(app);
 initBatteryWebSocket(server);
 
 server.listen(config.port, config.host, () => {
+  const displayHost = (config.host === '0.0.0.0' || config.host === '127.0.0.1')
+    ? 'localhost'
+    : config.host;
   logger.info(`PLC Control server started`, {
     host: config.host,
     port: config.port,
-    url: `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${config.port}`,
+    url: `http://${displayHost}:${config.port}`,
   });
 });
 

@@ -245,7 +245,12 @@ if errorlevel 1 (
     echo            runs automatically whether node_modules is new or already present)
     echo         2. Missing or invalid backend\.env  (check JWT_SECRET etc.)
     echo         3. Port 3001 still occupied -- re-run start.bat
-    echo         4. Run: pm2 logs voniko-backend --lines 100  for full error details
+    echo         4. EACCES "permission denied" on port 3001 -- the port is in a Windows
+    echo            reserved range (Hyper-V/WSL/Docker). Default HOST is now 127.0.0.1
+    echo            which avoids this; if you set HOST=0.0.0.0 in backend\.env, either
+    echo            revert it or run:  netsh interface ipv4 show excludedportrange protocol=tcp
+    echo            and pick a free port via PORT= in backend\.env
+    echo         5. Run: pm2 logs voniko-backend --lines 100  for full error details
     echo.
 ) else (
     title Voniko-Web Deployment -- RUNNING

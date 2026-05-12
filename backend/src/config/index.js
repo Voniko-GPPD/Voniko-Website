@@ -8,10 +8,12 @@ if (isProduction && (!jwtSecret || jwtSecret === 'plc-control-dev-secret-key')) 
 
 module.exports = {
   port: parseInt(process.env.PORT) || 3001,
-  // Default to 127.0.0.1 to avoid Windows EACCES errors when port falls in
-  // a reserved range (Hyper-V/WSL/Docker). Override with HOST=0.0.0.0 in
-  // .env to expose the service on the LAN.
-  host: process.env.HOST || '127.0.0.1',
+  // Bind to all interfaces by default so the backend is reachable from other
+  // machines on the LAN (same behaviour as the Vite frontend).
+  // On Windows, if the port falls in a Hyper-V/WSL/Docker reserved range you
+  // may get EACCES; override with HOST=127.0.0.1 in .env to restrict to
+  // localhost only, then access the API through the Vite proxy instead.
+  host: process.env.HOST || '0.0.0.0',
   jwt: {
     secret: jwtSecret || 'plc-control-dev-secret-key',
     expiresIn: process.env.JWT_EXPIRES_IN || '8h',

@@ -7,11 +7,12 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 3001,
-        // Bind to loopback by default. Binding to 0.0.0.0 on Windows often
-        // fails with EACCES when the port falls in a reserved range
-        // (Hyper-V/WSL/Docker excluded ranges). Override via backend/.env
-        // (HOST=0.0.0.0) if LAN access is required.
-        HOST: '127.0.0.1',
+        // Bind to all interfaces so the backend is reachable from other machines
+        // on the LAN (same as the frontend which uses --host 0.0.0.0).
+        // On Windows, if port 3001 falls in a Hyper-V/WSL/Docker reserved range
+        // you may get EACCES; in that case either change PORT or set HOST=127.0.0.1
+        // in backend/.env to restrict to localhost only.
+        HOST: '0.0.0.0',
       },
       instances: 1,
       exec_mode: 'fork',

@@ -8,6 +8,8 @@ cd /d "%~dp0"
 :: ============================================================
 
 set DMP_STATION_NAME=DMP1
+:: Dung localhost khi backend chay tren cung may - tranh bi mat ket noi khi IP thay doi sau khi reset may:
+:: set VONIKO_SERVER_URL=http://localhost:3001
 set VONIKO_SERVER_URL=http://10.4.1.31:3001
 set DMP_DATA_DIR=C:\DMP\Data
 set DMP_STATION_PORT=8766

@@ -114,6 +114,12 @@ _SCHEMA_TABLE_WHITELIST = {
 def _get_local_ip() -> str:
     try:
         host = VONIKO_SERVER_URL.split("://")[-1].split(":")[0].split("/")[0]
+        # When the server URL points to loopback (e.g. localhost or 127.0.0.1),
+        # routing to that address would return 127.0.0.1 rather than the real
+        # LAN IP.  Use a well-known external address so that the OS picks the
+        # correct outgoing interface, giving us the actual LAN IP.
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            host = "8.8.8.8"
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((host, 80))
         ip = s.getsockname()[0]

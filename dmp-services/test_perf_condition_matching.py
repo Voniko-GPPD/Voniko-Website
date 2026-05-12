@@ -268,3 +268,34 @@ def test_lr6_freq_groups_both_in_everyday() -> None:
     group / filter chip)."""
     assert m._get_condition_freq_group(m._LR6_1500MW_DAILY_LABEL, "LR6") == "everyday"
     assert m._get_condition_freq_group(m._LR6_1500MW_15D_LABEL, "LR6") == "everyday"
+
+
+def test_perf_fdfs_matches_header_does_not_cross_match_daily_and_15d() -> None:
+    """Regression test: ``_perf_fdfs_matches_header`` must NOT match the daily
+    LR6 1500mW2s/650mW28s fdfs label against the 15D column header (nor the
+    15D fdfs label against the daily header).
+
+    Without the ``15D`` guard the whole-word fallback would match because the
+    daily label is a whole-word prefix inside the 15D label.  This caused 15D
+    data to be written to the daily column and the 15D column to remain empty
+    (Requests #237 / #238 regression)."""
+    daily = m._LR6_1500MW_DAILY_LABEL
+    fifteen = m._LR6_1500MW_15D_LABEL
+
+    # Same label must match itself
+    assert m._perf_fdfs_matches_header(daily, daily)
+    assert m._perf_fdfs_matches_header(fifteen, fifteen)
+
+    # Cross-match: daily fdfs against 15D header — must NOT match
+    assert not m._perf_fdfs_matches_header(daily, fifteen)
+    # Cross-match: 15D fdfs against daily header — must NOT match
+    assert not m._perf_fdfs_matches_header(fifteen, daily)
+
+    # Voltage-suffixed forms of the daily fdfs still match the daily header
+    assert m._perf_fdfs_matches_header(
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V", daily
+    )
+    # Voltage-suffixed daily fdfs must NOT match the 15D header
+    assert not m._perf_fdfs_matches_header(
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V", fifteen
+    )

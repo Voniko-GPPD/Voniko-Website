@@ -1135,8 +1135,9 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         # measurement for the condition.  The 15-day column is shown
         # immediately to the right of the daily column under the same
         # ``Everyday`` group; routing between them is performed by
-        # ``_lr6_route_fdfs_label`` based on the operator's ``15`` remark
-        # suffix.
+        # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
+        # suffix (``15`` writes BOTH the daily and 15-day columns; daily
+        # measurements without ``15`` write the daily column only).
         "(1500mW2s,650mW28s)10T/h,24h/d",
         "(1500mW2s,650mW28s)10T/h,24h/d 15D",
         "3.9ohm 1h/d-0.8V",
@@ -1192,8 +1193,8 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
         # filter is unaffected; column-level distinction comes from the
         # distinct labels (the ``15D`` suffix is the visible column-header
         # marker), and routing between them is performed by
-        # ``_lr6_route_fdfs_label`` based on the operator's ``15`` remark
-        # suffix.
+        # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
+        # suffix (15-day measurements write to BOTH columns).
         "(1500mW2s,650mW28s)10T/h,24h/d":                      "everyday",
         "(1500mW2s,650mW28s)10T/h,24h/d 15D":                  "everyday",
         "3.9ohm 1h/d-0.8V":                                    "everyweek",
@@ -1344,30 +1345,46 @@ _LR6_1500MW_DAILY_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d"
 _LR6_1500MW_15D_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d 15D"
 
 
-def _lr6_route_fdfs_label(fdfs_label: str, model: str, is_15d: bool) -> str:
-    """Route an LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` fdfs label to its
-    daily or 15-day column.
+def _lr6_route_fdfs_labels(fdfs_label: str, model: str, is_15d: bool) -> list[str]:
+    """Route an LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` fdfs label to the
+    set of report columns that should receive the measurement.
 
-    For non-LR6 models or for fdfs labels that don't match the special
-    1500mW2s/650mW28s condition, *fdfs_label* is returned unchanged.
+    Returns a list of one or two canonical column labels:
+
+    * Non-LR6 models, or LR6 fdfs labels that don't match the special
+      1500mW2s/650mW28s condition → ``[fdfs_label]`` unchanged.
+    * LR6 + matching condition + ``is_15d=False`` → ``[daily]`` only.
+      This includes the quarterly case: a quarterly measurement (``Q``
+      suffix, no ``15`` suffix) targets the normal daily column only.
+      The 15-day column is exclusive and protected — only entries with
+      the ``15`` remark suffix may write into it.
+    * LR6 + matching condition + ``is_15d=True`` → ``[daily, 15D]``.
+      A 15-day-cadence measurement is also a valid daily measurement of
+      the same physical condition, so the result is written to BOTH the
+      daily column and the dedicated 15-day column at the same time.
 
     The two columns share the same physical discharge condition; the
     distinction is purely operational (daily measurement vs. 15-day-cadence
     measurement).  In the DMP database both end up with the same fdfs/jstj
     string (sometimes with a ``-1.05V`` or ``-1.0V`` endpoint-voltage suffix),
-    so this helper canonicalises the label based on the operator's ``15``
+    so this helper canonicalises the label(s) based on the operator's ``15``
     remark suffix instead of the endpoint voltage.
     """
     if not fdfs_label:
-        return fdfs_label
+        return [fdfs_label]
     if model.strip().upper() != "LR6":
-        return fdfs_label
+        return [fdfs_label]
     # Match the base condition with or without an endpoint-voltage suffix
     # (e.g. ``-1.05V``/``-1.0V``).  Use the same fuzzy matcher the template
     # ordering relies on so spacing/bracket variations are tolerated.
     if not _perf_fdfs_matches_template(fdfs_label, _LR6_1500MW_DAILY_LABEL):
-        return fdfs_label
-    return _LR6_1500MW_15D_LABEL if is_15d else _LR6_1500MW_DAILY_LABEL
+        return [fdfs_label]
+    if is_15d:
+        # Daily comes first so column ordering / first-seen iteration
+        # remains deterministic; both labels are emitted with the same
+        # perf payload by callers.
+        return [_LR6_1500MW_DAILY_LABEL, _LR6_1500MW_15D_LABEL]
+    return [_LR6_1500MW_DAILY_LABEL]
 
 
 # Suffix tokens that may appear at the end of an operator-entered remark to
@@ -6294,12 +6311,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _dm2k_model_up in _dm2k_no_ch
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
-                        _eg_fdfs_label = _lr6_route_fdfs_label(
+                        _eg_fdfs_labels = _lr6_route_fdfs_labels(
                             _eg_fdfs or _dm2k_eg["loai"], entry.model, _is_15d
                         )
-                        groups.setdefault(_eg_sheet, {}).setdefault(
+                        _eg_target = groups.setdefault(_eg_sheet, {}).setdefault(
                             (_eg_row_label, _dm2k_eg["loai"]), {}
-                        )[_eg_fdfs_label] = _eg_perf
+                        )
+                        for _eg_fdfs_label in _eg_fdfs_labels:
+                            _eg_target[_eg_fdfs_label] = _eg_perf
                 continue  # per-group DMP-mirroring done; skip single-archive + DMP paths
 
             # ── No explicit groups: single-archive path (unchanged) ─────────────────────────
@@ -6469,11 +6488,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 else:
                     _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
-                _dm2k_fdfs_label = _lr6_route_fdfs_label(
+                _dm2k_fdfs_labels = _lr6_route_fdfs_labels(
                     _dm2k_fdfs or _dm2k_grp_loai, entry.model, _is_15d
                 )
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
-                groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
+                _dm2k_target = groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})
+                for _dm2k_fdfs_label in _dm2k_fdfs_labels:
+                    _dm2k_target[_dm2k_fdfs_label] = _dm2k_perf
 
             continue  # Skip DMP lookup path for this entry
 
@@ -6740,12 +6761,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 if _fb_model_up in _fb_no_ch_m
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
-                            _feg_fdfs_label = _lr6_route_fdfs_label(
+                            _feg_fdfs_labels = _lr6_route_fdfs_labels(
                                 _feg_fdfs or _fb_eg["loai"], entry.model, _is_15d
                             )
-                            groups.setdefault(_feg_sheet, {}).setdefault(
+                            _feg_target = groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
-                            )[_feg_fdfs_label] = _feg_perf
+                            )
+                            for _feg_fdfs_label in _feg_fdfs_labels:
+                                _feg_target[_feg_fdfs_label] = _feg_perf
                     continue  # _fb_ per-group DMP-mirroring done; skip rest of DMP path
 
                 # No explicit groups: single-archive path
@@ -6867,12 +6890,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _fb_model_upper in _fb_no_chuyen
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
-                        _fb_fdfs_label = _lr6_route_fdfs_label(
+                        _fb_fdfs_labels = _lr6_route_fdfs_labels(
                             _fb_fdfs or _fb_grp_loai, entry.model, _is_15d
                         )
-                        groups.setdefault(_fb_sheet, {}).setdefault(
+                        _fb_target = groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}
-                        )[_fb_fdfs_label] = _fb_perf
+                        )
+                        for _fb_fdfs_label in _fb_fdfs_labels:
+                            _fb_target[_fb_fdfs_label] = _fb_perf
                     continue  # DM2000 path handled; skip rest of DMP path
 
             # Both DMP and DM2000 lookups failed.
@@ -6984,14 +7009,18 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # HP→HP, UD→UD) matched by chuyen.
             effective_loai = _dmp_grp["loai"]
 
-            # fdfs label for column matching, with LR6 daily/15-day routing
+            # fdfs label(s) for column matching, with LR6 daily/15-day routing
             # applied for the special ``(1500mW2s,650mW28s)10T/h,24h/d`` case.
-            fdfs_label = _lr6_route_fdfs_label(
+            # 15-day measurements emit BOTH the daily and 15D labels so the
+            # same perf row appears in both columns.
+            fdfs_labels = _lr6_route_fdfs_labels(
                 fdfs if fdfs else effective_loai, entry.model, _is_15d
             )
 
             row_key = (row_label, effective_loai)
-            groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf
+            _row_target = groups.setdefault(sheet_key, {}).setdefault(row_key, {})
+            for fdfs_label in fdfs_labels:
+                _row_target[fdfs_label] = perf
 
     return groups
 

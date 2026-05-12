@@ -1209,6 +1209,11 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
 # same as template labels that use () when doing template-order lookups.
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
 
+# Compiled once at import time: matches one or more whitespace, comma, or dot
+# characters.  Used by ``_perf_fdfs_matches_template`` to normalise schedule
+# separators before its final compact-comparison fallback.
+_SEPARATOR_RE = re.compile(r"[\s.,]+")
+
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -1261,9 +1266,8 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     # ``[\s.,]`` from both sides bridges that gap without enabling the
     # leading-token false matches the function intentionally avoids
     # (``1000mA24h/d`` ≠ ``1000mA10s/m1h/d``, ``100mA1h/d`` ≠ ``1000mA24h/d``).
-    _sep_re = re.compile(r"[\s.,]+")
-    f_compact = _sep_re.sub("", _vsuf.sub("", f))
-    h_compact = _sep_re.sub("", _vsuf.sub("", h))
+    f_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", f))
+    h_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", h))
     if f_compact and h_compact and f_compact == h_compact:
         return True
 

@@ -20,14 +20,9 @@ is the endpoint voltage (``'0.900'``, ``'7.500'``, …).
 
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import dmp_service as m  # noqa: E402
+import dmp_service as m
 
 
 # --------------------------------------------------------------------------- #

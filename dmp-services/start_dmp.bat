@@ -8,7 +8,12 @@ cd /d "%~dp0"
 :: ============================================================
 
 set DMP_STATION_NAME=DMP1
-set VONIKO_SERVER_URL=http://10.4.1.31:3001
+:: URL cua may chu Voniko:
+::   - Neu tram DMP chay CUNG MAY voi may chu: dung http://127.0.0.1:3001
+::   - Neu tram DMP chay KHAC MAY voi may chu:
+::       dung IP LAN cua may chu (vd: http://10.4.1.173:3001)
+::       VA phai them HOST=0.0.0.0 vao file backend\.env tren may chu
+set VONIKO_SERVER_URL=http://127.0.0.1:3001
 set DMP_DATA_DIR=C:\DMP\Data
 set DMP_STATION_PORT=8766
 

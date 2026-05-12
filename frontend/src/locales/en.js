@@ -538,7 +538,7 @@ export default {
   dmpSelectStation: 'Select online DMP station',
   dmpOnline: 'online',
   dmpOffline: 'offline',
-  dmpNoStations: 'No online DMP stations found. Run hardware-services/dmp_service.py on the DMP client machine.',
+  dmpNoStations: 'No online DMP stations found. Run dmp-services/start_dmp.bat on the DMP client machine.',
   dmpDatabase: 'DMP Database',
   dmpChartTab: 'Chart',
   dmpHistoryDataTab: 'History Data',

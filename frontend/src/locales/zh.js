@@ -538,7 +538,7 @@ export default {
   dmpSelectStation: '选择在线DMP站点',
   dmpOnline: '在线',
   dmpOffline: '离线',
-  dmpNoStations: '未找到在线DMP站点。请在DMP客户端机器上运行 hardware-services/dmp_service.py。',
+  dmpNoStations: '未找到在线DMP站点。请在DMP客户端机器上运行 dmp-services/start_dmp.bat。',
   dmpDatabase: 'DMP 数据库',
   dmpChartTab: '图表',
   dmpHistoryDataTab: '历史数据',

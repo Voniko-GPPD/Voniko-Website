@@ -538,7 +538,7 @@ export default {
   dmpSelectStation: 'Chọn trạm DMP trực tuyến',
   dmpOnline: 'trực tuyến',
   dmpOffline: 'ngoại tuyến',
-  dmpNoStations: 'Không tìm thấy trạm DMP trực tuyến. Hãy chạy hardware-services/dmp_service.py trên máy khách DMP.',
+  dmpNoStations: 'Không tìm thấy trạm DMP trực tuyến. Hãy chạy dmp-services/start_dmp.bat trên máy khách DMP.',
   dmpDatabase: 'Cơ sở dữ liệu DMP',
   dmpChartTab: 'Biểu đồ',
   dmpHistoryDataTab: 'Dữ liệu lịch sử',

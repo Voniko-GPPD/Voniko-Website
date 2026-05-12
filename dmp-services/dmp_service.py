@@ -1136,8 +1136,8 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         # immediately to the right of the daily column under the same
         # ``Everyday`` group; routing between them is performed by
         # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
-        # suffix (``15`` writes BOTH the daily and 15-day columns; daily
-        # measurements without ``15`` write the daily column only).
+        # suffix (``15`` writes the 15-day column ONLY; daily measurements
+        # without ``15`` write the daily column only).
         "(1500mW2s,650mW28s)10T/h,24h/d",
         "(1500mW2s,650mW28s)10T/h,24h/d 15D",
         "3.9ohm 1h/d-0.8V",
@@ -1194,7 +1194,8 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
         # distinct labels (the ``15D`` suffix is the visible column-header
         # marker), and routing between them is performed by
         # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
-        # suffix (15-day measurements write to BOTH columns).
+        # suffix (15-day measurements write to the 15-day column ONLY,
+        # daily measurements write to the daily column ONLY).
         "(1500mW2s,650mW28s)10T/h,24h/d":                      "everyday",
         "(1500mW2s,650mW28s)10T/h,24h/d 15D":                  "everyday",
         "3.9ohm 1h/d-0.8V":                                    "everyweek",
@@ -1358,10 +1359,13 @@ def _lr6_route_fdfs_labels(fdfs_label: str, model: str, is_15d: bool) -> list[st
       suffix, no ``15`` suffix) targets the normal daily column only.
       The 15-day column is exclusive and protected — only entries with
       the ``15`` remark suffix may write into it.
-    * LR6 + matching condition + ``is_15d=True`` → ``[daily, 15D]``.
-      A 15-day-cadence measurement is also a valid daily measurement of
-      the same physical condition, so the result is written to BOTH the
-      daily column and the dedicated 15-day column at the same time.
+    * LR6 + matching condition + ``is_15d=True`` → ``[15D]`` only.
+      A 15-day-cadence measurement is routed exclusively to the
+      dedicated 15-day column on the right; it does NOT also populate
+      the daily column.  This keeps the two columns visually distinct
+      (daily measurements on the left, 15-day-cadence measurements on
+      the right) instead of having the 15-day value overwrite/duplicate
+      into the daily slot.
 
     The two columns share the same physical discharge condition; the
     distinction is purely operational (daily measurement vs. 15-day-cadence
@@ -1380,10 +1384,12 @@ def _lr6_route_fdfs_labels(fdfs_label: str, model: str, is_15d: bool) -> list[st
     if not _perf_fdfs_matches_template(fdfs_label, _LR6_1500MW_DAILY_LABEL):
         return [fdfs_label]
     if is_15d:
-        # Daily comes first so column ordering / first-seen iteration
-        # remains deterministic; both labels are emitted with the same
-        # perf payload by callers.
-        return [_LR6_1500MW_DAILY_LABEL, _LR6_1500MW_15D_LABEL]
+        # 15-day-cadence measurement: route ONLY to the dedicated 15D
+        # column on the right.  Do not also write the daily column —
+        # that would visually overwrite/duplicate the value into the
+        # left-hand daily slot, which is exactly what the operator
+        # wants to avoid by tagging the remark with ``15``.
+        return [_LR6_1500MW_15D_LABEL]
     return [_LR6_1500MW_DAILY_LABEL]
 
 
@@ -7011,8 +7017,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # fdfs label(s) for column matching, with LR6 daily/15-day routing
             # applied for the special ``(1500mW2s,650mW28s)10T/h,24h/d`` case.
-            # 15-day measurements emit BOTH the daily and 15D labels so the
-            # same perf row appears in both columns.
+            # 15-day measurements emit ONLY the 15D label, so the row
+            # appears exclusively in the dedicated 15-day column on the
+            # right (it does not also overwrite the daily column).
             fdfs_labels = _lr6_route_fdfs_labels(
                 fdfs if fdfs else effective_loai, entry.model, _is_15d
             )

@@ -220,19 +220,18 @@ def test_lr6_route_fdfs_labels_routes_to_daily_by_default() -> None:
         assert m._lr6_route_fdfs_labels(raw, "LR6", False) == [daily]
 
 
-def test_lr6_route_fdfs_labels_writes_both_columns_when_15d() -> None:
+def test_lr6_route_fdfs_labels_writes_only_15d_column_when_15d() -> None:
     """A 15-day measurement (``is_15d=True``) on the LR6 1500mW2s/650mW28s
-    condition writes the result into BOTH the daily column and the
-    dedicated 15-day column at the same time.  Daily comes first so the
-    on-screen left-to-right column ordering ``Daily | 15-day`` is preserved
-    when callers iterate insertion order."""
-    daily = m._LR6_1500MW_DAILY_LABEL
+    condition writes the result into the dedicated 15-day column ONLY;
+    it does NOT also write the daily column.  This keeps the two columns
+    visually distinct (daily on the left, 15-day on the right) instead of
+    having the 15-day value overwrite/duplicate into the daily slot."""
     fifteen = m._LR6_1500MW_15D_LABEL
     for raw in (
         "(1500mW2s,650mW28s)10T/h,24h/d",
         "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
     ):
-        assert m._lr6_route_fdfs_labels(raw, "LR6", True) == [daily, fifteen]
+        assert m._lr6_route_fdfs_labels(raw, "LR6", True) == [fifteen]
 
 
 def test_lr6_route_fdfs_labels_only_applies_to_lr6() -> None:

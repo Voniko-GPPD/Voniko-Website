@@ -1449,6 +1449,12 @@ def _resolve_entry_flags(entry) -> tuple[str, bool, bool]:
     return (clean, is_quarter, is_15d)
 
 
+# Matches the standalone ``15D`` (or ``15d``) column marker used to distinguish
+# the LR6 15-day-cadence column from the adjacent daily column.  Used by
+# ``_perf_fdfs_matches_header`` to prevent cross-matching between the two columns.
+_15D_COL_PATTERN: re.Pattern = re.compile(r'(?<![0-9A-Za-z])15d(?![0-9A-Za-z])')
+
+
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     """Return True if *fdfs* label is a reasonable match for *header* text.
 
@@ -1475,8 +1481,7 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # "(1500mW2s,650mW28s)10T/h,24h/d" because the daily label is a
     # whole-word prefix inside the 15D label, causing 15D data to be written
     # to the daily column instead of the dedicated 15D column.
-    _15d_col_re = re.compile(r'(?<![0-9A-Za-z])15d(?![0-9A-Za-z])')
-    if bool(_15d_col_re.search(f)) != bool(_15d_col_re.search(h)):
+    if bool(_15D_COL_PATTERN.search(f)) != bool(_15D_COL_PATTERN.search(h)):
         return False
     # Exact match after normalisation
     if f == h:

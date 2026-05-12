@@ -9,6 +9,9 @@ module.exports = {
         PORT: 3001,
         // Bind to all interfaces so the backend is reachable from other machines
         // on the LAN (same as the frontend which uses --host 0.0.0.0).
+        // Ensure the host machine's firewall restricts port 3001 to trusted
+        // networks only — the application requires a valid JWT for every API
+        // call, but defence-in-depth at the network level is recommended.
         // On Windows, if port 3001 falls in a Hyper-V/WSL/Docker reserved range
         // you may get EACCES; in that case either change PORT or set HOST=127.0.0.1
         // in backend/.env to restrict to localhost only.

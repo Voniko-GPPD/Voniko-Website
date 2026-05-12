@@ -2390,6 +2390,19 @@ def get_batch_years():
     return {"years": sorted(years, reverse=True)}
 
 
+def _dmp_is_empty(v) -> bool:
+    """Return True when a DMP field value should be treated as absent.
+
+    DMP databases use a single dash "-" as a null/empty placeholder for string
+    fields (distinct from the DM2000 double-dash "--").  The DMP software also
+    writes the integer/string 0 for flag fields like para_singl.smark when no
+    remark has been set, and the string "None" for unconfigured text fields.
+    """
+    if v is None:
+        return True
+    return str(v).strip() in ("", "-", "--", "0", "None", "none")
+
+
 @app.get("/batches")
 def get_batches(year: Optional[int] = None):
     try:
@@ -2400,17 +2413,6 @@ def get_batches(year: Optional[int] = None):
         except pyodbc.Error as exc:
             logger.error("get_batches: fallback query also failed: %s", exc)
             raise HTTPException(status_code=500, detail="Database query failed") from exc
-
-    # DMP databases use a single dash "-" as a null/empty placeholder for string
-    # fields (distinct from the DM2000 double-dash "--").  The DMP software also
-    # writes the integer/string 0 for flag fields like para_singl.smark when no
-    # remark has been set, and the string "None" for unconfigured text fields.
-    # This helper returns True when a value should be treated as absent so that
-    # fallback logic can run.
-    def _dmp_is_empty(v) -> bool:
-        if v is None:
-            return True
-        return str(v).strip() in ("", "-", "--", "0", "None", "none")
 
     # Build a channel-count map from para_singl in a single query so every batch
     # row can be annotated without an N+1 per-batch lookup.

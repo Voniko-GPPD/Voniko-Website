@@ -1449,6 +1449,12 @@ def _resolve_entry_flags(entry) -> tuple[str, bool, bool]:
     return (clean, is_quarter, is_15d)
 
 
+# Matches the standalone ``15D`` (or ``15d``) column marker used to distinguish
+# the LR6 15-day-cadence column from the adjacent daily column.  Used by
+# ``_perf_fdfs_matches_header`` to prevent cross-matching between the two columns.
+_15D_COL_PATTERN: re.Pattern = re.compile(r'(?<![0-9A-Za-z])15d(?![0-9A-Za-z])')
+
+
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     """Return True if *fdfs* label is a reasonable match for *header* text.
 
@@ -1465,6 +1471,17 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     f = fdfs.lower().strip()
     h = clean_header.lower().strip()
     if not f or not h:
+        return False
+    # ``15D`` is an exclusive column marker that distinguishes the LR6 15-day-
+    # cadence column from the adjacent daily column.  A label that carries the
+    # ``15D`` suffix must ONLY match a header that also carries ``15D`` (and
+    # vice versa).  Without this guard the whole-word fallback below would
+    # incorrectly match the 15D fdfs label
+    # "(1500mW2s,650mW28s)10T/h,24h/d 15D" against the daily column header
+    # "(1500mW2s,650mW28s)10T/h,24h/d" because the daily label is a
+    # whole-word prefix inside the 15D label, causing 15D data to be written
+    # to the daily column instead of the dedicated 15D column.
+    if bool(_15D_COL_PATTERN.search(f)) != bool(_15D_COL_PATTERN.search(h)):
         return False
     # Exact match after normalisation
     if f == h:

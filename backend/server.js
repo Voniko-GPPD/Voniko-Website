@@ -195,4 +195,24 @@ server.listen(config.port, config.host, () => {
   });
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EACCES') {
+    logger.error(
+      `Cannot bind to port ${err.port}: permission denied.\n` +
+      `  On Windows this usually means the port is reserved by Hyper-V, WSL, or Docker.\n` +
+      `  Fix: set a different PORT in backend/.env (e.g. PORT=3100) and restart.`,
+      { code: err.code, port: err.port }
+    );
+  } else if (err.code === 'EADDRINUSE') {
+    logger.error(
+      `Port ${err.port} is already in use by another process.\n` +
+      `  Fix: stop the other process or set a different PORT in backend/.env.`,
+      { code: err.code, port: err.port }
+    );
+  } else {
+    logger.error(`Server error: ${err.message}`, { code: err.code });
+  }
+  process.exit(1);
+});
+
 module.exports = app;

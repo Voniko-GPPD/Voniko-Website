@@ -52,7 +52,7 @@
 │  │     Frontend      │      │               Backend                    │ │
 │  │  React 18 + Vite  │◀────▶│  Node.js + Express                       │ │
 │  │  Ant Design 5     │      │  REST API + SSE + WebSocket (/ws)        │ │
-│  │  ECharts          │      │  (Port 3001)                             │ │
+│  │  ECharts          │      │  (Port 3100)                             │ │
 │  │  (Port 3000)      │      └───────┬───────────┬──────────┬───────────┘ │
 │  └───────────────────┘              │           │          │             │
 │                              ┌──────▼──────┐    │          │             │
@@ -117,7 +117,7 @@ Voniko-Website/
 │   │                           # Barcode, Battery, CountBatteries, DMP
 │   ├── index.html
 │   ├── package.json
-│   └── vite.config.js          # Proxy: /api + /ws → localhost:3001
+│   └── vite.config.js          # Proxy: /api + /ws → localhost:3100
 │
 ├── hardware-services/          # Python - Kiểm tra pin IT8511A+
 │   ├── battery_service.py      # FastAPI — SCPI, OCV/CCV, SSE, Excel
@@ -232,7 +232,7 @@ Truy cập: `http://localhost:3000` hoặc `http://<IP-máy-chủ>:3000`
 
 ### 6. Chạy thủ công (development)
 
-**Backend** (port 3001):
+**Backend** (port 3100):
 ```bash
 cd backend && node server.js
 ```
@@ -451,7 +451,7 @@ http://192.168.1.100:3000
 # backend/.env
 
 # Server
-PORT=3001
+PORT=3100
 HOST=0.0.0.0
 
 # JWT

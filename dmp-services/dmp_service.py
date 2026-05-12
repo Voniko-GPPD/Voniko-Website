@@ -644,8 +644,11 @@ def _acquire_query_lock():
 def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> list[dict]:
     """Run an Access query with bounded concurrency and short HY000 retries.
 
-    Retries are only applied to transient HY000 driver errors using a linear
-    backoff of 0.3s * attempt and preserve existing HYC00 inline fallback.
+    Retries are applied to transient HY000 driver errors and UnicodeDecodeError
+    (raised by the Access ODBC driver when it reads an MDB file that is being
+    atomically replaced by the cache-refresh logic, resulting in a briefly
+    truncated read).  Both use a linear backoff of 0.3s * attempt.
+    The HYC00 inline fallback is preserved.
     """
     conn_str = (
         r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
@@ -686,11 +689,12 @@ def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> 
                             raise
                     columns = [col[0] for col in cursor.description] if cursor.description else []
                     return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except pyodbc.Error as exc:
-            err_str = str(exc)
-            if "HY000" in err_str and attempt_num <= retries:
+        except (pyodbc.Error, UnicodeDecodeError) as exc:
+            err_str = str(exc) if isinstance(exc, pyodbc.Error) else ""
+            is_transient = isinstance(exc, UnicodeDecodeError) or "HY000" in err_str
+            if is_transient and attempt_num <= retries:
                 wait = 0.3 * attempt_num
-                logger.debug("HY000 on attempt %d, retrying in %.1fs: %s", attempt_num, wait, exc)
+                logger.debug("Transient error on attempt %d, retrying in %.1fs: %s", attempt_num, wait, exc)
                 time.sleep(wait)
                 continue
             raise

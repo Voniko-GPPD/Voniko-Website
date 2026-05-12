@@ -166,3 +166,95 @@ def test_template_match_does_not_collide_on_leading_token() -> None:
     assert not m._perf_fdfs_matches_template(
         "5.1ohm 1h/d-0.8V", "3.9ohm 1h/d-0.8V"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Operator remark suffixes (Q / 15) and LR6 daily/15-day routing
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "raw,expected_clean,expected_q,expected_15d",
+    [
+        # No suffixes
+        ("LR6 UD501 UD502", "LR6 UD501 UD502", False, False),
+        # Quarterly suffix (uppercase + lowercase)
+        ("LR6 UD501 UD502 Q", "LR6 UD501 UD502", True, False),
+        ("LR6 UD501 UD502 q", "LR6 UD501 UD502", True, False),
+        # 15-day suffix
+        ("LR6 UD501 UD502 15", "LR6 UD501 UD502", False, True),
+        # Both suffixes, in either order, with extra spaces
+        ("LR6 UD501  UD502  Q  15", "LR6 UD501 UD502", True, True),
+        ("  LR6 UD501 15 Q  ", "LR6 UD501", True, True),
+        # Identifiers that legitimately contain ``15`` or ``Q`` as part of a
+        # longer token must not be stripped.
+        ("LR6 UD515 UDP502", "LR6 UD515 UDP502", False, False),
+        ("LR6 UDQ501 HP503", "LR6 UDQ501 HP503", False, False),
+        # Empty / None inputs
+        ("", "", False, False),
+        (None, "", False, False),
+        ("   ", "", False, False),
+    ],
+)
+def test_strip_remark_suffixes(
+    raw, expected_clean: str, expected_q: bool, expected_15d: bool
+) -> None:
+    clean, is_q, is_15d = m._strip_remark_suffixes(raw)
+    assert clean == expected_clean
+    assert is_q == expected_q
+    assert is_15d == expected_15d
+
+
+def test_lr6_route_fdfs_label_routes_to_daily_by_default() -> None:
+    """Default (is_15d=False) routes the LR6 1500mW2s/650mW28s condition to
+    the daily column — both the bare condition and the legacy
+    ``-1.05V``/``-1.0V`` voltage-suffixed forms collapse to the same key."""
+    daily = m._LR6_1500MW_DAILY_LABEL
+    for raw in (
+        "(1500mW2s,650mW28s)10T/h,24h/d",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
+    ):
+        assert m._lr6_route_fdfs_label(raw, "LR6", False) == daily
+
+
+def test_lr6_route_fdfs_label_routes_to_15d_when_flagged() -> None:
+    fifteen = m._LR6_1500MW_15D_LABEL
+    for raw in (
+        "(1500mW2s,650mW28s)10T/h,24h/d",
+        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
+    ):
+        assert m._lr6_route_fdfs_label(raw, "LR6", True) == fifteen
+
+
+def test_lr6_route_fdfs_label_only_applies_to_lr6() -> None:
+    """The 15-day cadence column is LR6-only — non-LR6 models always pass
+    the label through unchanged regardless of is_15d."""
+    raw = "(1500mW2s,650mW28s)10T/h,24h/d"
+    for fam in ("LR03", "LR61", "9V"):
+        assert m._lr6_route_fdfs_label(raw, fam, True) == raw
+        assert m._lr6_route_fdfs_label(raw, fam, False) == raw
+
+
+def test_lr6_route_fdfs_label_passes_unrelated_conditions_through() -> None:
+    """Conditions that don't match the 1500mW2s/650mW28s base condition are
+    returned unchanged for LR6 too, regardless of the is_15d flag."""
+    for raw in ("10ohm 24h/d-0.9V", "1000mA 24h/d-0.9V", "3.9ohm 1h/d-0.8V"):
+        assert m._lr6_route_fdfs_label(raw, "LR6", True) == raw
+        assert m._lr6_route_fdfs_label(raw, "LR6", False) == raw
+
+
+def test_lr6_template_has_daily_then_15d_slots() -> None:
+    """Template ordering: daily column comes immediately before 15-day so
+    that the on-screen layout reads ``Daily | 15-day`` left to right."""
+    tmpl = m._TEMPLATE_CONDITION_ORDER["LR6"]
+    daily_idx = tmpl.index(m._LR6_1500MW_DAILY_LABEL)
+    fifteen_idx = tmpl.index(m._LR6_1500MW_15D_LABEL)
+    assert daily_idx + 1 == fifteen_idx
+
+
+def test_lr6_freq_groups_split_daily_and_15d() -> None:
+    """Daily slot is grouped under ``everyday``; 15-day slot under
+    ``every15d``.  Both must classify correctly via the fuzzy matcher."""
+    assert m._get_condition_freq_group(m._LR6_1500MW_DAILY_LABEL, "LR6") == "everyday"
+    assert m._get_condition_freq_group(m._LR6_1500MW_15D_LABEL, "LR6") == "every15d"

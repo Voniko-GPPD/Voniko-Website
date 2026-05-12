@@ -843,10 +843,20 @@ class DmpPerfEntry(BaseModel):
     batch_id: str  # para_pub.id
     model: str  # e.g. "LR6", "LR03", "LR61", "9V"
     groups: list[DmpPerfGroup]
-    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang" | "quarter"
+    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
     report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
     raw_remark: Optional[str] = None  # free-text remark; used as fallback to search para_pub.bz
     dm2000_archname: Optional[str] = None  # DM2000 archive name; when set, data is read from DM2000 instead of DMP
+    # Optional flags derived from raw_remark suffixes; if not provided by the
+    # client they are re-derived server-side from raw_remark using
+    # _strip_remark_suffixes.  ``is_quarter`` (suffix ``Q``) marks a quarterly
+    # measurement: the entry is recorded on a normal date row but is intended
+    # to capture all condition columns measured that day.  ``is_15d`` (suffix
+    # ``15``) marks the LR6-only 15-day variant of the
+    # ``(1500mW2s,650mW28s)10T/h,24h/d`` condition; the value is routed to the
+    # 15-day column instead of the daily column.
+    is_quarter: Optional[bool] = None
+    is_15d: Optional[bool] = None
 
 
 class DmpPerfReportRequest(BaseModel):
@@ -1119,8 +1129,15 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
     "LR6": [
         "10ohm 24h/d-0.9V",
         "1000mA 24h/d-0.9V",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V",
+        # The following two entries cover the SAME physical discharge condition
+        # ``(1500mW2s,650mW28s)10T/h,24h/d``; they are split into two columns
+        # because LR6 has both a daily measurement and a 15-day-cadence
+        # measurement for the condition.  The on-screen header text is the
+        # same; the ``(15d)`` suffix is an internal marker used by
+        # ``_lr6_route_fdfs_label`` to send each entry's value to the right
+        # column based on the operator's ``15`` remark suffix.
+        "(1500mW2s,650mW28s)10T/h,24h/d",
+        "(1500mW2s,650mW28s)10T/h,24h/d (15d)",
         "3.9ohm 1h/d-0.8V",
         "3.9ohm 4m/h 8h/d-0.9V",
         "250mA 1h/d-0.9V",
@@ -1168,8 +1185,13 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
     "LR6": {
         "10ohm 24h/d-0.9V":                                    "everyday",
         "1000mA 24h/d-0.9V":                                   "everyday",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.05V":                "everyday",
-        "(1500mW2s,650mW28s)10T/h,24h/d-1.0V":                 "everyday",
+        # Same condition split across two columns: the daily-measurement
+        # column belongs to ``everyday``; the 15-day-measurement column
+        # belongs to ``every15d`` (an LR6-specific group).  Routing between
+        # the two columns is performed by ``_lr6_route_fdfs_label`` based on
+        # the operator's ``15`` remark suffix.
+        "(1500mW2s,650mW28s)10T/h,24h/d":                      "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d (15d)":                "every15d",
         "3.9ohm 1h/d-0.8V":                                    "everyweek",
         "3.9ohm 4m/h 8h/d-0.9V":                               "everyweek",
         "250mA 1h/d-0.9V":                                     "everyweek",
@@ -1295,7 +1317,7 @@ def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
 
 def _get_condition_freq_group(cond: str, battery_type: str) -> str:
     """Return the frequency group for *cond*: ``"everyday"``, ``"everyweek"``,
-    ``"everymonth"``, or ``"other"`` when not found.
+    ``"everymonth"``, ``"every15d"`` (LR6-only), or ``"other"`` when not found.
 
     Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
     minor variations in spacing, bracket style, or trailing voltage suffix are
@@ -1306,6 +1328,96 @@ def _get_condition_freq_group(cond: str, battery_type: str) -> str:
         if _perf_fdfs_matches_template(cond, tmpl_label):
             return group
     return "other"
+
+
+# Canonical labels for the LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` daily and
+# 15-day-cadence columns.  These two labels share the same physical condition
+# but are stored as distinct keys so the report can show two columns and route
+# data to the correct one based on the operator's ``15`` remark suffix.
+_LR6_1500MW_DAILY_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d"
+_LR6_1500MW_15D_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d (15d)"
+
+
+def _lr6_route_fdfs_label(fdfs_label: str, model: str, is_15d: bool) -> str:
+    """Route an LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` fdfs label to its
+    daily or 15-day column.
+
+    For non-LR6 models or for fdfs labels that don't match the special
+    1500mW2s/650mW28s condition, *fdfs_label* is returned unchanged.
+
+    The two columns share the same physical discharge condition; the
+    distinction is purely operational (daily measurement vs. 15-day-cadence
+    measurement).  In the DMP database both end up with the same fdfs/jstj
+    string (sometimes with a ``-1.05V`` or ``-1.0V`` endpoint-voltage suffix),
+    so this helper canonicalises the label based on the operator's ``15``
+    remark suffix instead of the endpoint voltage.
+    """
+    if not fdfs_label:
+        return fdfs_label
+    if model.strip().upper() != "LR6":
+        return fdfs_label
+    # Match the base condition with or without an endpoint-voltage suffix
+    # (e.g. ``-1.05V``/``-1.0V``).  Use the same fuzzy matcher the template
+    # ordering relies on so spacing/bracket variations are tolerated.
+    if not _perf_fdfs_matches_template(fdfs_label, _LR6_1500MW_DAILY_LABEL):
+        return fdfs_label
+    return _LR6_1500MW_15D_LABEL if is_15d else _LR6_1500MW_DAILY_LABEL
+
+
+# Suffix tokens that may appear at the end of an operator-entered remark to
+# flag a quarterly or 15-day-cadence measurement.  See _strip_remark_suffixes.
+_REMARK_QUARTER_TOKENS: frozenset[str] = frozenset({"Q"})
+_REMARK_15D_TOKENS: frozenset[str] = frozenset({"15"})
+
+
+def _strip_remark_suffixes(remark: Optional[str]) -> tuple[str, bool, bool]:
+    """Strip optional ``Q`` (quarterly) and ``15`` (LR6 15-day) flag suffixes
+    from a free-text remark and return ``(clean_remark, is_quarter, is_15d)``.
+
+    Only tokens that appear as standalone whitespace-separated tokens are
+    treated as flags, so identifiers that legitimately contain ``15`` or
+    ``q`` (e.g. ``UD515``, ``UDQ7``) are not stripped.  Matching is
+    case-insensitive for ``Q``.
+
+    Returning the cleaned remark lets all downstream ``para_pub.bz`` /
+    ``ls_jb_cs.bz`` LIKE lookups continue to match the existing master remark
+    records, which were never modified to include the suffixes.
+    """
+    if remark is None:
+        return ("", False, False)
+    raw = str(remark).strip()
+    if not raw:
+        return ("", False, False)
+    is_quarter = False
+    is_15d = False
+    out_tokens: list[str] = []
+    for tok in raw.split():
+        tok_up = tok.strip().upper()
+        if tok_up in _REMARK_QUARTER_TOKENS:
+            is_quarter = True
+            continue
+        if tok_up in _REMARK_15D_TOKENS:
+            is_15d = True
+            continue
+        out_tokens.append(tok)
+    return (" ".join(out_tokens), is_quarter, is_15d)
+
+
+def _resolve_entry_flags(entry) -> tuple[str, bool, bool]:
+    """Return ``(clean_remark, is_quarter, is_15d)`` for a ``DmpPerfEntry``.
+
+    Prefers explicit ``entry.is_quarter`` / ``entry.is_15d`` when set by the
+    client; otherwise re-parses ``entry.raw_remark``.  The clean remark is
+    always derived from ``raw_remark`` with suffixes stripped, so it is safe
+    to use for ``bz`` LIKE lookups against unmodified master records.
+    """
+    raw = getattr(entry, "raw_remark", None) or ""
+    clean, parsed_q, parsed_15d = _strip_remark_suffixes(raw)
+    explicit_q = getattr(entry, "is_quarter", None)
+    explicit_15d = getattr(entry, "is_15d", None)
+    is_quarter = bool(explicit_q) if explicit_q is not None else parsed_q
+    is_15d = bool(explicit_15d) if explicit_15d is not None else parsed_15d
+    return (clean, is_quarter, is_15d)
 
 
 def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
@@ -6012,6 +6124,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
         ):
             continue
 
+        # Resolve operator-input remark suffixes (``Q`` / ``15``) into flags.
+        # ``_clean_remark`` is the remark with those suffixes stripped and is
+        # what every downstream ``bz`` LIKE / equality lookup must use, so the
+        # ~200 existing master-Remark records (which never carry suffixes)
+        # still match.  ``_is_quarter`` and ``_is_15d`` drive the routing
+        # decisions for the LR6 daily-vs-15-day column split and for the
+        # quarterly all-conditions semantics.
+        _clean_remark, _is_quarter, _is_15d = _resolve_entry_flags(entry)
+
         # ── DM2000 path: when dm2000_archname is set, read from DM2000 instead of DMP ──
         if entry.dm2000_archname and entry.dm2000_archname.strip():
             _dm2k_arch = entry.dm2000_archname.strip()
@@ -6167,7 +6288,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _dm2k_model_up in _dm2k_no_ch
                             else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
                         )
-                        _eg_fdfs_label = _eg_fdfs or _dm2k_eg["loai"]
+                        _eg_fdfs_label = _lr6_route_fdfs_label(
+                            _eg_fdfs or _dm2k_eg["loai"], entry.model, _is_15d
+                        )
                         groups.setdefault(_eg_sheet, {}).setdefault(
                             (_eg_row_label, _dm2k_eg["loai"]), {}
                         )[_eg_fdfs_label] = _eg_perf
@@ -6309,8 +6432,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # correct battery grade.
             if not _dm2k_eff_groups and model_upper in no_chuyen_models:
                 _synth_loai_dm2k = ""
-                if entry.raw_remark:
-                    _synth_parsed_dm2k = _parse_bz_groups(entry.raw_remark)
+                if _clean_remark:
+                    _synth_parsed_dm2k = _parse_bz_groups(_clean_remark)
                     if _synth_parsed_dm2k:
                         _synth_loai_dm2k = _synth_parsed_dm2k[0].get("loai", "")
                 _dm2k_eff_groups = [{"loai": _synth_loai_dm2k, "chuyen": "", "trays": [], "_orig_idx": None}]
@@ -6340,7 +6463,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 else:
                     _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
 
-                _dm2k_fdfs_label = _dm2k_fdfs or _dm2k_grp_loai
+                _dm2k_fdfs_label = _lr6_route_fdfs_label(
+                    _dm2k_fdfs or _dm2k_grp_loai, entry.model, _is_15d
+                )
                 _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
                 groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})[_dm2k_fdfs_label] = _dm2k_perf
 
@@ -6351,13 +6476,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # has a unique remark; fall back to a literal id lookup so that
         # entries whose batch_id is the actual para_pub.id still work.
         batch_rows: list[dict] = []
-        if entry.raw_remark and entry.raw_remark.strip():
-            _remark_search = entry.raw_remark.strip()
+        if _clean_remark:
+            _remark_search = _clean_remark
             # Leading wildcard tolerates legacy bz values that still carry an
             # arbitrary prefix (e.g. older "160226 LR6 UD501") while the
             # trailing wildcard matches composite remarks that include extra
             # group tokens beyond the entry's own (e.g. bz = "LR6 UD501 UD502"
             # for an entry whose remark is just "LR6 UD501").
+            # ``_clean_remark`` has any ``Q``/``15`` flag suffixes stripped so
+            # the existing master Remark records (which never carry suffixes)
+            # still match.
             _bz_pattern = f"%{_remark_search}%"
             _bz_sql = (
                 "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
@@ -6474,8 +6602,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
             # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
             # either a DMP batch or a DM2000 archive transparently.
-            if entry.raw_remark and entry.raw_remark.strip():
-                _fb_remark = entry.raw_remark.strip()
+            if _clean_remark:
+                _fb_remark = _clean_remark
                 # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
                 # Same structure as the dm2000_archname per-group path above.
                 # For each group: search archives by bz token → determine batys → compute perf.
@@ -6606,7 +6734,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 if _fb_model_up in _fb_no_ch_m
                                 else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
                             )
-                            _feg_fdfs_label = _feg_fdfs or _fb_eg["loai"]
+                            _feg_fdfs_label = _lr6_route_fdfs_label(
+                                _feg_fdfs or _fb_eg["loai"], entry.model, _is_15d
+                            )
                             groups.setdefault(_feg_sheet, {}).setdefault(
                                 (_feg_row_label, _fb_eg["loai"]), {}
                             )[_feg_fdfs_label] = _feg_perf
@@ -6731,7 +6861,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             if _fb_model_upper in _fb_no_chuyen
                             else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
                         )
-                        _fb_fdfs_label = _fb_fdfs or _fb_grp_loai
+                        _fb_fdfs_label = _lr6_route_fdfs_label(
+                            _fb_fdfs or _fb_grp_loai, entry.model, _is_15d
+                        )
                         groups.setdefault(_fb_sheet, {}).setdefault(
                             (_fb_row_label, _fb_grp_loai), {}
                         )[_fb_fdfs_label] = _fb_perf
@@ -6769,10 +6901,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # battery grade.  Example: raw_remark "LR6 UDP501 HP503" yields the
         # mapping {"501": "UD+", "503": "HP"}.  If raw_remark is absent or a
         # chuyen has no match, the stored grp.loai is used as fallback.
+        # ``_clean_remark`` is used so that the ``Q``/``15`` flag suffixes are
+        # not mis-parsed as group tokens.
         _remark_loai_by_chuyen: dict[str, str] = {}
         _remark_bz_groups: list[dict] = []
-        if entry.raw_remark:
-            _remark_bz_groups = _parse_bz_groups(entry.raw_remark)
+        if _clean_remark:
+            _remark_bz_groups = _parse_bz_groups(_clean_remark)
             for _rg in _remark_bz_groups:
                 if _rg.get("chuyen"):
                     _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
@@ -6804,8 +6938,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # without an explicit group still display the correct battery grade.
         if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
             _synth_loai = ""
-            if entry.raw_remark:
-                _synth_parsed = _parse_bz_groups(entry.raw_remark)
+            if _clean_remark:
+                _synth_parsed = _parse_bz_groups(_clean_remark)
                 if _synth_parsed:
                     _synth_loai = _synth_parsed[0].get("loai", "")
             _dmp_eff_groups = [{"loai": _synth_loai, "chuyen": "", "trays": [], "_orig_idx": None}]
@@ -6844,8 +6978,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # HP→HP, UD→UD) matched by chuyen.
             effective_loai = _dmp_grp["loai"]
 
-            # fdfs label for column matching
-            fdfs_label = fdfs if fdfs else effective_loai
+            # fdfs label for column matching, with LR6 daily/15-day routing
+            # applied for the special ``(1500mW2s,650mW28s)10T/h,24h/d`` case.
+            fdfs_label = _lr6_route_fdfs_label(
+                fdfs if fdfs else effective_loai, entry.model, _is_15d
+            )
 
             row_key = (row_label, effective_loai)
             groups.setdefault(sheet_key, {}).setdefault(row_key, {})[fdfs_label] = perf

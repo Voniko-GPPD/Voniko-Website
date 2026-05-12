@@ -352,6 +352,31 @@ function createTables() {
     db.exec('ALTER TABLE dmp_perf_entries ADD COLUMN dm2000_archname TEXT');
   }
 
+  // One-shot migration: ``special_type='quarter'`` is no longer a valid row
+  // type — quarterly measurements are now identified by a trailing ``Q``
+  // token on raw_remark instead.  Rewrite any pre-existing rows so they keep
+  // their semantics: collapse them to ``normal`` and append ``" Q"`` to
+  // raw_remark when it isn't already present (case-insensitive standalone
+  // token check).
+  try {
+    const quarterRows = db.prepare(
+      "SELECT id, raw_remark FROM dmp_perf_entries WHERE special_type = 'quarter'"
+    ).all();
+    if (quarterRows.length > 0) {
+      const updateStmt = db.prepare(
+        "UPDATE dmp_perf_entries SET special_type = 'normal', raw_remark = ? WHERE id = ?"
+      );
+      const hasQToken = (s) => /(^|\s)q(\s|$)/i.test(s || '');
+      for (const r of quarterRows) {
+        const cur = r.raw_remark || '';
+        const next = hasQToken(cur) ? cur : (cur ? `${cur} Q` : 'Q');
+        updateStmt.run(next, r.id);
+      }
+    }
+  } catch (_e) {
+    // Table may not exist yet on a fresh install — safe to ignore.
+  }
+
 }
 
 function seedDefaults() {

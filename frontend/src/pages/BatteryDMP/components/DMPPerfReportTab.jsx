@@ -47,15 +47,18 @@ import { useAuth } from '../../../contexts/AuthContext';
 import { useLang } from '../../../contexts/LangContext';
 
 
-const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang', 'quarter'];
+const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
 
-/** Frequency group order for column grouping headers. */
-const FREQ_GROUP_ORDER = ['everyday', 'everyweek', 'everymonth', 'other'];
+/** Frequency group order for column grouping headers.
+ *  ``every15d`` is LR6-only and groups the 15-day-cadence
+ *  ``(1500mW2s,650mW28s)10T/h,24h/d`` column. */
+const FREQ_GROUP_ORDER = ['everyday', 'every15d', 'everyweek', 'everymonth', 'other'];
 
 /** Background colours for each frequency group header. */
 const FREQ_GROUP_COLORS = {
   everyday: '#e6f4ff',
+  every15d: '#fff0f6',
   everyweek: '#fffbe6',
   everymonth: '#f6ffed',
   other: '#f0f0f0',
@@ -64,6 +67,7 @@ const FREQ_GROUP_COLORS = {
 /** Border colours for each frequency group header. */
 const FREQ_GROUP_BORDER_COLORS = {
   everyday: '#91caff',
+  every15d: '#ffadd2',
   everyweek: '#ffd666',
   everymonth: '#95de64',
   other: '#d9d9d9',
@@ -312,7 +316,9 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
   const [saving, setSaving] = useState(false);
   const [currentModel, setCurrentModel] = useState(initial?.model || 'LR6');
 
-  // Auto-parse remark to fill model + groups + special_type (Q → quarter)
+  // Auto-parse remark to fill model + groups (Q / 15 suffixes are detected
+  // server-side from raw_remark and used to drive routing; they do NOT
+  // change the special_type).
   const handleRemarkChange = (e) => {
     const raw = e.target.value;
     const parsed = parseRemark(raw);
@@ -322,10 +328,6 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
     }
     if (parsed.groups.length > 0) {
       setGroups(parsed.groups);
-    }
-    // Auto-set special_type to 'quarter' when "Q" marker is present
-    if (parsed.isQuarter) {
-      form.setFieldValue('special_type', 'quarter');
     }
   };
 
@@ -337,6 +339,11 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       setSaving(true);
 
       const rawRemark = values.raw_remark || null;
+      // Parse Q / 15 suffixes from the operator remark and pass them to the
+      // backend explicitly.  The backend would also re-derive these from
+      // raw_remark on its own, but sending them keeps the saved entry
+      // self-describing for downstream consumers (e.g. the Excel export).
+      const parsed = parseRemark(rawRemark || '');
       // The made date (scrq) is read directly from the para_singl row that
       // matches raw_remark, so report_date / batch_id are left null and the
       // backend supplies a placeholder for the NOT NULL columns.
@@ -348,6 +355,8 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
         groups,
         special_type: values.special_type || 'normal',
         raw_remark: rawRemark,
+        is_quarter: parsed.isQuarter,
+        is_15d: parsed.is15d,
         notes: values.notes || null,
         dm2000_archname: null,
       };
@@ -380,7 +389,12 @@ function EntryForm({ initial, stationId, onSave, onCancel }) {
       }}
     >
       {/* ── Remark ── */}
-      <Form.Item name="raw_remark" label={t('dmpPerfEntryRemark')} rules={[{ required: true }]}>
+      <Form.Item
+        name="raw_remark"
+        label={t('dmpPerfEntryRemark')}
+        rules={[{ required: true }]}
+        tooltip={t('dmpPerfEntryRemarkTooltip')}
+      >
         <Input
           placeholder="e.g. 160226 LR6 UD501 UDP504 or LR6 UDP501 HP503 Q or LR6 UD501 15"
           onChange={handleRemarkChange}
@@ -516,9 +530,24 @@ function RemarkRegistryTab({ stationId, selection }) {
   };
 
   const specialTag = (type) => {
-    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default', quarter: 'cyan' };
-    const labels = { '6020': '6020', '3thang': '3 THÁNG', '6thang': '6 THÁNG', normal: '-', quarter: t('dmpPerfSpecialQuarterTag') };
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
+    const labels = { '6020': '6020', '3thang': '3 THÁNG', '6thang': '6 THÁNG', normal: '-' };
     return <Tag color={colors[type] || 'default'}>{labels[type] || type}</Tag>;
+  };
+
+  /** Render small Q / 15 badges next to the remark when the parsed remark
+   *  contains the corresponding suffix.  Operators rely on these badges to
+   *  confirm at a glance how the entry will be routed by the backend. */
+  const remarkBadges = (raw) => {
+    if (!raw) return null;
+    const parsed = parseRemark(raw);
+    if (!parsed.isQuarter && !parsed.is15d) return null;
+    return (
+      <Space size={4} style={{ marginLeft: 4 }}>
+        {parsed.isQuarter && <Tag color="cyan">Q</Tag>}
+        {parsed.is15d && <Tag color="magenta">15d</Tag>}
+      </Space>
+    );
   };
 
   const columns = [
@@ -543,7 +572,15 @@ function RemarkRegistryTab({ stationId, selection }) {
       title: t('dmpPerfEntryRemark'),
       key: 'remark',
       ellipsis: true,
-      render: (_, row) => row.raw_remark || row.dm2000_archname || '-',
+      render: (_, row) => {
+        const txt = row.raw_remark || row.dm2000_archname || '-';
+        return (
+          <span>
+            {txt}
+            {remarkBadges(row.raw_remark)}
+          </span>
+        );
+      },
     },
     {
       title: '',
@@ -1194,8 +1231,8 @@ function ExportTab({ stationId }) {
   );
 
   const specialTag = (type) => {
-    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default', quarter: 'cyan' };
-    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal', quarter: 'dmpPerfSpecialQuarter' };
+    const colors = { '6020': 'gold', '3thang': 'blue', '6thang': 'purple', normal: 'default' };
+    const labelKeys = { '6020': 'dmpPerfSpecial6020', '3thang': 'dmpPerfSpecial3thang', '6thang': 'dmpPerfSpecial6thang', normal: 'dmpPerfSpecialNormal' };
     const label = labelKeys[type] ? t(labelKeys[type]) : type;
     return <Tag color={colors[type] || 'default'}>{label}</Tag>;
   };
@@ -1211,15 +1248,20 @@ function ExportTab({ stationId }) {
     try {
       await downloadDmpPerfReport({
         stationId,
-        entries: toExport.map((e) => ({
-          batch_id: e.batch_id,
-          report_date: e.report_date || null,
-          model: e.model,
-          groups: e.groups,
-          special_type: e.special_type || 'normal',
-          raw_remark: e.raw_remark || null,
-          dm2000_archname: e.dm2000_archname || null,
-        })),
+        entries: toExport.map((e) => {
+          const parsed = parseRemark(e.raw_remark || '');
+          return {
+            batch_id: e.batch_id,
+            report_date: e.report_date || null,
+            model: e.model,
+            groups: e.groups,
+            special_type: e.special_type || 'normal',
+            raw_remark: e.raw_remark || null,
+            is_quarter: parsed.isQuarter,
+            is_15d: parsed.is15d,
+            dm2000_archname: e.dm2000_archname || null,
+          };
+        }),
         templateName: selectedTemplate,
       });
       notification.success({ message: t('dmpPerfReportDownloaded') });

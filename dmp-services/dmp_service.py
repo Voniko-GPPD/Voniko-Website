@@ -1209,6 +1209,11 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
 # same as template labels that use () when doing template-order lookups.
 _BRACKET_NORM_TABLE = str.maketrans("{}", "()")
 
+# Compiled once at import time: matches one or more whitespace, comma, or dot
+# characters.  Used by ``_perf_fdfs_matches_template`` to normalise schedule
+# separators before its final compact-comparison fallback.
+_SEPARATOR_RE = re.compile(r"[\s.,]+")
+
 
 def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
@@ -1252,6 +1257,18 @@ def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
     # Both sides voltage-stripped (handles differing decimal precision, e.g.
     # "10ohm 24h/d-0.900V" vs "10ohm 24h/d-0.9V")
     if f_no_v and h_no_v and f_no_v == h_no_v:
+        return True
+
+    # Final fallback: voltage-stripped + separator-stripped comparison.
+    # DM2000 stores the discharge schedule with comma-without-space separators
+    # (e.g. ``4m/h,8h/d`` or ``1s/60m,24h/d``) while the IEC template uses
+    # spaces or dots (``4m/h 8h/d`` / ``1s/60m.24h/d``).  Stripping all of
+    # ``[\s.,]`` from both sides bridges that gap without enabling the
+    # leading-token false matches the function intentionally avoids
+    # (``1000mA24h/d`` ≠ ``1000mA10s/m1h/d``, ``100mA1h/d`` ≠ ``1000mA24h/d``).
+    f_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", f))
+    h_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", h))
+    if f_compact and h_compact and f_compact == h_compact:
         return True
 
     return False
@@ -3598,6 +3615,69 @@ def refresh_dm2000_archives():
     return {"status": "ok", "cache_path": _DM2000_LS_CACHE_PATH}
 
 
+@app.get("/dm2000/perf-debug")
+def dm2000_perf_debug(archname: str, battery_type: str = ""):
+    """Diagnostic endpoint: show how an archive's raw fields are translated into
+    a Performance-Report condition label and which IEC frequency group it maps to.
+
+    Use this to investigate why a discharge condition is appearing under
+    "Other" in the Performance Report.  Returns the raw ``fdfs`` / ``fzdz``
+    (load resistance) / ``zzdy`` (endpoint voltage) values from ``ls_jb_cs``,
+    the combined label produced by ``_build_dm2000_condition_label``, and the
+    matched frequency group ("everyday" / "everyweek" / "everymonth" /
+    "other") for the supplied (or auto-detected) battery family.
+    """
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm2000_ls(
+            "SELECT * FROM ls_jb_cs WHERE cdid = ?", (archname,)
+        )
+        if not rows:
+            rows = _read_dm2000_ls(
+                "SELECT * FROM ls_jb_cs WHERE archname = ?", (archname,)
+            )
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"DB error: {exc}")
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Archive not found: {archname}")
+    arch = rows[0]
+    fdfs_raw = str(_dm2000_get_value(arch, "fdfs") or "").strip()
+    load_res = str(_dm2000_get_value(
+        arch,
+        "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+    ) or "").strip()
+    ep_raw = _dm2000_get_value(
+        arch,
+        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+    )
+    ep_str = str(ep_raw or "").strip()
+    label = _build_dm2000_condition_label(fdfs_raw, load_res, ep_str, archname)
+    bt_raw = battery_type.strip() or str(_dm2000_get_value(arch, "dcxh") or "").strip()
+    # Best-effort battery family detection for fallback when not supplied.
+    bt_norm = bt_raw.upper()
+    family = ""
+    for fam in ("LR03", "LR61", "6LR61", "9V", "LR6"):
+        if fam in bt_norm:
+            family = "9V" if fam == "6LR61" else fam
+            break
+    freq = _get_condition_freq_group(label, family) if family else ""
+    return {
+        "archname": archname,
+        "raw": {
+            "fdfs": fdfs_raw,
+            "load_resistance": load_res,
+            "endpoint_voltage": ep_str,
+            "dcxh": str(_dm2000_get_value(arch, "dcxh") or "").strip(),
+        },
+        "built_label": label,
+        "battery_type": bt_raw,
+        "battery_family": family,
+        "freq_group": freq,
+    }
+
+
 @app.post("/dm2000/update-archive-meta")
 def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
     """Write remarks (bz) and/or serialno (dcph) directly to the live dmdata_ls.mdb.
@@ -5303,6 +5383,63 @@ def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
     return False
 
 
+def _normalize_dm2000_load_resistance(load_res: str) -> str:
+    """Normalise a raw DM2000 load-resistance value into a template-style label.
+
+    Examples:
+      "10"             -> "10ohm"
+      "3.9"            -> "3.9ohm"
+      "620+10K"        -> "620ohm+10Kohm"
+      "1+0.5K"         -> "1ohm+0.5Kohm"
+      "620ohm+10Kohm"  -> "620ohm+10Kohm"   (already has units)
+      "1000mA"         -> "1000mA"          (different unit; pass through)
+      "(1500mW2s,650mW28s)" -> "(1500mW2s,650mW28s)"  (compound; pass through)
+      ""               -> ""
+
+    DM2000 stores compound resistors (e.g. "620 ohm in series with a 10 kohm
+    bypass for 9V batteries) as a "+"-joined number string.  We append "ohm"
+    to each bare numeric token (with optional decimal and optional ``K``/``k``
+    SI prefix) so the resulting label matches the IEC 60086-2 template entry
+    used by ``_perf_fdfs_matches_template``.
+    """
+    if not load_res:
+        return ""
+    s = load_res.strip()
+    if not s:
+        return ""
+    # Compound expressions wrapped in parentheses (e.g. "(1500mW2s,650mW28s)")
+    # are passed through verbatim — they already encode their own unit info.
+    if "(" in s or ")" in s:
+        return s
+    # Simple bare number, possibly with decimal: append "ohm".
+    if re.match(r"^\d+(\.\d+)?$", s):
+        return f"{s}ohm"
+    # "+"-joined compound resistor string: process each token separately so a
+    # value like "620+10K" becomes "620ohm+10Kohm".
+    if "+" in s:
+        tokens = s.split("+")
+        out_tokens: list[str] = []
+        for tok in tokens:
+            tok_s = tok.strip()
+            if not tok_s:
+                out_tokens.append(tok_s)
+                continue
+            # Bare number with optional decimal and optional K/k suffix
+            # (e.g. "620", "10K", "0.5k", "3.9") gets "ohm" appended.  We also
+            # uppercase the SI prefix so that the rendered label matches the
+            # IEC 60086-2 template style ("10Kohm" rather than "10kohm").
+            if re.match(r"^\d+(\.\d+)?[Kk]?$", tok_s):
+                if tok_s.endswith("k"):
+                    tok_s = tok_s[:-1] + "K"
+                out_tokens.append(f"{tok_s}ohm")
+            else:
+                # Already carries a unit (mA, mW, ohm, …) — keep verbatim.
+                out_tokens.append(tok_s)
+        return "+".join(out_tokens)
+    # Anything else (already has a unit suffix like "mA"/"mW"/"ohm", etc.)
+    return s
+
+
 def _build_dm2000_condition_label(fdfs_raw: str, load_res: str, ep_str: str, fallback: str) -> str:
     """Build a combined DM2000 condition label like '10ohm 24h/d-0.900V'.
 
@@ -5310,13 +5447,13 @@ def _build_dm2000_condition_label(fdfs_raw: str, load_res: str, ep_str: str, fal
     so that _perf_fdfs_matches_template can correctly locate the label in the IEC
     60086-2 template and assign the right column order.
 
-      resistance = load_res appended with "ohm" when it is a bare number
+      resistance = load_res normalised to template style (see
+                   ``_normalize_dm2000_load_resistance``).  Compound values like
+                   ``620+10K`` become ``620ohm+10Kohm``.
       prefix     = resistance + fdfs joined by a space (empty parts omitted)
       suffix     = "-<ep_str>V" when endpoint voltage is present
     """
-    resistance = ""
-    if load_res:
-        resistance = f"{load_res}ohm" if re.match(r"^\d+(\.\d+)?$", load_res) else load_res
+    resistance = _normalize_dm2000_load_resistance(load_res)
     parts = [p for p in (resistance, fdfs_raw) if p]
     prefix = " ".join(parts)
     suffix = f"-{ep_str}V" if ep_str else ""

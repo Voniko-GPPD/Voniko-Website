@@ -1486,7 +1486,7 @@ def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
     # When both sides carry the ``15D`` marker, strip it (and surrounding
     # whitespace) from both before the remaining comparisons.  This lets the
     # end-anchored voltage-suffix regex operate on a string that ends with the
-    # voltage (e.g. "–1.05V") rather than "–1.05V 15D", which the ``$``-anchored
+    # voltage (e.g. "-1.05V") rather than "-1.05V 15D", which the ``$``-anchored
     # pattern cannot strip.  Without this step the canonical label
     # "(1500mW2s,650mW28s)10T/h,24h/d 15D" would not match the template column
     # header "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D" because the embedded

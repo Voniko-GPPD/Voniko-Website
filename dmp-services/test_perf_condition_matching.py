@@ -331,3 +331,43 @@ def test_perf_fdfs_matches_header_15d_with_embedded_voltage() -> None:
     assert not m._perf_fdfs_matches_header(
         daily, "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D"
     )
+
+
+# --------------------------------------------------------------------------- #
+# _merge_bz_suffix_flags — bz column is the canonical source of Q / 15 flags
+# --------------------------------------------------------------------------- #
+
+
+def test_merge_bz_suffix_flags_promotes_15d_from_bz() -> None:
+    """A perf-entry whose raw_remark lacks the ``15`` suffix must still be
+    routed to the 15D column when the matched para_pub.bz value carries it.
+
+    This is the scenario from Request #241: the operator edits the bz column
+    on the DM management page (which writes back to para_pub.bz via
+    /update-batch-meta) and expects the perf report to honour the suffix
+    without re-creating every dmp_perf_entries row.  The bz column is the
+    canonical source of truth for Q / 15 routing.
+    """
+    # entry has no flag, bz carries the 15 suffix → is_15d must become True
+    assert m._merge_bz_suffix_flags(False, False, "LR6 UDP501 15") == (False, True)
+    assert m._merge_bz_suffix_flags(False, False, "LR6 UD501 UD502 15") == (False, True)
+    # entry has no flag, bz carries the Q suffix → is_quarter must become True
+    assert m._merge_bz_suffix_flags(False, False, "LR6 HP501 HP502 Q") == (True, False)
+    # entry already True, bz lacks the suffix → entry value is preserved
+    assert m._merge_bz_suffix_flags(True, True, "LR6 UDP501") == (True, True)
+    # Empty / None bz must be a no-op (no flags fabricated)
+    assert m._merge_bz_suffix_flags(False, False, "") == (False, False)
+    assert m._merge_bz_suffix_flags(False, False, None) == (False, False)
+    assert m._merge_bz_suffix_flags(True, False, None) == (True, False)
+    # Composite: both flags promoted from bz
+    assert m._merge_bz_suffix_flags(False, False, "LR6 UDP501 Q 15") == (True, True)
+
+
+def test_merge_bz_suffix_flags_does_not_strip_substring_15() -> None:
+    """The ``15`` and ``Q`` markers must only be detected as standalone tokens.
+    Identifiers that legitimately contain ``15`` (UD515) or ``Q`` (UDQ7) must
+    NOT trigger the routing flag — exactly as ``_strip_remark_suffixes``
+    promises elsewhere in this module.
+    """
+    assert m._merge_bz_suffix_flags(False, False, "LR6 UD515") == (False, False)
+    assert m._merge_bz_suffix_flags(False, False, "LR6 UDQ7") == (False, False)

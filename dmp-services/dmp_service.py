@@ -5533,6 +5533,32 @@ def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
     return sorted(eff_groups, key=_chuyen_sort_key)
 
 
+def _resolve_dmp_tray_list(
+    orig_group,  # DmpPerfGroup — may have an explicit .trays list
+    dmp_grp: dict,
+    g_idx: int,
+    auto_trays: list,
+    remark_chuyen_to_pos: dict,
+) -> list:
+    """Return the physical tray list for one DMP group.
+
+    Priority:
+    1. explicit ``orig_group.trays`` (user-configured in the UI)
+    2. positional slot derived from ``remark_chuyen_to_pos`` — active when the
+       batch remark has more production-line groups than ``entry.groups`` (Bug 1
+       fix: composite remark filtered to a single chuyen uses the full remark's
+       group count so the chuyen maps to the correct slot, e.g. 501 → trays 1-4)
+    3. plain ``auto_trays[g_idx]`` fallback
+    """
+    if getattr(orig_group, "trays", None):
+        return orig_group.trays
+    if remark_chuyen_to_pos:
+        dg_chuyen = str(dmp_grp.get("chuyen") or "").strip()
+        dg_pos = remark_chuyen_to_pos.get(dg_chuyen, g_idx)
+        return auto_trays[dg_pos] if dg_pos < len(auto_trays) else []
+    return auto_trays[g_idx] if g_idx < len(auto_trays) else []
+
+
 # Map special_type → row label for column-A matching in Excel template
 _SPECIAL_TYPE_LABEL: dict[str, str] = {
     "6020": "6020",
@@ -7107,14 +7133,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _orig_idx = _dmp_grp.get("_orig_idx")
             if _orig_idx is not None:
                 orig_grp = entry.groups[_orig_idx]
-                if orig_grp.trays:
-                    trays = orig_grp.trays
-                elif _remark_chuyen_to_pos:
-                    _dg_chuyen = str(_dmp_grp.get("chuyen") or "").strip()
-                    _dg_pos = _remark_chuyen_to_pos.get(_dg_chuyen, g_idx)
-                    trays = auto_trays[_dg_pos] if _dg_pos < len(auto_trays) else []
-                else:
-                    trays = auto_trays[g_idx] if g_idx < len(auto_trays) else []
+                trays = _resolve_dmp_tray_list(
+                    orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                )
             else:
                 # Synthetic group for no-chuyen model with no configured groups
                 trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
@@ -7228,14 +7249,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _orig_idx = _dmp_grp.get("_orig_idx")
                 if _orig_idx is not None:
                     orig_grp = entry.groups[_orig_idx]
-                    if orig_grp.trays:
-                        _xb_trays = orig_grp.trays
-                    elif _remark_chuyen_to_pos:
-                        _xb_dg_c = str(_dmp_grp.get("chuyen") or "").strip()
-                        _xb_dg_p = _remark_chuyen_to_pos.get(_xb_dg_c, g_idx)
-                        _xb_trays = auto_trays[_xb_dg_p] if _xb_dg_p < len(auto_trays) else []
-                    else:
-                        _xb_trays = auto_trays[g_idx] if g_idx < len(auto_trays) else []
+                    _xb_trays = _resolve_dmp_tray_list(
+                        orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                    )
                 else:
                     _xb_trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
                 if not _xb_trays:

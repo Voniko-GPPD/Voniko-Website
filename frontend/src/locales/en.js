@@ -731,8 +731,6 @@ export default {
   dmpPerfSpecial3thang: '3 THÁNG row',
   dmpPerfSpecial6thang: '6 THÁNG row',
   dmpPerfEntryRemarkTooltip: 'Add suffix "Q" for quarterly measurement (all conditions on the day) or "15" for the LR6 15-day measurement (routes to the 15-day column instead of the daily column). Example: "LR6 UD501 UD502 Q" or "LR6 UD501 15".',
-  dmpPerfFreq15dRowBadge: '15d',
-  dmpPerfFreqQuarterRowBadge: 'Q',
   dmpPerfGroupLoai: 'Grade (Loại)',
   dmpPerfGroupChuyen: 'Line (Chuyền)',
   dmpPerfGroupTrays: 'Trays (auto)',

@@ -731,8 +731,6 @@ export default {
   dmpPerfSpecial3thang: 'Hàng 3 THÁNG',
   dmpPerfSpecial6thang: 'Hàng 6 THÁNG',
   dmpPerfEntryRemarkTooltip: 'Thêm hậu tố "Q" cho lần đo hằng quý (đo tất cả điều kiện trong ngày) hoặc "15" cho lần đo 15 ngày của LR6 (đưa giá trị vào cột 15 ngày thay vì cột hằng ngày). Ví dụ: "LR6 UD501 UD502 Q" hoặc "LR6 UD501 15".',
-  dmpPerfFreq15dRowBadge: '15d',
-  dmpPerfFreqQuarterRowBadge: 'Q',
   dmpPerfGroupLoai: 'Loại (UD/HP/UD+)',
   dmpPerfGroupChuyen: 'Chuyền (vd: 501)',
   dmpPerfGroupTrays: 'Khay (tự động)',

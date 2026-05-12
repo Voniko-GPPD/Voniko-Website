@@ -731,8 +731,6 @@ export default {
   dmpPerfSpecial3thang: '3个月行',
   dmpPerfSpecial6thang: '6个月行',
   dmpPerfEntryRemarkTooltip: '添加后缀 "Q" 表示季度测量（当天测量所有条件），或 "15" 表示 LR6 的 15 天测量（将值写入 15 天列而非日列）。示例："LR6 UD501 UD502 Q" 或 "LR6 UD501 15"。',
-  dmpPerfFreq15dRowBadge: '15d',
-  dmpPerfFreqQuarterRowBadge: 'Q',
   dmpPerfGroupLoai: '等级（UD/HP/UD+）',
   dmpPerfGroupChuyen: '产线编号（如501）',
   dmpPerfGroupTrays: '托盘（自动）',

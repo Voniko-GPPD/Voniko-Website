@@ -50,15 +50,12 @@ import { useLang } from '../../../contexts/LangContext';
 const SPECIAL_TYPES = ['normal', '6020', '3thang', '6thang'];
 const LOAI_OPTIONS = ['UD', 'UD+', 'HP'].map((v) => ({ value: v, label: v }));
 
-/** Frequency group order for column grouping headers.
- *  ``every15d`` is LR6-only and groups the 15-day-cadence
- *  ``(1500mW2s,650mW28s)10T/h,24h/d`` column. */
-const FREQ_GROUP_ORDER = ['everyday', 'every15d', 'everyweek', 'everymonth', 'other'];
+/** Frequency group order for column grouping headers. */
+const FREQ_GROUP_ORDER = ['everyday', 'everyweek', 'everymonth', 'other'];
 
 /** Background colours for each frequency group header. */
 const FREQ_GROUP_COLORS = {
   everyday: '#e6f4ff',
-  every15d: '#fff0f6',
   everyweek: '#fffbe6',
   everymonth: '#f6ffed',
   other: '#f0f0f0',
@@ -67,7 +64,6 @@ const FREQ_GROUP_COLORS = {
 /** Border colours for each frequency group header. */
 const FREQ_GROUP_BORDER_COLORS = {
   everyday: '#91caff',
-  every15d: '#ffadd2',
   everyweek: '#ffd666',
   everymonth: '#95de64',
   other: '#d9d9d9',

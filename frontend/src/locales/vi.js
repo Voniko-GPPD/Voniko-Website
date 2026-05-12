@@ -783,7 +783,6 @@ export default {
   dmpPerfViewAllLoai: 'Tất cả mẫu',
   dmpPerfViewAllChuyen: 'Tất cả chuyền',
   dmpPerfFreqEveryday: 'Everyday (Hằng ngày)',
-  dmpPerfFreqEvery15d: 'Every 15 days (Hằng 15 ngày, chỉ LR6)',
   dmpPerfFreqEveryweek: 'Everyweek (Hằng tuần)',
   dmpPerfFreqEverymonth: 'Everymonth (Hằng tháng)',
   dmpPerfFreqEveryquarter: 'Every Quarter (Hằng quý)',

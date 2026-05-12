@@ -253,8 +253,10 @@ def test_lr6_template_has_daily_then_15d_slots() -> None:
     assert daily_idx + 1 == fifteen_idx
 
 
-def test_lr6_freq_groups_split_daily_and_15d() -> None:
-    """Daily slot is grouped under ``everyday``; 15-day slot under
-    ``every15d``.  Both must classify correctly via the fuzzy matcher."""
+def test_lr6_freq_groups_both_in_everyday() -> None:
+    """Both daily and 15-day slots are grouped under ``everyday`` so the
+    report shows the 15-day column as an extra column to the right of the
+    daily column under the same Everyday group header (no separate freq
+    group / filter chip)."""
     assert m._get_condition_freq_group(m._LR6_1500MW_DAILY_LABEL, "LR6") == "everyday"
-    assert m._get_condition_freq_group(m._LR6_1500MW_15D_LABEL, "LR6") == "every15d"
+    assert m._get_condition_freq_group(m._LR6_1500MW_15D_LABEL, "LR6") == "everyday"

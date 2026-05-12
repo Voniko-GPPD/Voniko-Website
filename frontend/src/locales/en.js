@@ -783,7 +783,6 @@ export default {
   dmpPerfViewAllLoai: 'All Grades',
   dmpPerfViewAllChuyen: 'All Lines',
   dmpPerfFreqEveryday: 'Everyday',
-  dmpPerfFreqEvery15d: 'Every 15 days (LR6)',
   dmpPerfFreqEveryweek: 'Everyweek',
   dmpPerfFreqEverymonth: 'Everymonth',
   dmpPerfFreqEveryquarter: 'Every Quarter',

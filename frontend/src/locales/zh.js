@@ -782,7 +782,6 @@ export default {
   dmpPerfViewAllLoai: '所有等级',
   dmpPerfViewAllChuyen: '所有生产线',
   dmpPerfFreqEveryday: 'Everyday（每日）',
-  dmpPerfFreqEvery15d: 'Every 15 days（每15天，仅LR6）',
   dmpPerfFreqEveryweek: 'Everyweek（每周）',
   dmpPerfFreqEverymonth: 'Everymonth（每月）',
   dmpPerfFreqEveryquarter: 'Every Quarter（每季度）',

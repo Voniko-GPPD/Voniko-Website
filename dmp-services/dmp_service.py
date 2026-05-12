@@ -1130,14 +1130,15 @@ _TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
         "10ohm 24h/d-0.9V",
         "1000mA 24h/d-0.9V",
         # The following two entries cover the SAME physical discharge condition
-        # ``(1500mW2s,650mW28s)10T/h,24h/d``; they are split into two columns
-        # because LR6 has both a daily measurement and a 15-day-cadence
-        # measurement for the condition.  The on-screen header text is the
-        # same; the ``(15d)`` suffix is an internal marker used by
-        # ``_lr6_route_fdfs_label`` to send each entry's value to the right
-        # column based on the operator's ``15`` remark suffix.
+        # ``(1500mW2s,650mW28s)10T/h,24h/d``; they are split into two adjacent
+        # columns because LR6 has both a daily measurement and a 15-day-cadence
+        # measurement for the condition.  The 15-day column is shown
+        # immediately to the right of the daily column under the same
+        # ``Everyday`` group; routing between them is performed by
+        # ``_lr6_route_fdfs_label`` based on the operator's ``15`` remark
+        # suffix.
         "(1500mW2s,650mW28s)10T/h,24h/d",
-        "(1500mW2s,650mW28s)10T/h,24h/d (15d)",
+        "(1500mW2s,650mW28s)10T/h,24h/d 15D",
         "3.9ohm 1h/d-0.8V",
         "3.9ohm 4m/h 8h/d-0.9V",
         "250mA 1h/d-0.9V",
@@ -1185,13 +1186,16 @@ _CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
     "LR6": {
         "10ohm 24h/d-0.9V":                                    "everyday",
         "1000mA 24h/d-0.9V":                                   "everyday",
-        # Same condition split across two columns: the daily-measurement
-        # column belongs to ``everyday``; the 15-day-measurement column
-        # belongs to ``every15d`` (an LR6-specific group).  Routing between
-        # the two columns is performed by ``_lr6_route_fdfs_label`` based on
-        # the operator's ``15`` remark suffix.
+        # Same condition shown across two adjacent columns under the same
+        # ``Everyday`` group: the daily column and the 15-day column.  Both
+        # belong to ``everyday`` so the report's frequency-group header /
+        # filter is unaffected; column-level distinction comes from the
+        # distinct labels (the ``15D`` suffix is the visible column-header
+        # marker), and routing between them is performed by
+        # ``_lr6_route_fdfs_label`` based on the operator's ``15`` remark
+        # suffix.
         "(1500mW2s,650mW28s)10T/h,24h/d":                      "everyday",
-        "(1500mW2s,650mW28s)10T/h,24h/d (15d)":                "every15d",
+        "(1500mW2s,650mW28s)10T/h,24h/d 15D":                  "everyday",
         "3.9ohm 1h/d-0.8V":                                    "everyweek",
         "3.9ohm 4m/h 8h/d-0.9V":                               "everyweek",
         "250mA 1h/d-0.9V":                                     "everyweek",
@@ -1317,7 +1321,7 @@ def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
 
 def _get_condition_freq_group(cond: str, battery_type: str) -> str:
     """Return the frequency group for *cond*: ``"everyday"``, ``"everyweek"``,
-    ``"everymonth"``, ``"every15d"`` (LR6-only), or ``"other"`` when not found.
+    ``"everymonth"``, or ``"other"`` when not found.
 
     Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
     minor variations in spacing, bracket style, or trailing voltage suffix are
@@ -1332,10 +1336,12 @@ def _get_condition_freq_group(cond: str, battery_type: str) -> str:
 
 # Canonical labels for the LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` daily and
 # 15-day-cadence columns.  These two labels share the same physical condition
-# but are stored as distinct keys so the report can show two columns and route
-# data to the correct one based on the operator's ``15`` remark suffix.
+# but are stored as distinct keys so the report shows two adjacent columns
+# (the 15-day column to the right of the daily column, both under the same
+# ``Everyday`` group header) and routes data to the correct one based on the
+# operator's ``15`` remark suffix.  ``15D`` is the visible header marker.
 _LR6_1500MW_DAILY_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d"
-_LR6_1500MW_15D_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d (15d)"
+_LR6_1500MW_15D_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d 15D"
 
 
 def _lr6_route_fdfs_label(fdfs_label: str, model: str, is_15d: bool) -> str:

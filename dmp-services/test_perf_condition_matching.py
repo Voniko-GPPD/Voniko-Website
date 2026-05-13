@@ -451,6 +451,44 @@ def test_dmp_tray_assignment_two_lines_uses_first_eight_active_trays() -> None:
     ) == [[1, 2, 4, 5], [6, 7, 8, 9]]
 
 
+def test_dmp_tray_assignment_two_lines_tray7_broken() -> None:
+    """Example 2 from the operator spec: tray 7 is damaged and the battery is
+    moved to tray 5.  The 4+4 sequential split must give line 501 trays
+    [1, 2, 3, 4] and line 502 trays [5, 6, 8, 9].
+    """
+    assert m._split_active_trays_for_group_count(
+        2, [1, 2, 3, 4, 5, 6, 8, 9]
+    ) == [[1, 2, 3, 4], [5, 6, 8, 9]]
+
+
+def test_dmp_tray_assignment_two_lines_all_nine_active_drops_extra_tray() -> None:
+    """Special case: when 2 production lines are tested but all 9 trays
+    contain valid data, only the first 8 valid trays are used (4 + 4) and
+    the 9th is ignored automatically — operators are responsible for
+    ensuring each line has exactly 4 batteries.
+    """
+    assert m._split_active_trays_for_group_count(
+        2, [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    ) == [[1, 2, 3, 4], [5, 6, 7, 8]]
+
+
+def test_dmp_tray_assignment_single_line_accepts_any_active_count() -> None:
+    """For single-line testing, the operator may place any number of
+    batteries on the 9 trays — the tray list is just whatever has data,
+    no fixed count is required.
+    """
+    assert m._split_active_trays_for_group_count(1, [1, 2, 3, 4, 5]) == [
+        [1, 2, 3, 4, 5]
+    ]
+    assert m._split_active_trays_for_group_count(
+        1, [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    ) == [[1, 2, 3, 4, 5, 6, 7, 8, 9]]
+    # Single-line with a broken tray: simply skip the missing tray.
+    assert m._split_active_trays_for_group_count(
+        1, [1, 2, 4, 5, 6, 7, 8, 9]
+    ) == [[1, 2, 4, 5, 6, 7, 8, 9]]
+
+
 def test_dmp_tray_assignment_single_group_unchanged() -> None:
     """When the remark has only one production-line group, the fix is a no-op
     and all 9 trays are still assigned (correct for single-line batches).

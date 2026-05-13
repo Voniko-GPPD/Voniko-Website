@@ -111,10 +111,17 @@ function useEntryFilters(entries, filterModel, filterLoai, filterChuyen) {
   return { modelOptions, loaiOptions, chuyenOptions, filteredEntries };
 }
 
-// Derives default tray assignment from group count (fixed convention)
+// Derives the default tray assignment hint shown in the entry editor.  The
+// backend (_split_active_trays_for_group_count) actually picks trays
+// dynamically from the trays that contain valid data: for two production
+// lines it takes the first 4 active trays for line 1 and the next 4 active
+// trays for line 2 (any remaining trays are ignored — e.g. when all 9 trays
+// are populated, tray 9 is dropped automatically).  This hint mirrors that
+// sequential, no-gap convention so the operator-facing label matches what
+// the backend will compute.
 function autoTrays(groupCount, groupIndex) {
   if (groupCount === 1) return [1, 2, 3, 4, 5, 6, 7, 8, 9];
-  if (groupCount === 2) return groupIndex === 0 ? [1, 2, 3, 4] : [6, 7, 8, 9];
+  if (groupCount === 2) return groupIndex === 0 ? [1, 2, 3, 4] : [5, 6, 7, 8];
   if (groupCount === 3) {
     if (groupIndex === 0) return [1, 2, 3];
     if (groupIndex === 1) return [4, 5, 6];
@@ -197,8 +204,12 @@ function mergeSheetsData(acc, incoming) {
  *   - Standalone "Q"  → isQuarter = true  (Every Quarter: all conditions measured)
  *   - Standalone "15" → is15d = true      (LR6 15-day variant of (1500mW…) column)
  *
- * Trays are always left empty so the backend assigns them positionally:
- *   1 group → trays 1-9 | 2 groups → 1-4 / 6-9 | 3 groups → 1-3 / 4-6 / 7-9
+ * Trays are always left empty so the backend assigns them positionally
+ * from the trays that actually contain valid data (broken/empty trays are
+ * skipped automatically):
+ *   1 group  → all valid trays (any count up to 9)
+ *   2 groups → first 4 valid trays / next 4 valid trays (any extra ignored)
+ *   3 groups → 1-3 / 4-6 / 7-9 (positional)
  */
 function parseRemark(raw) {
   if (!raw || !raw.trim()) return { model: null, groups: [], isQuarter: false, is15d: false };

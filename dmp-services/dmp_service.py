@@ -5533,6 +5533,32 @@ def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
     return sorted(eff_groups, key=_chuyen_sort_key)
 
 
+def _resolve_dmp_tray_list(
+    orig_group,  # DmpPerfGroup — may have an explicit .trays list
+    dmp_grp: dict,
+    g_idx: int,
+    auto_trays: list,
+    remark_chuyen_to_pos: dict,
+) -> list:
+    """Return the physical tray list for one DMP group.
+
+    Priority:
+    1. explicit ``orig_group.trays`` (user-configured in the UI)
+    2. positional slot derived from ``remark_chuyen_to_pos`` — active when the
+       batch remark has more production-line groups than ``entry.groups`` (Bug 1
+       fix: composite remark filtered to a single chuyen uses the full remark's
+       group count so the chuyen maps to the correct slot, e.g. 501 → trays 1-4)
+    3. plain ``auto_trays[g_idx]`` fallback
+    """
+    if getattr(orig_group, "trays", None):
+        return orig_group.trays
+    if remark_chuyen_to_pos:
+        dg_chuyen = str(dmp_grp.get("chuyen") or "").strip()
+        dg_pos = remark_chuyen_to_pos.get(dg_chuyen, g_idx)
+        return auto_trays[dg_pos] if dg_pos < len(auto_trays) else []
+    return auto_trays[g_idx] if g_idx < len(auto_trays) else []
+
+
 # Map special_type → row label for column-A matching in Excel template
 _SPECIAL_TYPE_LABEL: dict[str, str] = {
     "6020": "6020",
@@ -6563,7 +6589,30 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # has a unique remark; fall back to a literal id lookup so that
         # entries whose batch_id is the actual para_pub.id still work.
         batch_rows: list[dict] = []
-        if _clean_remark:
+        _exact_match_used = False
+        # Priority 1: exact bz match on the original raw_remark (which
+        # preserves any "15"/"Q" suffix).  This prevents the broad LIKE
+        # search from resolving the most-recent composite batch (e.g.
+        # "LR6 UD501 UD502" with a later fdrq) instead of the batch that
+        # specifically matches the entry's own remark (e.g. "LR6 UD501 15").
+        # When multiple DMP batches share the same bz remark (e.g. two
+        # "LR6 UDP501 15" runs on different dates), all of them are returned
+        # and each one gets its own report row — see multi-batch processing
+        # below.
+        _raw_remark_trimmed = (entry.raw_remark or "").strip()
+        if _raw_remark_trimmed:
+            _exact_bz_sql = (
+                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                " WHERE bz = ? ORDER BY fdrq DESC"
+            )
+            try:
+                _exact_rows = _read_dmpdata(_exact_bz_sql, (_raw_remark_trimmed,))
+                if _exact_rows:
+                    batch_rows = _exact_rows
+                    _exact_match_used = True
+            except pyodbc.Error:
+                pass
+        if not batch_rows and _clean_remark:
             _remark_search = _clean_remark
             # Leading wildcard tolerates legacy bz values that still carry an
             # arbitrary prefix (e.g. older "160226 LR6 UD501") while the
@@ -6600,6 +6649,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     )
                 except pyodbc.Error as exc:
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
+
+        # Save the entry-level routing flags before the per-batch merge so that
+        # each additional batch in the multi-batch loop can start from a clean
+        # baseline rather than accumulating flags across batches.
+        _iq_entry, _i15d_entry = _is_quarter, _is_15d
 
         if batch_rows:
             batch = batch_rows[0]
@@ -7031,6 +7085,31 @@ def _compute_dmp_perf_groups(  # noqa: C901
         n_groups = len(_dmp_eff_groups)
         auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
 
+        # Bug 1 fix: when the batch remark has more production-line groups than
+        # the configured entry groups (e.g. the entry was client-side filtered to
+        # only chuyen=501 from a composite "LR6 UD501 UD502" remark), use the
+        # full remark's group count for positional tray assignment so that
+        # chuyen 501 maps to slot 0 (trays 1–4) and chuyen 502 maps to slot 1
+        # (trays 6–9) — rather than treating the sole filtered group as if it
+        # owned all 9 trays.
+        _remark_n = len(_remark_bz_groups)
+        _no_explicit_trays = not any(g.get("trays") for g in _dmp_eff_groups)
+        _remark_chuyen_to_pos: dict[str, int] = {}
+        if _remark_n > n_groups and _no_explicit_trays:
+            _sorted_remark_gs = sorted(
+                _remark_bz_groups,
+                key=lambda rg: (
+                    (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
+                    if str(rg.get("chuyen", "")).isdigit()
+                    else (1, 0, str(rg.get("chuyen", "")))
+                ),
+            )
+            _remark_chuyen_to_pos = {
+                str(rg.get("chuyen", "")): i
+                for i, rg in enumerate(_sorted_remark_gs)
+            }
+            auto_trays = _DMP_TRAY_ASSIGNMENT.get(_remark_n, [list(range(1, 10))])
+
         # Hoist model/no-chuyen check outside the loop so the synthetic-group
         # path (LR61/9V with no configured groups) shares the same variable.
         _dmp_model_upper = entry.model.strip().upper()
@@ -7047,14 +7126,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _synth_loai = _synth_parsed[0].get("loai", "")
             _dmp_eff_groups = [{"loai": _synth_loai, "chuyen": "", "trays": [], "_orig_idx": None}]
             n_groups = 1
+            _remark_chuyen_to_pos = {}
             auto_trays = [list(range(1, 10))]
 
         for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
             _orig_idx = _dmp_grp.get("_orig_idx")
             if _orig_idx is not None:
                 orig_grp = entry.groups[_orig_idx]
-                trays = (orig_grp.trays if orig_grp.trays else
-                         (auto_trays[g_idx] if g_idx < len(auto_trays) else []))
+                trays = _resolve_dmp_tray_list(
+                    orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                )
             else:
                 # Synthetic group for no-chuyen model with no configured groups
                 trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
@@ -7094,6 +7175,101 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _row_target = groups.setdefault(sheet_key, {}).setdefault(row_key, {})
             for fdfs_label in fdfs_labels:
                 _row_target[fdfs_label] = perf
+
+        # Bug 2 fix: when the exact-match search returned more than one DMP
+        # batch (e.g. two "LR6 UDP501 15" runs recorded on different dates),
+        # process each additional batch so every run produces its own report row.
+        # _dmp_eff_groups, _remark_chuyen_to_pos and auto_trays were already
+        # computed in the shared group loop above and remain valid here because
+        # they depend only on entry.groups and _clean_remark (not the batch data).
+        for _xb in (batch_rows[1:] if _exact_match_used else []):
+            _is_quarter, _is_15d = _iq_entry, _i15d_entry
+            _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
+
+            # Resolve made date (para_singl.scrq) for the extra batch.
+            _xb_fdrq = ""
+            try:
+                _xb_sid: object = _xb_id
+                try:
+                    _xb_sid = int(_xb_id)
+                except (ValueError, TypeError):
+                    pass
+                _xb_scrq_rows = _read_dmpdata(
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_sid,)
+                )
+                for _xb_r in _xb_scrq_rows or []:
+                    _xv = _dm2000_get_value(_xb_r, "scrq")
+                    if _xv is not None and not _dmp_is_empty(str(_xv)):
+                        _xb_fdrq = _to_date(_xv)
+                        break
+            except pyodbc.Error:
+                pass
+            if not _xb_fdrq:
+                try:
+                    _xb_scrq_cdmc = _read_dmpdata(
+                        "SELECT scrq FROM para_singl WHERE cdmc = ?", (str(_xb_id),)
+                    )
+                    for _xb_r in _xb_scrq_cdmc or []:
+                        _xv = _dm2000_get_value(_xb_r, "scrq")
+                        if _xv is not None and not _dmp_is_empty(str(_xv)):
+                            _xb_fdrq = _to_date(_xv)
+                            break
+                except pyodbc.Error:
+                    pass
+            if not _xb_fdrq:
+                _xb_fdrq = _to_date(_dm2000_get_value(_xb, "fdrq"))
+
+            _xb_fdfs = str(_dm2000_get_value(_xb, "fdfs") or "").strip()
+            if not _xb_fdfs:
+                _xb_fdfs = str(_dm2000_get_value(_xb, "jstj") or "").strip()
+            _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
+            _is_quarter, _is_15d = _merge_bz_suffix_flags(_is_quarter, _is_15d, _xb_bz)
+            _xb_hfsj_raw = str(_dm2000_get_value(_xb, "hfsj") or "").strip().lower()
+            if _xb_hfsj_raw in {"times", "lần", "t", "lan", "count"}:
+                _xb_hfsj_unit = "times"
+            elif _xb_hfsj_raw in {"minute", "minutes", "phút", "m", "min", "phu"}:
+                _xb_hfsj_unit = "minute"
+            else:
+                _xb_hfsj_unit = "hour"
+            _xb_zzdy_raw = str(_dm2000_get_value(_xb, "zzdy") or "").strip()
+            _xb_ep_v: Optional[float] = None
+            if _xb_zzdy_raw:
+                _xb_tok = re.sub(r"[^0-9.\-]+$", "", _xb_zzdy_raw.split()[0])
+                try:
+                    _xb_ep_v = float(_xb_tok)
+                except (TypeError, ValueError):
+                    _xb_ep_v = None
+
+            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                _xb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+            else:
+                _xb_row_label = _xb_fdrq or entry.batch_id
+
+            for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
+                _orig_idx = _dmp_grp.get("_orig_idx")
+                if _orig_idx is not None:
+                    orig_grp = entry.groups[_orig_idx]
+                    _xb_trays = _resolve_dmp_tray_list(
+                        orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                    )
+                else:
+                    _xb_trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
+                if not _xb_trays:
+                    continue
+                _xb_perf = _dmp_compute_group_perf(_xb_id, _xb_trays, _xb_ep_v)
+                _xb_perf["hfsj_unit"] = _xb_hfsj_unit
+                if _dmp_model_upper in _dmp_no_chuyen_models:
+                    _xb_sheet = entry.model.strip()
+                else:
+                    _xb_sheet = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
+                _xb_eff_loai = _dmp_grp["loai"]
+                _xb_fdfs_labels = _lr6_route_fdfs_labels(
+                    _xb_fdfs if _xb_fdfs else _xb_eff_loai, entry.model, _is_15d
+                )
+                _xb_row_key = (_xb_row_label, _xb_eff_loai)
+                _xb_target = groups.setdefault(_xb_sheet, {}).setdefault(_xb_row_key, {})
+                for _xb_ffl in _xb_fdfs_labels:
+                    _xb_target[_xb_ffl] = _xb_perf
 
     return groups
 

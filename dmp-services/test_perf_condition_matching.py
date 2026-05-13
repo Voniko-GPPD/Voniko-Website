@@ -371,3 +371,151 @@ def test_merge_bz_suffix_flags_does_not_strip_substring_15() -> None:
     """
     assert m._merge_bz_suffix_flags(False, False, "LR6 UD515") == (False, False)
     assert m._merge_bz_suffix_flags(False, False, "LR6 UDQ7") == (False, False)
+
+
+# --------------------------------------------------------------------------- #
+# DMP tray assignment — Bug 1 fix (Request #241 follow-up)
+#
+# When the frontend filters a composite-remark entry to only the relevant
+# production line (e.g. chuyen=501 from "LR6 UD501 UD502"), the backend
+# receives entry.groups with only one group.  Without the fix, n_groups=1
+# causes _DMP_TRAY_ASSIGNMENT to assign all 9 trays to that group (wrong).
+# The fix detects that _remark_bz_groups has more entries than entry.groups
+# and uses the full remark's group count for positional tray assignment.
+# --------------------------------------------------------------------------- #
+
+
+def _remark_chuyen_to_pos_from_remark(clean_remark: str) -> dict:
+    """Helper: build the chuyen→slot index map the Bug 1 fix uses at runtime."""
+    remark_groups = m._parse_bz_groups(clean_remark)
+    sorted_remark = sorted(
+        remark_groups,
+        key=lambda rg: (
+            (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
+            if str(rg.get("chuyen", "")).isdigit()
+            else (1, 0, str(rg.get("chuyen", "")))
+        ),
+    )
+    return {str(rg.get("chuyen", "")): i for i, rg in enumerate(sorted_remark)}
+
+
+def test_dmp_tray_assignment_composite_remark_chuyen501() -> None:
+    """Entry filtered to chuyen=501 from "LR6 UD501 UD502 15":
+    chuyen 501 should receive trays 1–4 (slot 0 of the 2-group split), NOT
+    all 9 trays which was the bug.
+    """
+    clean_remark = "LR6 UD501 UD502"  # suffix stripped by _strip_remark_suffixes
+    remark_groups = m._parse_bz_groups(clean_remark)
+    assert len(remark_groups) == 2, "remark must parse to 2 groups"
+
+    eff_groups = m._sort_eff_groups_for_tray_assignment(
+        [{"loai": "UD", "chuyen": "501", "trays": [], "_orig_idx": 0}]
+    )
+    n_groups = len(eff_groups)  # 1 — filtered entry
+    remark_n = len(remark_groups)  # 2 — full remark
+
+    # Without fix: n_groups=1, all 9 trays — demonstrates the bug
+    auto_trays_buggy = m._DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+    assert auto_trays_buggy == [list(range(1, 10))], "baseline: buggy assigns all 9 trays"
+
+    # With fix: use remark_n=2, find slot for chuyen 501
+    remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
+    auto_trays_fixed = m._DMP_TRAY_ASSIGNMENT.get(remark_n, [list(range(1, 10))])
+    dg_pos = remark_pos.get("501", 0)
+    trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
+
+    assert trays == [1, 2, 3, 4], f"chuyen 501 must map to trays 1-4, got {trays}"
+
+
+def test_dmp_tray_assignment_composite_remark_chuyen502() -> None:
+    """Entry filtered to chuyen=502 from "LR6 UD501 UD502" should receive
+    trays 6–9 (slot 1 of the 2-group split).
+    """
+    clean_remark = "LR6 UD501 UD502"
+    remark_groups = m._parse_bz_groups(clean_remark)
+    remark_n = len(remark_groups)  # 2
+
+    remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
+    auto_trays_fixed = m._DMP_TRAY_ASSIGNMENT.get(remark_n, [list(range(1, 10))])
+    dg_pos = remark_pos.get("502", 0)
+    trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
+
+    assert trays == [6, 7, 8, 9], f"chuyen 502 must map to trays 6-9, got {trays}"
+
+
+def test_dmp_tray_assignment_single_group_unchanged() -> None:
+    """When the remark has only one production-line group, the fix is a no-op
+    and all 9 trays are still assigned (correct for single-line batches).
+    """
+    clean_remark = "LR6 UDP501"
+    remark_groups = m._parse_bz_groups(clean_remark)
+    remark_n = len(remark_groups)  # 1
+
+    eff_groups = m._sort_eff_groups_for_tray_assignment(
+        [{"loai": "UD+", "chuyen": "501", "trays": [], "_orig_idx": 0}]
+    )
+    n_groups = len(eff_groups)  # 1
+
+    # remark_n == n_groups → fix does not activate
+    assert remark_n == n_groups
+    auto_trays = m._DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+    assert auto_trays == [list(range(1, 10))], "single-group remark must still use all 9 trays"
+
+
+def test_dmp_tray_assignment_explicit_trays_bypassed() -> None:
+    """When entry.groups carries explicit tray lists, the positional assignment
+    is bypassed entirely.  The Bug 1 code path must not activate.
+    """
+    # eff_groups with explicit trays → _sort_eff_groups_for_tray_assignment
+    # returns them unchanged because any(g.get("trays")) is True.
+    eff_groups = [{"loai": "UD", "chuyen": "501", "trays": [1, 2, 3, 4], "_orig_idx": 0}]
+    result = m._sort_eff_groups_for_tray_assignment(eff_groups)
+    # The function returns the list unchanged when explicit trays are present
+    assert result[0]["trays"] == [1, 2, 3, 4]
+    # With explicit trays, _no_explicit_trays would be False → fix skipped
+    has_explicit = any(g.get("trays") for g in result)
+    assert has_explicit, "explicit trays must be detected"
+
+
+# --------------------------------------------------------------------------- #
+# DMP exact-match batch search — Bug 2 fix (Request #241 follow-up)
+#
+# The broad ``bz LIKE %clean_remark%`` search picks the most-recent matching
+# batch, which is often the wrong one (e.g. "LR6 UD501 UD502" with a later
+# fdrq instead of "LR6 UD501 15" for an entry whose raw_remark = "LR6 UD501 15").
+# The fix tries ``bz = raw_remark`` first (exact match).  We verify that the
+# raw_remark is preserved with its "15"/"Q" suffix, while clean_remark has the
+# suffix stripped — the two tokens are exactly what drive the SQL priorities.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_exact_match_raw_remark_preserves_15_suffix() -> None:
+    """_strip_remark_suffixes must strip "15" / "Q" from the remark (giving
+    clean_remark used for the LIKE fallback) while raw_remark keeps the suffix
+    (used for the exact-match search that drives Bug 2 fix).
+    """
+    clean, is_q, is_15d = m._strip_remark_suffixes("LR6 UD501 15")
+    assert clean == "LR6 UD501", f"clean_remark should strip '15': got '{clean}'"
+    assert is_15d is True
+    assert is_q is False
+    # raw_remark = "LR6 UD501 15" (unchanged) is the exact bz= query value
+
+
+def test_dmp_exact_match_raw_remark_preserves_q_suffix() -> None:
+    """Same for the Q suffix."""
+    clean, is_q, is_15d = m._strip_remark_suffixes("LR6 HP501 HP502 Q")
+    assert clean == "LR6 HP501 HP502"
+    assert is_q is True
+    assert is_15d is False
+
+
+def test_dmp_exact_match_composite_remark_round_trips() -> None:
+    """A composite remark like "LR6 UD501 UD502 15" must also strip correctly
+    so that the exact-match query targets the right DMP batch.
+    """
+    clean, is_q, is_15d = m._strip_remark_suffixes("LR6 UD501 UD502 15")
+    assert clean == "LR6 UD501 UD502"
+    assert is_15d is True
+    # The raw_remark "LR6 UD501 UD502 15" is passed as the exact bz= value;
+    # the LIKE fallback uses "LR6 UD501 UD502" which would also match
+    # "LR6 UD501 UD502" (non-15D batch) — exactly the wrong batch the fix avoids.

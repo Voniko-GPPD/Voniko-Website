@@ -5624,10 +5624,29 @@ def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
 def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) -> list[list[int]]:
     """Split active trays for positional production-line assignment.
 
-    For two-line remarks, assign the first production line the first four trays
-    that actually have data, then assign the second line the next four trays.
-    This replaces the old fixed [1-4]/[6-9] split so tray 5 can be used when an
-    earlier tray is empty/broken.
+    The split is purely sequential over the trays that actually contain valid
+    data (broken or empty trays must be filtered out by the caller before
+    invoking this helper).  This removes any dependency on fixed tray
+    positions so operators can freely move a battery to a spare tray when
+    the originally-assigned one is damaged.
+
+    Rules (matches the operator-facing requirement):
+
+      • 1 group  → all active trays (single-line testing accepts any count).
+      • 2 groups → first 4 active trays for line 1, next 4 active trays for
+        line 2.  Any extra trays beyond the 8th are ignored automatically
+        (e.g. when all 9 trays are populated, tray 9 is dropped so each line
+        still gets exactly 4 trays).
+      • 3 groups → 3 + 3 + 3 over the active trays.
+
+    Examples (n_groups == 2):
+
+      • active = [1, 2, 4, 5, 6, 7, 8, 9]   (tray 3 broken, battery moved)
+        → [[1, 2, 4, 5], [6, 7, 8, 9]]
+      • active = [1, 2, 3, 4, 5, 6, 8, 9]   (tray 7 broken, battery moved)
+        → [[1, 2, 3, 4], [5, 6, 8, 9]]
+      • active = [1, 2, 3, 4, 5, 6, 7, 8, 9] (all 9 valid)
+        → [[1, 2, 3, 4], [5, 6, 7, 8]]      (tray 9 ignored)
     """
     active = sorted(
         {

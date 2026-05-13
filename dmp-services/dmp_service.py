@@ -5546,7 +5546,7 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
     """
     active = sorted(
         {
-            int(t)
+            t
             for t in active_trays
             if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
         }

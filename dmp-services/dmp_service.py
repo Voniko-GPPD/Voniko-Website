@@ -614,6 +614,8 @@ def _parse_access_date(v) -> Optional[str]:
         Covers DMP ``para_singl.scrq`` entries like ``"2024/10"``.
       * ``YYYY/M/D-end`` range notation — only the start date is used.
         Covers DMP entries like ``"2025/3/15-17"`` or ``"2025/03/20-21"``.
+        Also handles compound suffixes such as ``"2025/3/29-31-1"`` (the day
+        component ``"29-31-1"`` has its leading integer ``29`` extracted).
 
     Garbage like ``"20265/7/10"`` or ``"None"`` returns ``None``.
     """

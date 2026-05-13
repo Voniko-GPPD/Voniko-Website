@@ -693,6 +693,8 @@ def test_dmp_row_label_uses_scrq_over_fdrq(monkeypatch: pytest.MonkeyPatch) -> N
     ("2025/03/20-21",  "2025-03-20"),
     ("2025/4/30-1/5",  None),           # cross-month range spans 4 slash-parts → unparseable
     ("2025/3/29-31",   "2025-03-29"),
+    # Compound suffix "29-31-1": observed in production dmpdata.mdb (para_singl.scrq).
+    # The day component "29-31-1" is interpreted as start-day 29, rest is discarded.
     ("2025/3/29-31-1", "2025-03-29"),
     # Garbage / unparseable → None
     ("20225/6/9",      None),           # typo year

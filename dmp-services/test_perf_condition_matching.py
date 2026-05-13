@@ -378,10 +378,9 @@ def test_merge_bz_suffix_flags_does_not_strip_substring_15() -> None:
 #
 # When the frontend filters a composite-remark entry to only the relevant
 # production line (e.g. chuyen=501 from "LR6 UD501 UD502"), the backend
-# receives entry.groups with only one group.  Without the fix, n_groups=1
-# causes _DMP_TRAY_ASSIGNMENT to assign all 9 trays to that group (wrong).
-# The fix detects that _remark_bz_groups has more entries than entry.groups
-# and uses the full remark's group count for positional tray assignment.
+# receives entry.groups with only one group.  The fix detects that
+# _remark_bz_groups has more entries than entry.groups and uses the full
+# remark's group count for positional tray assignment.
 # --------------------------------------------------------------------------- #
 
 
@@ -420,7 +419,7 @@ def test_dmp_tray_assignment_composite_remark_chuyen501() -> None:
 
     # With fix: use remark_n=2, find slot for chuyen 501
     remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
-    auto_trays_fixed = m._DMP_TRAY_ASSIGNMENT.get(remark_n, [list(range(1, 10))])
+    auto_trays_fixed = m._split_active_trays_for_group_count(remark_n, list(range(1, 10)))
     dg_pos = remark_pos.get("501", 0)
     trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
 
@@ -428,19 +427,28 @@ def test_dmp_tray_assignment_composite_remark_chuyen501() -> None:
 
 
 def test_dmp_tray_assignment_composite_remark_chuyen502() -> None:
-    """Entry filtered to chuyen=502 from "LR6 UD501 UD502" should receive
-    trays 6–9 (slot 1 of the 2-group split).
+    """Entry filtered to chuyen=502 from "LR6 UD501 UD502" should receive the
+    next 4 active trays (slot 1 of the 2-group split).
     """
     clean_remark = "LR6 UD501 UD502"
     remark_groups = m._parse_bz_groups(clean_remark)
     remark_n = len(remark_groups)  # 2
 
     remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
-    auto_trays_fixed = m._DMP_TRAY_ASSIGNMENT.get(remark_n, [list(range(1, 10))])
+    auto_trays_fixed = m._split_active_trays_for_group_count(remark_n, list(range(1, 10)))
     dg_pos = remark_pos.get("502", 0)
     trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
 
-    assert trays == [6, 7, 8, 9], f"chuyen 502 must map to trays 6-9, got {trays}"
+    assert trays == [5, 6, 7, 8], f"chuyen 502 must map to trays 5-8, got {trays}"
+
+
+def test_dmp_tray_assignment_two_lines_uses_first_eight_active_trays() -> None:
+    """For two-line remarks, empty/broken trays are skipped before assigning
+    the first 4 active trays to line 1 and the next 4 active trays to line 2.
+    """
+    assert m._split_active_trays_for_group_count(
+        2, [1, 2, 4, 5, 6, 7, 8, 9]
+    ) == [[1, 2, 4, 5], [6, 7, 8, 9]]
 
 
 def test_dmp_tray_assignment_single_group_unchanged() -> None:
@@ -519,3 +527,67 @@ def test_dmp_exact_match_composite_remark_round_trips() -> None:
     # The raw_remark "LR6 UD501 UD502 15" is passed as the exact bz= value;
     # the LIKE fallback uses "LR6 UD501 UD502" which would also match
     # "LR6 UD501 UD502" (non-15D batch) — exactly the wrong batch the fix avoids.
+
+
+def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If exact bz matching misses because para_pub.bz lacks the 15 suffix, the
+    LIKE fallback may return several LR6 501 batches.  All matched batches must
+    become report rows; previously only the first row was processed.
+    """
+    matched_batches = [
+        {
+            "id": f"B{i}",
+            "dcxh": "LR6",
+            "fdrq": f"2026-04-{i:02d}",
+            "fdfs": "",
+            "jstj": "(1500mW2s,650mW28s)10T/h,24h/d",
+            "hfsj": "times",
+            "zzdy": "1.05",
+            "bz": "LR6 UD501",
+        }
+        for i in range(1, 4)
+    ]
+
+    def fake_read_dmpdata(sql, params=()):
+        if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            return []
+        if "FROM para_pub" in sql and "WHERE bz LIKE ?" in sql:
+            return matched_batches
+        if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
+            return [{"baty": i, "cdmc": f"tray{i}.mdb"} for i in range(1, 10)]
+        if "SELECT scrq FROM para_singl" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
+    monkeypatch.setattr(
+        m,
+        "_dmp_compute_group_perf",
+        lambda batch_id, trays, endpoint_voltage: {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": int(str(batch_id).lstrip("B")),
+            "uniform_rate": 100.0,
+            "is_dmp": True,
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[])],
+                raw_remark="LR6 UD501 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    rows = groups["LR6 501"]
+    assert set(rows) == {
+        ("2026-04-01", "UD"),
+        ("2026-04-02", "UD"),
+        ("2026-04-03", "UD"),
+    }
+    assert rows[("2026-04-03", "UD")][m._LR6_1500MW_15D_LABEL]["avg_count"] == 3

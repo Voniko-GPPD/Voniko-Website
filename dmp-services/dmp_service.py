@@ -5473,10 +5473,13 @@ def _resolve_dmp_perf_template_path(template_name: str) -> str:
     return str(result)
 
 
-# Tray assignment by group count (fixed convention)
+# Fallback tray assignment by group count.  When the active tray list for a
+# batch/archive is known, use _split_active_trays_for_group_count instead so
+# empty/broken trays are skipped before assigning the first 4 trays to line 1
+# and the next 4 trays to line 2.
 _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     1: [list(range(1, 10))],              # 9 trays
-    2: [list(range(1, 5)), list(range(6, 10))],   # 4 + 4, skip tray 5
+    2: [list(range(1, 5)), list(range(5, 9))],    # fallback: first 4 + next 4
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
 
@@ -5503,15 +5506,15 @@ def _sheet_model_sort_key(sheet_key: str) -> tuple:
 def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
     """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
 
-    The positional *_DMP_TRAY_ASSIGNMENT* table maps group index → physical
-    tray slots (group 0 → [1-4], group 1 → [6-9], …).  The only way to
+    The positional tray split maps group index → active physical trays
+    (for two lines: group 0 → first 4 active trays, group 1 → next 4).  The only way to
     guarantee the right batteries are read for each production-line group is to
     always sort groups by **chuyen number** (ascending) before the positional
     assignment runs:
 
       • lower chuyen number  →  lower physical tray slots
-      • chuyen 501 → index 0 → trays 1-4
-      • chuyen 503 → index 1 → trays 6-9
+      • chuyen 501 → index 0 → first 4 active trays
+      • chuyen 503 → index 1 → next 4 active trays
 
     Sorting by battery grade (loai) was wrong: a remark like "HP501 UDP503"
     puts HP on the lower-numbered line, so "UD/UD+ before HP" ordering would
@@ -5531,6 +5534,55 @@ def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
             return (1, 0, c)
 
     return sorted(eff_groups, key=_chuyen_sort_key)
+
+
+def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) -> list[list[int]]:
+    """Split active trays for positional production-line assignment.
+
+    For two-line remarks, assign the first production line the first four trays
+    that actually have data, then assign the second line the next four trays.
+    This replaces the old fixed [1-4]/[6-9] split so tray 5 can be used when an
+    earlier tray is empty/broken.
+    """
+    active = sorted(
+        {
+            t
+            for t in active_trays
+            if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+        }
+    )
+    if not active:
+        return _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+    if n_groups == 1:
+        return [active]
+    if n_groups == 2:
+        return [active[:4], active[4:8]]
+    if n_groups == 3:
+        return [active[:3], active[3:6], active[6:9]]
+    return _DMP_TRAY_ASSIGNMENT.get(n_groups, [active])
+
+
+def _get_dmp_active_trays(batch_id: str) -> list[int]:
+    """Return DMP tray numbers that have a para_singl archive for a batch."""
+    try:
+        rows = _read_dmpdata(
+            "SELECT baty, cdmc FROM para_singl WHERE sid = ?", (batch_id,)
+        )
+    except pyodbc.Error:
+        rows = []
+    active: list[int] = []
+    for row in rows or []:
+        cdmc = _dm2000_get_value(row, "cdmc")
+        if _dmp_is_empty(cdmc):
+            continue
+        raw_baty = _dm2000_get_value(row, "baty")
+        try:
+            baty = int(raw_baty)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= baty <= MAX_BATTERY_NUMBER:
+            active.append(baty)
+    return sorted(set(active))
 
 
 def _resolve_dmp_tray_list(
@@ -6378,8 +6430,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                  if str(bg.get("chuyen", "")) == _eg_chuyen_str),
                                 0,
                             )
-                            _eg_split = _DMP_TRAY_ASSIGNMENT.get(
-                                len(_eg_arch_bz_gs), [_eg_all_batys]
+                            _eg_split = _split_active_trays_for_group_count(
+                                len(_eg_arch_bz_gs), _eg_all_batys
                             )
                             _eg_batys = (
                                 _eg_split[_eg_g_idx] if _eg_g_idx < len(_eg_split) else _eg_all_batys
@@ -6485,9 +6537,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # Auto-detect groups from the archive's bz/remarks when the entry's groups
             # have no explicit tray assignments.  A bz like "LR6 UDP501 HP503" implies
-            # two groups with positional tray assignment ([1-4] for group-0, [6-9] for
-            # group-1).  Using all batteries for a single group would mix channels from
-            # different production lines and produce an incorrect average.
+            # two groups with positional tray assignment (first 4 active trays for
+            # group-0, next 4 active trays for group-1).  Using all batteries for a
+            # single group would mix channels from different production lines and
+            # produce an incorrect average.
             _dm2k_bz_raw = str(_dm2000_get_value(
                 _arch_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
             ) or "").strip()
@@ -6528,8 +6581,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
                 _dm2k_eff_groups
             )
-            _dm2k_auto_trays: list[list[int]] = _DMP_TRAY_ASSIGNMENT.get(
-                _dm2k_n, [_dm2k_all_batys]
+            _dm2k_auto_trays: list[list[int]] = _split_active_trays_for_group_count(
+                _dm2k_n, _dm2k_all_batys
             )
 
             model_upper = entry.model.strip().upper()
@@ -6589,7 +6642,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # has a unique remark; fall back to a literal id lookup so that
         # entries whose batch_id is the actual para_pub.id still work.
         batch_rows: list[dict] = []
-        _exact_match_used = False
         # Priority 1: exact bz match on the original raw_remark (which
         # preserves any "15"/"Q" suffix).  This prevents the broad LIKE
         # search from resolving the most-recent composite batch (e.g.
@@ -6609,7 +6661,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _exact_rows = _read_dmpdata(_exact_bz_sql, (_raw_remark_trimmed,))
                 if _exact_rows:
                     batch_rows = _exact_rows
-                    _exact_match_used = True
             except pyodbc.Error:
                 pass
         if not batch_rows and _clean_remark:
@@ -6868,8 +6919,8 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                      if str(bg.get("chuyen", "")) == _feg_chuyen_str),
                                     0,
                                 )
-                                _feg_split = _DMP_TRAY_ASSIGNMENT.get(
-                                    len(_feg_arch_bz_gs), [_feg_all_batys]
+                                _feg_split = _split_active_trays_for_group_count(
+                                    len(_feg_arch_bz_gs), _feg_all_batys
                                 )
                                 _feg_batys = (
                                     _feg_split[_feg_g_idx]
@@ -6960,9 +7011,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     _fb_all_batys = _get_batys_for_archive(_fb_resolved)
                     # Auto-detect groups from the archive's bz/remarks when the entry's
                     # groups have no explicit tray assignments.  A bz like "LR6 UDP501
-                    # HP503" implies two groups with positional tray assignment ([1-4]
-                    # for group-0, [6-9] for group-1).  Using all batteries for a single
-                    # group would mix channels from different production lines.
+                    # HP503" implies two groups with positional tray assignment (first
+                    # 4 active trays for group-0, next 4 active trays for group-1).
+                    # Using all batteries for a single group would mix channels from
+                    # different production lines.
                     _fb_bz_raw = str(_dm2000_get_value(
                         _fb_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
                     ) or "").strip()
@@ -6980,11 +7032,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_n = len(_fb_eff_groups)
                     # Preserve remark-position order — _parse_bz_groups and parseRemark both
                     # return groups left-to-right which directly maps to physical tray slots
-                    # (first group → slot 0 → [1-4] or [1-3], etc.).
+                    # (first group → slot 0 → first active chunk, etc.).
                     # Do NOT call _sort_eff_groups_for_tray_assignment here: sorting by chuyen
                     # number gives the wrong assignment when chuyen order differs from remark
                     # order (e.g. "LR6 UD502 HP503 UD501": 502 is physically first).
-                    _fb_auto_trays = _DMP_TRAY_ASSIGNMENT.get(_fb_n, [_fb_all_batys])
+                    _fb_auto_trays = _split_active_trays_for_group_count(_fb_n, _fb_all_batys)
                     _fb_model_upper = entry.model.strip().upper()
                     _fb_no_chuyen = {"LR61", "9V", "6LR61"}
                     # For no-chuyen models with no configured groups, synthesize one
@@ -7083,15 +7135,18 @@ def _compute_dmp_perf_groups(  # noqa: C901
         ]
         _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups)
         n_groups = len(_dmp_eff_groups)
-        auto_trays = _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+        _dmp_active_trays = (
+            _get_dmp_active_trays(actual_batch_id) if batch_rows else list(range(1, 10))
+        )
+        auto_trays = _split_active_trays_for_group_count(n_groups, _dmp_active_trays)
 
         # Bug 1 fix: when the batch remark has more production-line groups than
         # the configured entry groups (e.g. the entry was client-side filtered to
         # only chuyen=501 from a composite "LR6 UD501 UD502" remark), use the
         # full remark's group count for positional tray assignment so that
-        # chuyen 501 maps to slot 0 (trays 1–4) and chuyen 502 maps to slot 1
-        # (trays 6–9) — rather than treating the sole filtered group as if it
-        # owned all 9 trays.
+        # chuyen 501 maps to slot 0 (first active chunk) and chuyen 502 maps to
+        # slot 1 (next active chunk) — rather than treating the sole filtered
+        # group as if it owned all 9 trays.
         _remark_n = len(_remark_bz_groups)
         _no_explicit_trays = not any(g.get("trays") for g in _dmp_eff_groups)
         _remark_chuyen_to_pos: dict[str, int] = {}
@@ -7108,7 +7163,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 str(rg.get("chuyen", "")): i
                 for i, rg in enumerate(_sorted_remark_gs)
             }
-            auto_trays = _DMP_TRAY_ASSIGNMENT.get(_remark_n, [list(range(1, 10))])
+            auto_trays = _split_active_trays_for_group_count(_remark_n, _dmp_active_trays)
 
         # Hoist model/no-chuyen check outside the loop so the synthetic-group
         # path (LR61/9V with no configured groups) shares the same variable.
@@ -7176,15 +7231,17 @@ def _compute_dmp_perf_groups(  # noqa: C901
             for fdfs_label in fdfs_labels:
                 _row_target[fdfs_label] = perf
 
-        # Bug 2 fix: when the exact-match search returned more than one DMP
-        # batch (e.g. two "LR6 UDP501 15" runs recorded on different dates),
-        # process each additional batch so every run produces its own report row.
-        # _dmp_eff_groups, _remark_chuyen_to_pos and auto_trays were already
-        # computed in the shared group loop above and remain valid here because
-        # they depend only on entry.groups and _clean_remark (not the batch data).
-        for _xb in (batch_rows[1:] if _exact_match_used else []):
+        # Process every additional matched DMP batch so repeated runs with the
+        # same remark (including LIKE fallback matches where bz lacks a "15"/"Q"
+        # suffix) each produce their own report row.
+        for _xb in batch_rows[1:]:
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
+            _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
+            _xb_auto_trays = _split_active_trays_for_group_count(
+                _remark_n if _remark_chuyen_to_pos else n_groups,
+                _xb_active_trays,
+            )
 
             # Resolve made date (para_singl.scrq) for the extra batch.
             _xb_fdrq = ""
@@ -7250,10 +7307,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _orig_idx is not None:
                     orig_grp = entry.groups[_orig_idx]
                     _xb_trays = _resolve_dmp_tray_list(
-                        orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                        orig_grp, _dmp_grp, g_idx, _xb_auto_trays, _remark_chuyen_to_pos
                     )
                 else:
-                    _xb_trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
+                    _xb_trays = _xb_auto_trays[g_idx] if g_idx < len(_xb_auto_trays) else list(range(1, 10))
                 if not _xb_trays:
                     continue
                 _xb_perf = _dmp_compute_group_perf(_xb_id, _xb_trays, _xb_ep_v)

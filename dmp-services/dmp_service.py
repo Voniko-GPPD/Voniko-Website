@@ -5479,7 +5479,7 @@ def _resolve_dmp_perf_template_path(template_name: str) -> str:
 # and the next 4 trays to line 2.
 _DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
     1: [list(range(1, 10))],              # 9 trays
-    2: [list(range(1, 5)), list(range(5, 9))],    # first 4 + next 4
+    2: [list(range(1, 5)), list(range(5, 9))],    # fallback: first 4 + next 4
     3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
 }
 
@@ -5548,7 +5548,7 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
         {
             int(t)
             for t in active_trays
-            if isinstance(t, int) and 1 <= int(t) <= MAX_BATTERY_NUMBER
+            if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
         }
     )
     if not active:

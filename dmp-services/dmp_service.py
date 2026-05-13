@@ -598,6 +598,92 @@ def shadow_copy_dm2000(mdb_path: str):
         yield tmp
 
 
+def _parse_access_date(v) -> Optional[str]:
+    """Normalise an Access date value to canonical ``YYYY-MM-DD`` string.
+
+    Returns ``None`` when the input cannot be interpreted as a real date.
+
+    Handles datetime-like objects plus the date string formats the Access
+    databases actually emit:
+
+      * ``YYYY-MM-DD`` / ``YYYY-M-D`` (DMP ``para_pub.fdrq`` style)
+      * ``YYYY/M/D``  / ``YYYY/MM/DD`` (DM2000 ``ls_jb_cs.scrq`` style)
+      * ``M/D/YYYY``  / ``MM/DD/YYYY`` (DMP ``para_singl.scrq`` style)
+      * ``D/M/YYYY``  only when the first component is > 12 (unambiguous)
+      * ``YYYY/M`` or ``YYYY-M`` partial date — treated as 1st of the month.
+        Covers DMP ``para_singl.scrq`` entries like ``"2024/10"``.
+      * ``YYYY/M/D-end`` range notation — only the start date is used.
+        Covers DMP entries like ``"2025/3/15-17"`` or ``"2025/03/20-21"``.
+
+    Garbage like ``"20265/7/10"`` or ``"None"`` returns ``None``.
+    """
+    if v is None:
+        return None
+    if hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except (ValueError, AttributeError):
+            return None
+    s = str(v).strip()
+    if not s or s.lower() in ("none", "null"):
+        return None
+    # Strip any time portion ("2024-07-12 15:30:00" or ISO "2024-07-12T15:30")
+    s = s.split()[0].split("T")[0]
+    for sep in ("-", "/"):
+        if sep not in s:
+            continue
+        parts = s.split(sep)
+        # Handle YYYY/M or YYYY-M partial date (year + month, no day).
+        # Treat as the 1st of that month.  Covers entries like "2024/10".
+        if len(parts) == 2:
+            try:
+                a, b = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                continue
+            if 1900 <= a <= 2999 and 1 <= b <= 12:
+                try:
+                    return date(a, b, 1).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            continue
+        if len(parts) != 3:
+            continue
+        try:
+            a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
+        except (ValueError, TypeError):
+            # Handle range notation in the day component: "15-17" → 15.
+            # Covers DMP para_singl.scrq entries like "2025/3/15-17".
+            try:
+                a = int(parts[0])
+                b = int(parts[1])
+                _c_m = re.match(r'^\d+', str(parts[2]))
+                if not _c_m:
+                    continue
+                c = int(_c_m.group())
+            except (ValueError, TypeError):
+                continue
+        # YYYY-M-D (or YYYY/M/D): first component is a 4-digit year
+        if 1900 <= a <= 2999 and 1 <= b <= 12 and 1 <= c <= 31:
+            try:
+                return date(a, b, c).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        # M/D/YYYY: third component is a 4-digit year, first <= 12
+        if 1900 <= c <= 2999 and 1 <= a <= 12 and 1 <= b <= 31:
+            try:
+                return date(c, a, b).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        # D/M/YYYY: third component is a 4-digit year, first > 12 (unambiguous)
+        if 1900 <= c <= 2999 and 13 <= a <= 31 and 1 <= b <= 12:
+            try:
+                return date(c, b, a).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+    return None
+
+
 def _inline_params(sql: str, params: tuple) -> str:
     """Inline params into SQL for Access ODBC drivers that don't support SQLBindParameter."""
     parts = sql.split("?")
@@ -2766,10 +2852,7 @@ def get_batches(year: Optional[int] = None):
     def _to_date_str(value):
         if value is None:
             return None
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d")
-        s = str(value)[:10]
-        return s if s and s != "None" else None
+        return _parse_access_date(value)
 
     result = []
     for row in rows:
@@ -6210,68 +6293,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
     """
 
     def _to_date(v) -> str:
-        """Normalise a date value to canonical ``YYYY-MM-DD``.
+        """Normalise an Access date value to ``YYYY-MM-DD``; returns ``""`` on failure.
 
-        Returns ``""`` when the input cannot be interpreted as a real date.
-
-        Handles datetime-like objects plus the date string formats the Access
-        databases actually emit:
-
-          * ``YYYY-MM-DD`` and ``YYYY-M-D`` (DMP ``para_pub.fdrq`` style)
-          * ``YYYY/M/D``  and ``YYYY/MM/DD`` (DM2000 ``ls_jb_cs.scrq`` style,
-            e.g. ``"2026/1/15"``)
-          * ``M/D/YYYY``  and ``MM/DD/YYYY`` (DMP ``para_singl.scrq`` style,
-            e.g. ``"7/31/2024"``)
-          * ``D/M/YYYY``  is only inferred when the first component is ``> 12``
-            (otherwise it is ambiguous with M/D/YYYY and we prefer the latter,
-            which is what the database actually uses).
-
-        Garbage like ``"20265/7/10"`` or ``"None"`` is rejected and returns
-        ``""`` so callers can fall back to a different field instead of
-        propagating a bogus row label.
+        Delegates to the module-level ``_parse_access_date`` helper which handles
+        all Access date string formats including ``M/D/YYYY``, ``YYYY/M/D``,
+        ``YYYY-MM-DD``, partial ``YYYY/M`` (→ 1st of month), and range-notation
+        day components like ``"2025/3/15-17"`` (→ start date ``"2025-03-15"``).
         """
-        if v is None:
-            return ""
-        if hasattr(v, "strftime"):
-            try:
-                return v.strftime("%Y-%m-%d")
-            except (ValueError, AttributeError):
-                return ""
-        s = str(v).strip()
-        if not s or s.lower() in ("none", "null"):
-            return ""
-        # Strip any time portion ("2024-07-12 15:30:00" or ISO "2024-07-12T15:30")
-        s = s.split()[0].split("T")[0]
-        for sep in ("-", "/"):
-            if sep not in s:
-                continue
-            parts = s.split(sep)
-            if len(parts) != 3:
-                continue
-            try:
-                a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
-            except (ValueError, TypeError):
-                continue
-            # YYYY-M-D (or YYYY/M/D): first component is a 4-digit year
-            if 1900 <= a <= 2999 and 1 <= b <= 12 and 1 <= c <= 31:
-                try:
-                    return date(a, b, c).strftime("%Y-%m-%d")
-                except ValueError:
-                    return ""
-            # M/D/YYYY: third component is a 4-digit year, first <= 12
-            if 1900 <= c <= 2999 and 1 <= a <= 12 and 1 <= b <= 31:
-                try:
-                    return date(c, a, b).strftime("%Y-%m-%d")
-                except ValueError:
-                    return ""
-            # D/M/YYYY: third component is a 4-digit year, first > 12 (unambiguous)
-            if 1900 <= c <= 2999 and 13 <= a <= 31 and 1 <= b <= 12:
-                try:
-                    return date(c, b, a).strftime("%Y-%m-%d")
-                except ValueError:
-                    return ""
-            return ""
-        return ""
+        return _parse_access_date(v) or ""
 
     groups: dict[str, dict] = {}
 
@@ -6724,7 +6753,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 for _r in rows or []:
                     _v = _dm2000_get_value(_r, "scrq")
                     if _v is not None and not _dmp_is_empty(str(_v)):
-                        return _to_date(_v)
+                        _d = _to_date(_v)
+                        if _d:
+                            return _d
                 return ""
 
             # para_singl.sid is a TEXT column; always query with the string value so
@@ -7252,8 +7283,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 for _xb_r in _xb_scrq_rows or []:
                     _xv = _dm2000_get_value(_xb_r, "scrq")
                     if _xv is not None and not _dmp_is_empty(str(_xv)):
-                        _xb_fdrq = _to_date(_xv)
-                        break
+                        _d = _to_date(_xv)
+                        if _d:
+                            _xb_fdrq = _d
+                            break
             except pyodbc.Error:
                 pass
             if not _xb_fdrq:
@@ -7264,8 +7297,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     for _xb_r in _xb_scrq_cdmc or []:
                         _xv = _dm2000_get_value(_xb_r, "scrq")
                         if _xv is not None and not _dmp_is_empty(str(_xv)):
-                            _xb_fdrq = _to_date(_xv)
-                            break
+                            _d = _to_date(_xv)
+                            if _d:
+                                _xb_fdrq = _d
+                                break
                 except pyodbc.Error:
                     pass
             if not _xb_fdrq:

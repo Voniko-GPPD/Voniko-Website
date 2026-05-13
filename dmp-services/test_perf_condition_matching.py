@@ -670,3 +670,166 @@ def test_dmp_row_label_uses_scrq_over_fdrq(monkeypatch: pytest.MonkeyPatch) -> N
     assert ("2024-07-31", "HP") not in rows, (
         "Row label must not be para_pub.fdrq '2024-07-31'; scrq must take precedence"
     )
+
+# --------------------------------------------------------------------------- #
+# _parse_access_date — date format normalisation
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("raw, expected", [
+    # Standard formats (must remain unchanged)
+    ("7/31/2024",      "2024-07-31"),   # M/D/YYYY (DMP para_singl legacy)
+    ("07/31/2024",     "2024-07-31"),   # MM/DD/YYYY
+    ("1/5/2025",       "2025-01-05"),   # M/D/YYYY single-digit month
+    ("2025/3/14",      "2025-03-14"),   # YYYY/M/D (DM2000 / newer DMP)
+    ("2026/1/6",       "2026-01-06"),   # YYYY/M/D single-digit month+day
+    ("2026-01-06",     "2026-01-06"),   # YYYY-MM-DD
+    ("2026-1-6",       "2026-01-06"),   # YYYY-M-D
+    # Partial date YYYY/M → 1st of month
+    ("2024/10",        "2024-10-01"),   # only year+month, no day
+    ("2025/3",         "2025-03-01"),
+    ("2026-04",        "2026-04-01"),   # dash separator
+    # Range-day notation → start date only
+    ("2025/3/15-17",   "2025-03-15"),   # day range within month
+    ("2025/03/20-21",  "2025-03-20"),
+    ("2025/4/30-1/5",  None),           # cross-month range spans 4 slash-parts → unparseable
+    ("2025/3/29-31",   "2025-03-29"),
+    ("2025/3/29-31-1", "2025-03-29"),
+    # Garbage / unparseable → None
+    ("20225/6/9",      None),           # typo year
+    ("None",           None),
+    ("",               None),
+    ("19/2-25/2",      None),           # no-year range
+])
+def test_parse_access_date(raw, expected):
+    """_parse_access_date must normalise all Access date string formats to YYYY-MM-DD."""
+    assert m._parse_access_date(raw) == expected, f"_parse_access_date({raw!r}) should be {expected!r}"
+
+
+def test_dmp_row_label_scrq_range_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When para_singl.scrq uses range-day notation (e.g. '2025/3/15-17') the
+    View Report row label must be the start date ('2025-03-15'), NOT fdrq.
+    """
+    batch_id = "2025031510000001"
+    fdrq_value = "2025-04-01"           # discharge date — must NOT appear as row label
+    scrq_value = "2025/3/15-17"         # range notation manufacture date
+    scrq_start_date = "2025-03-15"      # expected row label
+
+    matched_batches = [{
+        "id": batch_id,
+        "dcxh": "LR6HP",
+        "fdrq": fdrq_value,
+        "fdfs": "(1500mW2s,650mW28s)10T/h,24h/d",
+        "jstj": "(1500mW2s,650mW28s)10T/h,24h/d",
+        "hfsj": "times",
+        "zzdy": "1.05",
+        "bz": "LR6 HP999",
+    }]
+
+    def fake_read_dmpdata(sql, params=()):
+        if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            return matched_batches
+        if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
+            return [{"baty": i, "cdmc": f"tray{i}.mdb"} for i in range(1, 10)]
+        if "SELECT scrq FROM para_singl WHERE sid = ?" in sql:
+            return [{"scrq": scrq_value}]
+        if "SELECT scrq FROM para_singl" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
+    monkeypatch.setattr(
+        m,
+        "_dmp_compute_group_perf",
+        lambda batch_id, trays, endpoint_voltage: {
+            "avg_hours": 8.0,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": 98.0,
+            "is_dmp": True,
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="HP", chuyen="999", trays=[])],
+                raw_remark="LR6 HP999",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    rows = groups["LR6 999"]
+    assert (scrq_start_date, "HP") in rows, (
+        f"Expected row label '{scrq_start_date}' (scrq start) but got: {list(rows.keys())}"
+    )
+    assert (fdrq_value, "HP") not in rows, (
+        f"Row label must not be fdrq '{fdrq_value}'; scrq range start must take precedence"
+    )
+
+
+def test_dmp_row_label_scrq_partial_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When para_singl.scrq is a partial 'YYYY/M' date the View Report row
+    label must be the 1st of that month, NOT fdrq.
+    """
+    batch_id = "2024100100000001"
+    fdrq_value = "2024-11-01"
+    scrq_value = "2024/10"              # year+month only, no day
+    scrq_parsed_date = "2024-10-01"     # expected row label: 1st of the month
+
+    matched_batches = [{
+        "id": batch_id,
+        "dcxh": "LR6HP",
+        "fdrq": fdrq_value,
+        "fdfs": "(1500mW2s,650mW28s)10T/h,24h/d",
+        "jstj": "(1500mW2s,650mW28s)10T/h,24h/d",
+        "hfsj": "times",
+        "zzdy": "1.05",
+        "bz": "LR6 HP888",
+    }]
+
+    def fake_read_dmpdata(sql, params=()):
+        if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            return matched_batches
+        if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
+            return [{"baty": i, "cdmc": f"tray{i}.mdb"} for i in range(1, 10)]
+        if "SELECT scrq FROM para_singl WHERE sid = ?" in sql:
+            return [{"scrq": scrq_value}]
+        if "SELECT scrq FROM para_singl" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
+    monkeypatch.setattr(
+        m,
+        "_dmp_compute_group_perf",
+        lambda batch_id, trays, endpoint_voltage: {
+            "avg_hours": 7.5,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": 97.0,
+            "is_dmp": True,
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="HP", chuyen="888", trays=[])],
+                raw_remark="LR6 HP888",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    rows = groups["LR6 888"]
+    assert (scrq_parsed_date, "HP") in rows, (
+        f"Expected row label '{scrq_parsed_date}' (scrq 1st of month) but got: {list(rows.keys())}"
+    )
+    assert (fdrq_value, "HP") not in rows, (
+        f"Row label must not be fdrq '{fdrq_value}'; scrq partial date must take precedence"
+    )

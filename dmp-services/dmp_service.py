@@ -6727,15 +6727,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         return _to_date(_v)
                 return ""
 
-            # Try an int cast first so a single query works for both string and numeric sid.
+            # para_singl.sid is a TEXT column; always query with the string value so
+            # that the Access ODBC driver does a proper text comparison.  An earlier
+            # int() cast caused the 16-digit string IDs (e.g. '2024073110512202') to be
+            # sent as BIGINT parameters, which Access cannot match against a TEXT column
+            # and always returned 0 rows, forcing the fallback to para_pub.fdrq.
             try:
-                _sid_param: object = actual_batch_id
-                try:
-                    _sid_param = int(actual_batch_id)
-                except (ValueError, TypeError):
-                    pass
                 _singl_scrq_rows = _read_dmpdata(
-                    "SELECT scrq FROM para_singl WHERE sid = ?", (_sid_param,)
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (actual_batch_id,)
                 )
                 fdrq = _pick_first_scrq(_singl_scrq_rows)
             except pyodbc.Error as exc:
@@ -7245,14 +7244,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
 
             # Resolve made date (para_singl.scrq) for the extra batch.
             _xb_fdrq = ""
+            # Same as above: use string id for the ACCESS TEXT sid column.
             try:
-                _xb_sid: object = _xb_id
-                try:
-                    _xb_sid = int(_xb_id)
-                except (ValueError, TypeError):
-                    pass
                 _xb_scrq_rows = _read_dmpdata(
-                    "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_sid,)
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_id,)
                 )
                 for _xb_r in _xb_scrq_rows or []:
                     _xv = _dm2000_get_value(_xb_r, "scrq")

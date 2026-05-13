@@ -591,3 +591,82 @@ def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.Mon
         ("2026-04-03", "UD"),
     }
     assert rows[("2026-04-03", "UD")][m._LR6_1500MW_15D_LABEL]["avg_count"] == 3
+
+
+def test_dmp_row_label_uses_scrq_over_fdrq(monkeypatch: pytest.MonkeyPatch) -> None:
+    """para_singl.scrq (manufacture date) must be used as the row label (Date
+    column) in View Report instead of para_pub.fdrq (discharge start date).
+
+    Previously, the sid query was run with an int()-cast parameter which Access
+    cannot match against a TEXT column, causing scrq lookups to silently return
+    0 rows and the code to always fall back to para_pub.fdrq.
+    """
+    # Simulate a real DMP batch with id '2024073110512202' (16-digit TEXT string),
+    # a fdrq discharge date, and a scrq manufacture date that differ so we can
+    # tell which one ends up as the row label.
+    batch_id = "2024073110512202"
+    matched_batches = [
+        {
+            "id": batch_id,
+            "dcxh": "LR6HP",
+            "fdrq": "2024-07-31",         # discharge start date — must NOT be used
+            "fdfs": "(1500mW2s,650mW28s)10T/h,24h/d",
+            "jstj": "(1500mW2s,650mW28s)10T/h,24h/d",
+            "hfsj": "times",
+            "zzdy": "1.05",
+            "bz": "LR6 HP501",
+        }
+    ]
+    # scrq comes from para_singl and differs from fdrq
+    scrq_value = "7/15/2024"    # manufacture date in DMP M/D/YYYY format
+    scrq_date_str = "2024-07-15"  # expected normalised form
+
+    def fake_read_dmpdata(sql, params=()):
+        if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            return matched_batches
+        if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
+            return [{"baty": i, "cdmc": f"tray{i}.mdb"} for i in range(1, 10)]
+        if "SELECT scrq FROM para_singl WHERE sid = ?" in sql:
+            # The parameter must be the STRING batch_id, not an integer.
+            assert params and isinstance(params[0], str), (
+                f"sid query param must be a string, got {type(params[0])}: {params[0]!r}"
+            )
+            assert params[0] == batch_id
+            return [{"scrq": scrq_value}]
+        if "SELECT scrq FROM para_singl" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
+    monkeypatch.setattr(
+        m,
+        "_dmp_compute_group_perf",
+        lambda batch_id, trays, endpoint_voltage: {
+            "avg_hours": 8.5,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": 99.0,
+            "is_dmp": True,
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="HP", chuyen="501", trays=[])],
+                raw_remark="LR6 HP501",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    rows = groups["LR6 501"]
+    # Row label must be the scrq manufacture date, not the fdrq discharge date.
+    assert (scrq_date_str, "HP") in rows, (
+        f"Expected row label '{scrq_date_str}' (scrq) but got keys: {list(rows.keys())}"
+    )
+    assert ("2024-07-31", "HP") not in rows, (
+        "Row label must not be para_pub.fdrq '2024-07-31'; scrq must take precedence"
+    )

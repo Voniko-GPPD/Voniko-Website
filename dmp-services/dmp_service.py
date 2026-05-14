@@ -3760,7 +3760,7 @@ def get_dm2000_dis_condition_options(request: Request):
     (load_resistance + fdfs + endpoint_voltage) so they exactly match what users
     see in the table, making them useful as autocomplete suggestions.
     """
-    result = get_dm2000_archives()
+    result = get_dm2000_archives(request)
     options: list[str] = []
     seen: set[str] = set()
     for archive in result.get("archives", []):
@@ -3772,7 +3772,7 @@ def get_dm2000_dis_condition_options(request: Request):
     return {"options": options}
 
 
-def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
+def _derive_dm2000_batteries_from_vtime(cfg, archname: str) -> list[dict]:
     """Fallback: derive active battery channels from ls_vtime time1..time9 columns.
 
     For cdid-based ls_vtime, each row holds one voltage threshold with elapsed
@@ -3876,9 +3876,7 @@ def get_dm2000_batteries(request: Request, archname: str):
 
     has_battery = any(_baty_int(row.get("baty")) is not None for row in rows)
     if not has_battery:
-        rows = _derive_dm2000_batteries_from_vtime(archname)
-
-    # Supplement OCV / FCV from ls_evolt for any battery still missing them.
+        rows = _derive_dm2000_batteries_from_vtime(cfg, archname)
     # In the cdid-based schema the DM2000 stores the pre-discharge OCV and
     # the initial loaded FCV as dedicated rows in ls_evolt (dy='OCV'/'FCV')
     # with per-pin voltages in volt1..volt9.  ls_pam2 does not carry these
@@ -5206,7 +5204,7 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
 
 # ─── Performance Monitoring Report ──────────────────────────────────────────
 
-def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
+def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
     """Load ALL time-at-voltage data for an archive in a single ODBC query.
 
     Returns a dict mapping battery channel number → [{sj, minutes}, ...] where
@@ -5294,20 +5292,20 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
     return full_data
 
 
-def _get_batys_for_archive(archname: str) -> list[int]:
+def _get_batys_for_archive(cfg, archname: str) -> list[int]:
     """Return sorted list of battery numbers that have data in the archive.
 
     Uses ``_load_vtime_for_archive`` so the TAV data is also cached for the
     subsequent ``_get_tav_for_batteries`` call, eliminating a redundant query.
     Falls back to ``ls_pam2`` when no vtime data is found for the archive.
     """
-    full_data = _load_vtime_for_archive(archname)
+    full_data = _load_vtime_for_archive(cfg, archname)
     if full_data:
         return sorted(b for b, tav in full_data.items() if tav)
 
     # Fallback: derive from _derive_dm2000_batteries_from_vtime (archname schema)
     # then from ls_pam2.
-    rows = _derive_dm2000_batteries_from_vtime(archname)
+    rows = _derive_dm2000_batteries_from_vtime(cfg, archname)
     if not rows:
         try:
             rows = _read_dm_ls_multi(cfg, [
@@ -5328,7 +5326,7 @@ def _get_batys_for_archive(archname: str) -> list[int]:
     return sorted(set(result))
 
 
-def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[dict]]:
+def _get_tav_for_batteries(cfg, archname: str, batys: list[int]) -> dict[int, list[dict]]:
     """Return time-at-voltage data for each battery number in batys.
 
     Prefers the TAV cache populated by ``_load_vtime_for_archive`` (cdid-based
@@ -5353,7 +5351,7 @@ def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[di
                 # to legacy per-battery queries below.
 
     # Cache miss: load cdid-based data now.
-    full_data = _load_vtime_for_archive(archname)
+    full_data = _load_vtime_for_archive(cfg, archname)
     if full_data:
         return {b: full_data.get(b, []) for b in batys}
 
@@ -5747,12 +5745,12 @@ def generate_dm2000_perf_report(request: Request, payload: PerfReportRequest):  
         # Resolve battery list
         batys = [b for b in entry.batys if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
         if not batys:
-            batys = _get_batys_for_archive(entry.archname)
+            batys = _get_batys_for_archive(cfg, entry.archname)
         if not batys:
             continue
 
         # Get time-at-voltage data
-        tav_map = _get_tav_for_batteries(entry.archname, batys)
+        tav_map = _get_tav_for_batteries(cfg, entry.archname, batys)
 
         # Compute performance values
         perf = _compute_perf_values(endpoint_voltage_str, tav_map, batys)
@@ -6654,7 +6652,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         else:
                             _eg_row_label = _dm2k_arch
                         # Step 3: determine batys (mirrors DMP trays logic)
-                        _eg_all_batys = _get_batys_for_archive(_eg_resolved)
+                        _eg_all_batys = _get_batys_for_archive(cfg, _eg_resolved)
                         _eg_arch_bz = str(_dm2000_get_value(
                             _eg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
                         ) or "").strip()
@@ -6687,7 +6685,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         if not _eg_batys:
                             continue
                         # Step 4: compute and write (mirrors DMP _dmp_compute_group_perf + groups write)
-                        _eg_tav = _get_tav_for_batteries(_eg_resolved, _eg_batys)
+                        _eg_tav = _get_tav_for_batteries(cfg, _eg_resolved, _eg_batys)
                         _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
                         _eg_perf["hfsj_unit"] = "hour"
                         _eg_sheet = (
@@ -6781,7 +6779,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 _dm2k_row_label = _dm2k_arch
 
             # Get all active batteries for auto-assignment fallback
-            _dm2k_all_batys = _get_batys_for_archive(_dm2k_resolved)
+            _dm2k_all_batys = _get_batys_for_archive(cfg, _dm2k_resolved)
 
             # Auto-detect groups from the archive's bz/remarks when the entry's groups
             # have no explicit tray assignments.  A bz like "LR6 UDP501 HP503" implies
@@ -6863,7 +6861,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if not _dm2k_batys:
                     continue
 
-                _dm2k_tav_map = _get_tav_for_batteries(_dm2k_resolved, _dm2k_batys)
+                _dm2k_tav_map = _get_tav_for_batteries(cfg, _dm2k_resolved, _dm2k_batys)
                 _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
                 _dm2k_perf["hfsj_unit"] = "hour"
 
@@ -7143,7 +7141,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 _feg_row_label = _to_date(entry.report_date) or entry.report_date
                             else:
                                 _feg_row_label = _fb_remark
-                            _feg_all_batys = _get_batys_for_archive(_feg_resolved)
+                            _feg_all_batys = _get_batys_for_archive(cfg, _feg_resolved)
                             _feg_arch_bz = str(_dm2000_get_value(
                                 _feg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
                             ) or "").strip()
@@ -7177,7 +7175,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                                 )
                             if not _feg_batys:
                                 continue
-                            _feg_tav = _get_tav_for_batteries(_feg_resolved, _feg_batys)
+                            _feg_tav = _get_tav_for_batteries(cfg, _feg_resolved, _feg_batys)
                             _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
                             _feg_perf["hfsj_unit"] = "hour"
                             _feg_sheet = (
@@ -7257,7 +7255,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         _fb_row_label = _to_date(entry.report_date) or entry.report_date
                     else:
                         _fb_row_label = _fb_remark
-                    _fb_all_batys = _get_batys_for_archive(_fb_resolved)
+                    _fb_all_batys = _get_batys_for_archive(cfg, _fb_resolved)
                     # Auto-detect groups from the archive's bz/remarks when the entry's
                     # groups have no explicit tray assignments.  A bz like "LR6 UDP501
                     # HP503" implies two groups with positional tray assignment (first
@@ -7306,7 +7304,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             )
                         if not _fb_batys:
                             continue
-                        _fb_tav = _get_tav_for_batteries(_fb_resolved, _fb_batys)
+                        _fb_tav = _get_tav_for_batteries(cfg, _fb_resolved, _fb_batys)
                         _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
                         _fb_perf["hfsj_unit"] = "hour"
                         _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""

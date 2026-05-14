@@ -7417,7 +7417,46 @@ def _compute_dmp_perf_groups(  # noqa: C901
             and len(batch_rows) >= _n_canonical
             and _all_same_bz
         )
-        _main_batch_line_idx: Optional[int] = 0 if _per_batch_mode else None
+        # In per-batch mode, assign each batch to its canonical slot based on
+        # the physical tray positions of its batteries rather than its index in
+        # batch_rows.  The database can return batches in any order (e.g. 502's
+        # batch before 501's batch because of Access MDB insertion order), so
+        # the old positional assumption "batch_rows[0] → slot 0, …" is wrong.
+        #
+        # Instead: collect all active trays from all matched batches, compute
+        # the combined sequential split (remark-order slots), then identify
+        # which slot exclusively contains each batch's active trays.  A batch
+        # whose trays are a subset of split[s] is assigned to canonical slot s.
+        # When a batch's trays span multiple slots it is treated as a combined
+        # batch and receives the normal positional split (batch_line_idx=None).
+        if _per_batch_mode:
+            _pb_all_active: dict[str, list[int]] = {actual_batch_id: _dmp_active_trays}
+            for _pb in batch_rows[1:]:
+                _pb_id = str(_dm2000_get_value(_pb, "id") or "")
+                if _pb_id and _pb_id not in _pb_all_active:
+                    _pb_all_active[_pb_id] = _get_dmp_active_trays(_pb_id) or []
+            _pb_combined = sorted({
+                t for ts in _pb_all_active.values()
+                for t in ts if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+            })
+            _pb_split = _split_active_trays_for_group_count(_n_canonical, _pb_combined)
+
+            def _pb_canonical_slot(trays: list[int]) -> Optional[int]:
+                tray_set = {
+                    t for t in trays if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+                }
+                if not tray_set:
+                    return None
+                for _s, _st in enumerate(_pb_split):
+                    if tray_set <= set(_st):
+                        return _s
+                return None
+
+            _main_batch_line_idx: Optional[int] = _pb_canonical_slot(_dmp_active_trays)
+        else:
+            _pb_all_active: dict[str, list[int]] = {}
+            _pb_split: list[list[int]] = []
+            _main_batch_line_idx = None
         auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
             _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays,
             batch_line_idx=_main_batch_line_idx,
@@ -7495,14 +7534,20 @@ def _compute_dmp_perf_groups(  # noqa: C901
         for _xb_abs_idx, _xb in enumerate(batch_rows[1:], start=1):
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
-            _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
+            # Re-use pre-fetched trays when in per-batch mode (avoids a redundant
+            # DB call; trays were already fetched during _pb_all_active setup above).
+            _xb_active_trays = (
+                _pb_all_active.get(_xb_id)
+                if _per_batch_mode and _xb_id in _pb_all_active
+                else None
+            ) or _get_dmp_active_trays(_xb_id) or list(range(1, 10))
             _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
-            # Per-batch canonical split: each extra batch's bz is its own
-            # master record and dictates the multi-line structure for that
-            # batch's tray assignment.  Remark (bz) order is the sole
-            # source of truth for slot assignment.
+            # Tray-slot-based per-batch assignment: find which canonical slot
+            # this batch's active trays exclusively belong to.  Uses the same
+            # _pb_canonical_slot helper and combined split computed above so
+            # assignment is stable regardless of database row order.
             _xb_batch_line_idx: Optional[int] = (
-                _xb_abs_idx if _per_batch_mode and _xb_abs_idx < _n_canonical else None
+                _pb_canonical_slot(_xb_active_trays) if _per_batch_mode else None
             )
             _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
                 _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays,

@@ -1877,3 +1877,62 @@ def test_dmp_per_batch_mode_extra_batches_beyond_canonical_use_split(
     b2_trays = sorted([v for (bid, _), v in captured.items() if bid == "B2"])
     assert [1, 2, 3, 4] in b2_trays, f"B2 (normal split): 501 must take [1-4]; got {b2_trays}"
     assert [5, 6, 7, 8] in b2_trays, f"B2 (normal split): 502 must take [5-8]; got {b2_trays}"
+
+
+def test_dmp_per_batch_mode_db_reverse_order_still_assigns_correctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: database returns the batch for line 502 FIRST (e.g. because
+    Access MDB insertion order differs from bz token order) even though bz
+    says 'LR6 UD501 UD502 15'.
+
+    The tray-slot-based assignment must ignore database row order and assign
+    each batch to the canonical slot whose sequential tray range its active
+    trays fall into:
+      - BB (trays 5-8) → slot 1 (502, second in bz) regardless of being first in batch_rows.
+      - BA (trays 1-4) → slot 0 (501, first in bz) regardless of being second in batch_rows.
+
+    Before the fix batch_rows[0]=BB would be hard-coded to slot 0 (501) causing
+    502 to receive no data and 501 to receive wrong batteries.
+    """
+    # Database returns BB (502's batteries, trays 5-8) FIRST.
+    batch_b = _make_dmp_batch(batch_id="BB", bz="LR6 UD501 UD502 15")
+    batch_a = _make_dmp_batch(batch_id="BA", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_b, batch_a],  # BB first — reversed DB order
+        like_batches=[],
+        active_trays_by_batch={
+            "BA": [1, 2, 3, 4],  # line 501's physical batteries
+            "BB": [5, 6, 7, 8],  # line 502's physical batteries
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # BA (trays 1-4) must always route to line 501 (slot 0 in bz order).
+    a_trays = [v for (bid, _), v in captured.items() if bid == "BA"]
+    assert a_trays == [[1, 2, 3, 4]], (
+        f"DB-reverse: BA (line 501 batteries) must take trays [1-4]; got {a_trays}"
+    )
+    # BB (trays 5-8) must always route to line 502 (slot 1 in bz order).
+    b_trays = [v for (bid, _), v in captured.items() if bid == "BB"]
+    assert b_trays == [[5, 6, 7, 8]], (
+        f"DB-reverse: BB (line 502 batteries) must take trays [5-8]; got {b_trays}"
+    )
+    assert "LR6 501" in groups, "sheet 'LR6 501' must be present"
+    assert "LR6 502" in groups, "sheet 'LR6 502' must be present"

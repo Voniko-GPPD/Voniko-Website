@@ -873,3 +873,383 @@ def test_dmp_row_label_scrq_partial_date(monkeypatch: pytest.MonkeyPatch) -> Non
     assert (fdrq_value, "HP") not in rows, (
         f"Row label must not be fdrq '{fdrq_value}'; scrq partial date must take precedence"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Request #246 follow-up: the matched batch's bz is the canonical source of
+# multi-line structure for tray-positional assignment.
+#
+# The user reported that two-line LR6 (1500mW2s,650mW28s)10T/h,24h/d batches
+# (with or without the "15" suffix) load incorrectly: one production line
+# averages all 9 trays while the other has no data.  Investigation shows that
+# the existing positional-split fix uses the entry's raw_remark group count.
+# When the entry's raw_remark mentions only its own line (e.g. "LR6 UD501")
+# but the matched para_pub.bz is the multi-line composite ("LR6 UD501 UD502"),
+# the fix does not activate and the single group falls through to the all-9-
+# trays default.  The matched batch's bz (the operator-edited master record)
+# must be the canonical source of multi-line structure for ALL bz patterns.
+# --------------------------------------------------------------------------- #
+
+
+def _make_dmp_batch(
+    *,
+    batch_id: str,
+    bz: str,
+    fdrq: str = "2026-04-18",
+    jstj: str = "(1500mW2s,650mW28s)10T/h,24h/d",
+    zzdy: str = "1.05",
+) -> dict:
+    return {
+        "id": batch_id,
+        "dcxh": "LR6",
+        "fdrq": fdrq,
+        "fdfs": "",
+        "jstj": jstj,
+        "hfsj": "times",
+        "zzdy": zzdy,
+        "bz": bz,
+    }
+
+
+def _install_dmp_batch_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exact_batches: list[dict] | None = None,
+    like_batches: list[dict] | None = None,
+    active_trays: list[int] | None = None,
+) -> dict:
+    """Install fake _read_dmpdata + _dmp_compute_group_perf for batch tests.
+
+    Returns a captured dict that records every (batch_id, trays) call to
+    _dmp_compute_group_perf so the test can assert which trays each
+    production-line group was actually computed over.
+    """
+    if active_trays is None:
+        active_trays = list(range(1, 10))
+    captured: dict[tuple[str, str], list[int]] = {}
+
+    def fake_read_dmpdata(sql, params=()):
+        if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            return list(exact_batches or [])
+        if "FROM para_pub" in sql and "WHERE bz LIKE ?" in sql:
+            return list(like_batches or [])
+        if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
+            sid = str(params[0]) if params else ""
+            return [
+                {"baty": i, "cdmc": f"sub_{sid}.mdb"} for i in active_trays
+            ]
+        if "SELECT scrq FROM para_singl" in sql:
+            return []
+        return []
+
+    def fake_compute(batch_id, trays, endpoint_voltage):
+        # Record by batch_id; tests then verify the trays per line.
+        # Use a synthetic key (batch_id, sorted-trays-str) so multiple groups
+        # on the same batch are distinct entries.
+        captured[(str(batch_id), ",".join(str(t) for t in trays))] = list(trays)
+        return {
+            "avg_hours": float(len(trays)),
+            "avg_minutes": None,
+            "avg_count": len(trays),
+            "uniform_rate": 100.0,
+            "is_dmp": True,
+        }
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
+    monkeypatch.setattr(m, "_dmp_compute_group_perf", fake_compute)
+    return captured
+
+
+def test_dmp_canonical_split_uses_batch_bz_when_entry_remark_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-reported bug (Request #246 follow-up).
+
+    Entry has raw_remark="LR6 UD501" (single line) but the matched para_pub.bz
+    master record is the composite "LR6 UD501 UD502" (two lines).  The
+    positional tray split must use the BATCH's bz to derive the line count
+    so that chuyen 501 → trays 1-4, NOT all 9 trays averaged together.
+    """
+    batch = _make_dmp_batch(
+        batch_id="2026041814114611", bz="LR6 UD501 UD502"
+    )
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[])],
+                raw_remark="LR6 UD501",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    # The single chuyen-501 group must be computed over trays 1-4 (slot 0
+    # of the 2-line positional split derived from the batch bz), not over
+    # all 9 active trays.
+    trays_used = [
+        v for (bid, _), v in captured.items() if bid == "2026041814114611"
+    ]
+    assert trays_used == [[1, 2, 3, 4]], (
+        f"Expected chuyen 501 to use trays [1,2,3,4] derived from batch "
+        f"bz='LR6 UD501 UD502'; got {trays_used}"
+    )
+
+
+def test_dmp_canonical_split_uses_batch_bz_with_15_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same scenario but with the 15-day suffix on both entry and batch bz.
+
+    Entry: raw_remark="LR6 UD501 15" (single line, 15D), batch bz=
+    "LR6 UD501 UD502 15" (two lines, 15D).  The chuyen-501 group must take
+    the first 4 trays and the result must be routed to the 15D column only.
+    """
+    batch = _make_dmp_batch(
+        batch_id="2026041814120812", bz="LR6 UD501 UD502 15"
+    )
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[])],
+                raw_remark="LR6 UD501 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    trays_used = [
+        v for (bid, _), v in captured.items() if bid == "2026041814120812"
+    ]
+    assert trays_used == [[1, 2, 3, 4]], (
+        f"With 15 suffix, chuyen 501 must still use [1,2,3,4] from batch "
+        f"bz='LR6 UD501 UD502 15'; got {trays_used}"
+    )
+    # Result must land in the 15D column only (Request #237/#241 invariant).
+    rows = groups["LR6 501"]
+    assert len(rows) == 1, f"expected exactly one row key, got {list(rows.keys())}"
+    only_key = next(iter(rows.keys()))
+    assert m._LR6_1500MW_15D_LABEL in rows[only_key]
+    assert m._LR6_1500MW_DAILY_LABEL not in rows[only_key]
+
+
+def test_dmp_canonical_split_chuyen_502_gets_second_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror test: a separate entry for chuyen 502 (raw_remark "LR6 UD502")
+    against the same composite batch bz="LR6 UD501 UD502" must take the
+    SECOND positional slot (trays 5-8), not the all-9-trays default.
+    """
+    batch = _make_dmp_batch(
+        batch_id="2026041814114611", bz="LR6 UD501 UD502"
+    )
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="502", trays=[])],
+                raw_remark="LR6 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays_used = [
+        v for (bid, _), v in captured.items() if bid == "2026041814114611"
+    ]
+    assert trays_used == [[5, 6, 7, 8]], (
+        f"chuyen 502 must take slot 1 (trays 5-8) of the 2-line split; got {trays_used}"
+    )
+
+
+def test_dmp_canonical_split_three_line_bz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic three-line case: batch bz="LR6 UD501 UD502 UD503" with an
+    entry that mentions only chuyen 502 must take the middle slot (trays
+    4-6) of the 3+3+3 positional split.
+    """
+    batch = _make_dmp_batch(
+        batch_id="B3LINE", bz="LR6 UD501 UD502 UD503"
+    )
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="502", trays=[])],
+                raw_remark="LR6 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays_used = [v for (bid, _), v in captured.items() if bid == "B3LINE"]
+    assert trays_used == [[4, 5, 6]], (
+        f"chuyen 502 in a 3-line bz must take middle slot [4,5,6]; got {trays_used}"
+    )
+
+
+def test_dmp_canonical_split_mixed_grades_uses_batch_bz_loai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the entry's raw_remark uses a different battery grade than the
+    batch bz (e.g. entry says "LR6 UD501" but bz says "LR6 UDP501 HP503"),
+    the loai mapping must follow the batch bz (the master record).  This
+    ensures the row_key uses the correct grade when the entry was created
+    with a stale or partial remark.
+    """
+    batch = _make_dmp_batch(batch_id="BMIXED", bz="LR6 UDP501 HP503")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="503", trays=[])],
+                raw_remark="LR6 UD503",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+    trays_used = [v for (bid, _), v in captured.items() if bid == "BMIXED"]
+    # chuyen 503 is the SECOND group in the batch bz (501 → slot 0, 503 → slot 1)
+    assert trays_used == [[5, 6, 7, 8]], (
+        f"chuyen 503 (slot 1) must take trays [5-8]; got {trays_used}"
+    )
+    # loai for chuyen 503 in the batch bz is "HP" — row_key must reflect that
+    rows = groups["LR6 503"]
+    assert any(loai == "HP" for (_, loai) in rows.keys()), (
+        f"row_key loai must come from batch bz (HP for chuyen 503); got {list(rows.keys())}"
+    )
+
+
+def test_dmp_canonical_split_extra_batch_uses_its_own_bz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each batch processed in the multi-batch loop has its own bz; the
+    positional split must be computed per-batch from each batch's own bz so
+    that batches with different multi-line shapes are split correctly.
+
+    Setup: entry raw_remark "LR6 UD501", two matched batches:
+      • batch A bz = "LR6 UD501 UD502" (two-line composite) → 501 → trays 1-4
+      • batch B bz = "LR6 UD501"       (single-line)        → 501 → trays 1-9
+    """
+    batch_a = _make_dmp_batch(
+        batch_id="BA", bz="LR6 UD501 UD502", fdrq="2026-04-18"
+    )
+    batch_b = _make_dmp_batch(
+        batch_id="BB", bz="LR6 UD501", fdrq="2026-04-17"
+    )
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch_a, batch_b]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[])],
+                raw_remark="LR6 UD501",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    # batch_a has 2-line bz → chuyen 501 takes [1,2,3,4]
+    trays_a = [v for (bid, _), v in captured.items() if bid == "BA"]
+    assert trays_a == [[1, 2, 3, 4]], (
+        f"Composite batch A: chuyen 501 must take [1-4]; got {trays_a}"
+    )
+    # batch_b has single-line bz → chuyen 501 takes all active trays
+    trays_b = [v for (bid, _), v in captured.items() if bid == "BB"]
+    assert trays_b == [[1, 2, 3, 4, 5, 6, 7, 8, 9]], (
+        f"Single-line batch B: chuyen 501 must take all 9 trays; got {trays_b}"
+    )
+
+
+def test_dmp_canonical_split_two_group_entry_unaffected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the entry already carries both groups (501 and 502), positional
+    assignment continues to work as before — the canonical-bz logic must
+    not regress the existing two-group entry case.
+    """
+    batch = _make_dmp_batch(batch_id="B2G", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays = sorted(v for (bid, _), v in captured.items() if bid == "B2G")
+    assert trays == [[1, 2, 3, 4], [5, 6, 7, 8]], (
+        f"Two-group entry must split [1-4]/[5-8] as before; got {trays}"
+    )
+
+
+def test_dmp_canonical_split_explicit_trays_bypass_canonical_logic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the entry carries explicit trays, the canonical-bz logic must
+    NOT override them — explicit operator configuration always wins.
+    """
+    batch = _make_dmp_batch(batch_id="BEXP", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch, exact_batches=[], like_batches=[batch]
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[2, 4, 6])],
+                raw_remark="LR6 UD501",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays = [v for (bid, _), v in captured.items() if bid == "BEXP"]
+    assert trays == [[2, 4, 6]], (
+        f"Explicit trays must be preserved verbatim; got {trays}"
+    )

@@ -5689,6 +5689,111 @@ def _get_dmp_active_trays(batch_id: str) -> list[int]:
     return sorted(set(active))
 
 
+def _resolve_dmp_canonical_split(
+    batch_bz: Optional[str],
+    entry_clean_remark: str,
+    eff_groups: list[dict],
+    active_trays: list[int],
+) -> tuple[list[list[int]], dict[str, int]]:
+    """Compute positional tray split for a single DMP batch.
+
+    The matched batch's ``bz`` field (the operator-edited master record on
+    ``para_pub``) is the canonical source of multi-line structure.  When the
+    perf-entry's own ``raw_remark`` is a partial token (e.g. ``"LR6 UD501"``)
+    while the master ``bz`` is the full composite (``"LR6 UD501 UD502"`` or
+    ``"LR6 UD501 UD502 15"``), positional tray assignment must follow the
+    master record so each production-line group lands on the correct slot of
+    the active-tray split.  Without this, a single-group entry whose master
+    bz is multi-line falls through to ``_split_active_trays_for_group_count(1, …)``
+    and incorrectly averages all 9 trays into one row (Request #246 follow-up).
+
+    Returns ``(auto_trays, chuyen_to_pos)`` where:
+
+    * ``auto_trays`` is the per-slot tray list (length = canonical group count
+      when the master bz contributes more groups than the entry, otherwise
+      length = ``len(eff_groups)``).
+    * ``chuyen_to_pos`` maps each canonical chuyen to its slot index, used by
+      :func:`_resolve_dmp_tray_list` to look up the correct slot.  Empty when
+      no canonical positional remap is needed (i.e. when ``eff_groups`` already
+      covers every line in the master bz).
+
+    The canonical source preference is:
+    1. ``batch_bz`` cleaned of ``Q`` / ``15`` suffixes — when present and
+       parsing yields more groups than ``entry_clean_remark``.
+    2. ``entry_clean_remark`` — fallback used when ``batch_bz`` is empty
+       (no master record matched) or contributes no extra groups.
+
+    Explicit per-group ``trays`` configuration in the entry bypasses the
+    positional remap entirely (handled by :func:`_resolve_dmp_tray_list`).
+    """
+    n_eff = len(eff_groups)
+    no_explicit_trays = not any(g.get("trays") for g in eff_groups)
+
+    # Parse groups from both possible canonical sources.
+    entry_groups: list[dict] = (
+        _parse_bz_groups(entry_clean_remark) if entry_clean_remark else []
+    )
+    bz_clean = ""
+    if batch_bz:
+        bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
+    bz_groups: list[dict] = _parse_bz_groups(bz_clean) if bz_clean else []
+
+    # Pick whichever canonical source has the largest line count.  This is
+    # safe because the LIKE-fallback batch search guarantees the matched bz
+    # contains the entry's line token(s) as a substring, so the master bz
+    # strictly extends the entry remark when they differ.
+    canonical = bz_groups if len(bz_groups) > len(entry_groups) else entry_groups
+    canon_n = len(canonical)
+
+    chuyen_to_pos: dict[str, int] = {}
+    if canon_n > n_eff and no_explicit_trays:
+        sorted_canon = sorted(
+            canonical,
+            key=lambda rg: (
+                (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
+                if str(rg.get("chuyen", "")).isdigit()
+                else (1, 0, str(rg.get("chuyen", "")))
+            ),
+        )
+        chuyen_to_pos = {
+            str(rg.get("chuyen", "")): i for i, rg in enumerate(sorted_canon)
+        }
+        auto_trays = _split_active_trays_for_group_count(canon_n, active_trays)
+    else:
+        auto_trays = _split_active_trays_for_group_count(n_eff, active_trays)
+
+    return auto_trays, chuyen_to_pos
+
+
+def _resolve_dmp_canonical_loai_map(
+    batch_bz: Optional[str],
+    entry_clean_remark: str,
+) -> dict[str, str]:
+    """Build the ``chuyen → loai`` map for a single DMP batch.
+
+    The matched batch's ``bz`` is the canonical source: it represents the
+    master record edited by the operator on the DM management page, so any
+    chuyen present in ``bz`` carries an authoritative loai (battery grade)
+    that overrides whatever stale value the perf-entry was originally saved
+    with.  Falls back to ``entry_clean_remark`` for chuyen that appear only
+    in the entry remark (rare but possible when the master record was
+    edited after the perf-entry was saved).
+    """
+    mapping: dict[str, str] = {}
+    if entry_clean_remark:
+        for rg in _parse_bz_groups(entry_clean_remark):
+            if rg.get("chuyen"):
+                mapping[str(rg["chuyen"])] = rg["loai"]
+    if batch_bz:
+        bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
+        if bz_clean:
+            for rg in _parse_bz_groups(bz_clean):
+                if rg.get("chuyen"):
+                    # Master record wins over entry-derived value.
+                    mapping[str(rg["chuyen"])] = rg["loai"]
+    return mapping
+
+
 def _resolve_dmp_tray_list(
     orig_group,  # DmpPerfGroup — may have an explicit .trays list
     dmp_grp: dict,
@@ -7156,20 +7261,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
         else:
             row_label = fdrq or entry.batch_id
 
-        # Re-derive authoritative loai by chuyen from raw_remark so that stored
-        # entries with an incorrect loai in groups_json still display the correct
-        # battery grade.  Example: raw_remark "LR6 UDP501 HP503" yields the
-        # mapping {"501": "UD+", "503": "HP"}.  If raw_remark is absent or a
-        # chuyen has no match, the stored grp.loai is used as fallback.
-        # ``_clean_remark`` is used so that the ``Q``/``15`` flag suffixes are
-        # not mis-parsed as group tokens.
-        _remark_loai_by_chuyen: dict[str, str] = {}
-        _remark_bz_groups: list[dict] = []
-        if _clean_remark:
-            _remark_bz_groups = _parse_bz_groups(_clean_remark)
-            for _rg in _remark_bz_groups:
-                if _rg.get("chuyen"):
-                    _remark_loai_by_chuyen[str(_rg["chuyen"])] = _rg["loai"]
+        # Re-derive authoritative loai by chuyen so that stored entries with
+        # an incorrect or partial loai in groups_json still display the
+        # correct battery grade.  The matched batch's ``bz`` is the canonical
+        # source (master record); ``_clean_remark`` is the fallback when no
+        # batch matched (DMP-not-found path) or when the batch bz only
+        # mentions a subset of the entry's chuyen.
+        _matched_bz = _batch_bz if batch_rows else ""
+        _remark_loai_by_chuyen = _resolve_dmp_canonical_loai_map(
+            _matched_bz, _clean_remark
+        )
 
         # Build a sortable eff_groups list for the DMP path and sort by
         # production-line (chuyen) number so that the positional tray
@@ -7189,32 +7290,18 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _dmp_active_trays = (
             _get_dmp_active_trays(actual_batch_id) if batch_rows else list(range(1, 10))
         )
-        auto_trays = _split_active_trays_for_group_count(n_groups, _dmp_active_trays)
 
-        # Bug 1 fix: when the batch remark has more production-line groups than
-        # the configured entry groups (e.g. the entry was client-side filtered to
-        # only chuyen=501 from a composite "LR6 UD501 UD502" remark), use the
-        # full remark's group count for positional tray assignment so that
-        # chuyen 501 maps to slot 0 (first active chunk) and chuyen 502 maps to
-        # slot 1 (next active chunk) — rather than treating the sole filtered
-        # group as if it owned all 9 trays.
-        _remark_n = len(_remark_bz_groups)
-        _no_explicit_trays = not any(g.get("trays") for g in _dmp_eff_groups)
-        _remark_chuyen_to_pos: dict[str, int] = {}
-        if _remark_n > n_groups and _no_explicit_trays:
-            _sorted_remark_gs = sorted(
-                _remark_bz_groups,
-                key=lambda rg: (
-                    (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
-                    if str(rg.get("chuyen", "")).isdigit()
-                    else (1, 0, str(rg.get("chuyen", "")))
-                ),
-            )
-            _remark_chuyen_to_pos = {
-                str(rg.get("chuyen", "")): i
-                for i, rg in enumerate(_sorted_remark_gs)
-            }
-            auto_trays = _split_active_trays_for_group_count(_remark_n, _dmp_active_trays)
+        # Canonical positional split: the matched batch's bz is the master
+        # record and dictates the multi-line structure.  When the entry's own
+        # raw_remark only mentions a subset of the master's lines (e.g. entry
+        # raw_remark "LR6 UD501" while batch bz is "LR6 UD501 UD502 [15]"),
+        # this routes the configured group to its correct slot in the master
+        # split rather than treating the lone group as if it owned every
+        # active tray.  Applies uniformly to all multi-line bz patterns
+        # (Request #246 follow-up).
+        auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
+            _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays
+        )
 
         # Hoist model/no-chuyen check outside the loop so the synthetic-group
         # path (LR61/9V with no configured groups) shares the same variable.
@@ -7289,9 +7376,14 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
             _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
-            _xb_auto_trays = _split_active_trays_for_group_count(
-                _remark_n if _remark_chuyen_to_pos else n_groups,
-                _xb_active_trays,
+            _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
+            # Per-batch canonical split: each extra batch's bz is its own
+            # master record and dictates the multi-line structure for that
+            # batch's tray assignment.  Mixing splits across batches with
+            # different bz shapes (Bug 1) would mis-route trays for any
+            # batch whose master record differs from the main batch.
+            _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
+                _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays
             )
 
             # Resolve made date (para_singl.scrq) for the extra batch.
@@ -7330,7 +7422,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _xb_fdfs = str(_dm2000_get_value(_xb, "fdfs") or "").strip()
             if not _xb_fdfs:
                 _xb_fdfs = str(_dm2000_get_value(_xb, "jstj") or "").strip()
-            _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
             _is_quarter, _is_15d = _merge_bz_suffix_flags(_is_quarter, _is_15d, _xb_bz)
             _xb_hfsj_raw = str(_dm2000_get_value(_xb, "hfsj") or "").strip().lower()
             if _xb_hfsj_raw in {"times", "lần", "t", "lan", "count"}:
@@ -7358,7 +7449,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _orig_idx is not None:
                     orig_grp = entry.groups[_orig_idx]
                     _xb_trays = _resolve_dmp_tray_list(
-                        orig_grp, _dmp_grp, g_idx, _xb_auto_trays, _remark_chuyen_to_pos
+                        orig_grp, _dmp_grp, g_idx, _xb_auto_trays, _xb_chuyen_to_pos
                     )
                 else:
                     _xb_trays = _xb_auto_trays[g_idx] if g_idx < len(_xb_auto_trays) else list(range(1, 10))

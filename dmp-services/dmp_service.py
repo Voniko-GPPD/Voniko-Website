@@ -5769,16 +5769,37 @@ def _resolve_dmp_canonical_split(
 
     The optional *batch_chuyens* parameter (typically derived from
     ``para_singl.scdw`` via :func:`_parse_scdw_chuyens`) carries the
-    per-batch production-line tag.  When ``scdw`` covers a strict subset of
-    the canonical chuyens, the batch contains data for only those lines:
-    the split is performed over the scdw chuyens (not the full canonical
-    set) and entry groups whose chuyen is not in scdw are marked absent
-    (sentinel slot ``_DMP_CHUYEN_SLOT_ABSENT``) so they receive no trays
-    from this batch.  This avoids the previous misbehaviour where two
-    single-line batches sharing the same multi-line ``bz`` (e.g. one
-    ``scdw="VN501"``, one ``scdw="VN502"``) had each batch's data
-    sequentially assigned to *both* lines based on bz token order, causing
-    swapped or missing rows depending on remark order.
+    per-batch production-line tag and is the authoritative source of
+    which lines a batch's data actually came from (the ``bz`` field is
+    operator-edited free text and may name lines that do not match the
+    physical batteries — e.g. a batch with ``scdw="503-504"`` saved
+    against ``bz="LR6 UD501 UD502 15"``).  When ``scdw`` differs from the
+    canonical chuyens at all, routing is intersection-based:
+
+      * Each chuyen in ``scdw ∩ canonical`` becomes a positional slot
+        (sorted ascending so the lower-numbered line always lands on the
+        lower trays — independent of the order in which the chuyens
+        appear in either remark).
+      * Canonical chuyens *not* in ``scdw`` are mapped to
+        ``_DMP_CHUYEN_SLOT_ABSENT`` so the batch contributes no trays
+        for those lines (avoiding wrong-line data leakage).
+      * An empty intersection (``scdw`` is parseable but disjoint from
+        canonical, e.g. ``scdw="503-504"`` vs canonical ``{501, 502}``)
+        marks every canonical chuyen absent so the batch contributes
+        nothing anywhere — its data belongs to production lines that the
+        entry did not request.
+
+    This fixes the previous misbehaviour where two single-line batches
+    sharing the same multi-line ``bz`` had each batch's data sequentially
+    assigned to *both* lines based on bz token order (causing swapped or
+    missing rows depending on remark order), and the related case where a
+    batch tagged with a *different* production line (scdw disjoint from
+    bz) silently contaminated both lines' positional split with unrelated
+    data.
+
+    When ``scdw`` is missing/unparseable or matches the canonical chuyens
+    exactly, the existing positional split is preserved unchanged so
+    well-behaved multi-line batches continue to load both lines.
 
     Returns ``(auto_trays, chuyen_to_pos)`` where:
 
@@ -5822,37 +5843,45 @@ def _resolve_dmp_canonical_split(
     canonical_chuyens = [str(rg.get("chuyen", "") or "") for rg in canonical]
     canonical_chuyen_set = {c for c in canonical_chuyens if c}
 
-    # Per-batch scdw routing: when the batch's production-line tag (scdw) is a
-    # strict subset of the canonical chuyens, the batch contains data only for
-    # the scdw lines.  Build a chuyen_to_pos that:
-    #   - assigns each scdw chuyen to its sorted positional slot, and
-    #   - assigns every other canonical chuyen to the absent-sentinel so the
-    #     resolver returns [] (skipping this batch for that line group).
-    # This is the authoritative per-batch routing and supersedes the bz
-    # canonical positional split.  Only activates when scdw is a *strict*
-    # subset (equal-or-superset scdw values would not narrow the routing).
+    # Per-batch scdw routing: when the batch's production-line tag (scdw)
+    # is parseable and differs from the canonical chuyens (whether by
+    # narrowing, partial overlap, or being completely disjoint), the bz
+    # canonical positional split is unsafe — the batch's physical data
+    # belongs to the scdw lines, not to whichever lines bz happens to
+    # name.  Build a chuyen_to_pos that:
+    #   - assigns each chuyen in (scdw ∩ canonical) to a sorted slot, and
+    #   - marks every canonical chuyen NOT in scdw with the absent
+    #     sentinel so the resolver returns [] (skipping this batch for
+    #     that line group).
+    # When the intersection is empty the batch contributes nothing
+    # anywhere (its data is for production lines the entry did not
+    # request).  This is the authoritative per-batch routing and
+    # supersedes the bz canonical positional split.  Skipped only when
+    # scdw equals the canonical chuyens (no narrowing required) or scdw
+    # is missing/unparseable (no per-batch information available — keep
+    # the legacy positional split as a safe fallback).
     if (
         no_explicit_trays
         and batch_chuyens
         and canonical_chuyen_set
     ):
         scdw_chuyen_set = {str(c) for c in batch_chuyens if str(c)}
-        if (
-            scdw_chuyen_set
-            and scdw_chuyen_set < canonical_chuyen_set  # strict subset
-        ):
-            sorted_scdw = sorted(
-                scdw_chuyen_set,
+        if scdw_chuyen_set and scdw_chuyen_set != canonical_chuyen_set:
+            intersection = scdw_chuyen_set & canonical_chuyen_set
+            sorted_int = sorted(
+                intersection,
                 key=lambda c: (0, int(c), c) if c.isdigit() else (1, 0, c),
             )
             chuyen_to_pos: dict[str, int] = {
-                c: i for i, c in enumerate(sorted_scdw)
+                c: i for i, c in enumerate(sorted_int)
             }
             for c in canonical_chuyen_set:
                 if c not in chuyen_to_pos:
                     chuyen_to_pos[c] = _DMP_CHUYEN_SLOT_ABSENT
-            auto_trays = _split_active_trays_for_group_count(
-                len(sorted_scdw), active_trays
+            auto_trays = (
+                _split_active_trays_for_group_count(len(sorted_int), active_trays)
+                if sorted_int
+                else []
             )
             return auto_trays, chuyen_to_pos
 
@@ -5920,12 +5949,14 @@ def _resolve_dmp_tray_list(
        batch remark has more production-line groups than ``entry.groups`` (Bug 1
        fix: composite remark filtered to a single chuyen uses the full remark's
        group count so the chuyen maps to the correct slot, e.g. 501 → trays 1-4),
-       or when the per-batch ``scdw`` tag narrows the batch to a strict subset
-       of canonical chuyens.  A slot value of ``_DMP_CHUYEN_SLOT_ABSENT``
-       (sentinel set by :func:`_resolve_dmp_canonical_split` when the batch's
-       scdw does not include this group's chuyen) returns ``[]`` so the
-       caller's ``if not trays: continue`` correctly skips this batch for
-       this line, preventing cross-line data mis-routing.
+       or when the per-batch ``scdw`` tag differs from the canonical chuyens
+       (narrows the batch to the ``scdw ∩ canonical`` lines, or — when the
+       intersection is empty — excludes the batch entirely).  A slot value of
+       ``_DMP_CHUYEN_SLOT_ABSENT`` (sentinel set by
+       :func:`_resolve_dmp_canonical_split` when the batch's scdw does not
+       include this group's chuyen) returns ``[]`` so the caller's
+       ``if not trays: continue`` correctly skips this batch for this line,
+       preventing cross-line data mis-routing.
     3. plain ``auto_trays[g_idx]`` fallback
     """
     if getattr(orig_group, "trays", None):

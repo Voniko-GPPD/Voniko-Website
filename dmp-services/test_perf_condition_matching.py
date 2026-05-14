@@ -1547,3 +1547,177 @@ def test_dmp_scdw_unparseable_keeps_positional_split(
     assert trays == [[5, 6, 7, 8]], (
         f"missing scdw must fall back to positional split; got {trays}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Per-batch scdw routing — disjoint and partial-overlap cases (Request #248
+# follow-up).  PR #248 only narrowed routing when ``scdw`` was a *strict
+# subset* of the canonical chuyens, which left two important cases broken:
+#
+#   * scdw disjoint from canonical (e.g. scdw="503-504" while bz canonical
+#     is {501,502}) — PR #248 fell through to the positional 4+4 split, so
+#     the 503/504 batch's data silently contaminated both the 501 and 502
+#     rows.  Real production data: a batch with bz="LR6 UD501 UD502 15"
+#     can carry scdw="503-504" because the bz field is operator-edited
+#     free text and does not always match the physical production line.
+#   * partial overlap (e.g. scdw="502-503" with canonical {501,502}) —
+#     same fall-through, mis-routing 502's data onto 501's row.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_scdw_disjoint_from_canonical_skips_batch_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch tagged with a production line not listed in the entry's
+    canonical chuyens (e.g. scdw="503-504" against bz="LR6 UD501 UD502 15")
+    must contribute NO data to either chuyen 501 or 502 — its physical
+    batteries belong to the 503/504 line.  Without this rule the
+    positional split silently mis-labels 503/504 data as 501/502.
+    """
+    batch_good = _make_dmp_batch(batch_id="BGOOD", bz="LR6 UD501 UD502 15")
+    batch_wrong = _make_dmp_batch(batch_id="BWRONG", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_good, batch_wrong],
+        like_batches=[],
+        active_trays_by_batch={
+            "BGOOD": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "BWRONG": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        },
+        scdw_by_batch={
+            "BGOOD": "VN501-502",   # really lines 501+502
+            "BWRONG": "503-504",    # mis-labelled bz; data is for 503-504
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # The "wrong-line" batch must not have been read for any chuyen of
+    # this entry — its scdw lines (503/504) do not intersect the entry's
+    # canonical chuyens (501/502).
+    assert all(bid != "BWRONG" for (bid, _) in captured), (
+        f"batch with disjoint scdw must contribute NO trays to either "
+        f"line of the entry; got captured calls {list(captured)}"
+    )
+
+    # The well-matched batch (scdw == canonical) keeps the positional
+    # 4+4 split: 501 → trays 1-4, 502 → trays 5-8.
+    good_trays = sorted(v for (bid, _), v in captured.items() if bid == "BGOOD")
+    assert good_trays == [[1, 2, 3, 4], [5, 6, 7, 8]], (
+        f"matching batch must use positional 4+4 split; got {good_trays}"
+    )
+
+
+def test_dmp_scdw_partial_overlap_routes_only_intersection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When scdw partially overlaps the canonical chuyens (e.g.
+    scdw="502-503" against bz="LR6 UD501 UD502"), the batch must
+    contribute only to the intersecting line (502) and skip the others
+    — never feeding its 503-line data into the 501 row via the
+    positional 4+4 split.
+    """
+    batch = _make_dmp_batch(batch_id="BMIX", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],
+        like_batches=[batch],
+        active_trays_by_batch={"BMIX": [1, 2, 3, 4, 5, 6, 7, 8, 9]},
+        scdw_by_batch={"BMIX": "502-503"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    captured_trays = sorted(v for (bid, _), v in captured.items() if bid == "BMIX")
+    # intersection = {502} → single slot covers all 9 active trays for
+    # the chuyen-502 group; chuyen 501 is marked absent → no call.
+    assert captured_trays == [[1, 2, 3, 4, 5, 6, 7, 8, 9]], (
+        f"partial-overlap scdw must route ALL active trays to the "
+        f"intersecting line (502) and skip the non-intersecting line "
+        f"(501); got {captured_trays}"
+    )
+
+
+def test_dmp_scdw_disjoint_routing_independent_of_remark_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing the entry remark from "LR6 UD501 UD502 15" to
+    "LR6 UD502 UD501 15" must not change which line gets which batch's
+    data — the line-to-data mapping is determined by scdw and chuyen
+    number, never by the position of a token in the remark string.
+    """
+    batch_good = _make_dmp_batch(batch_id="BGOOD", bz="LR6 UD501 UD502 15")
+    batch_wrong = _make_dmp_batch(batch_id="BWRONG", bz="LR6 UD501 UD502 15")
+
+    def _run(raw_remark: str, group_order: list[str]) -> dict:
+        captured = _install_dmp_batch_fakes(
+            monkeypatch,
+            exact_batches=[batch_good, batch_wrong],
+            like_batches=[],
+            active_trays_by_batch={
+                "BGOOD": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+                "BWRONG": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            },
+            scdw_by_batch={"BGOOD": "VN501-502", "BWRONG": "503-504"},
+        )
+        payload = m.DmpPerfReportRequest(
+            entries=[
+                m.DmpPerfEntry(
+                    batch_id="unused",
+                    model="LR6",
+                    groups=[
+                        m.DmpPerfGroup(loai="UD", chuyen=c, trays=[])
+                        for c in group_order
+                    ],
+                    raw_remark=raw_remark,
+                )
+            ]
+        )
+        m._compute_dmp_perf_groups(payload)
+        return captured
+
+    forward = _run("LR6 UD501 UD502 15", ["501", "502"])
+    reversed_ = _run("LR6 UD502 UD501 15", ["502", "501"])
+
+    # In both directions: BGOOD contributes the 4+4 split (501→1-4,
+    # 502→5-8); BWRONG contributes nothing (scdw disjoint).
+    fwd_good = sorted(v for (bid, _), v in forward.items() if bid == "BGOOD")
+    rev_good = sorted(v for (bid, _), v in reversed_.items() if bid == "BGOOD")
+    assert fwd_good == rev_good == [[1, 2, 3, 4], [5, 6, 7, 8]], (
+        f"reversing the entry remark must not change scdw routing — "
+        f"forward {fwd_good!r} vs reversed {rev_good!r}"
+    )
+    assert all(bid != "BWRONG" for (bid, _) in forward) and all(
+        bid != "BWRONG" for (bid, _) in reversed_
+    ), (
+        f"disjoint-scdw batch must be excluded regardless of remark "
+        f"order; forward={list(forward)} reversed={list(reversed_)}"
+    )

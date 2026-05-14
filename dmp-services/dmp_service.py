@@ -5753,74 +5753,35 @@ def _resolve_dmp_canonical_split(
     entry_clean_remark: str,
     eff_groups: list[dict],
     active_trays: list[int],
-    batch_chuyens: Optional[list[str]] = None,
 ) -> tuple[list[list[int]], dict[str, int]]:
     """Compute positional tray split for a single DMP batch.
 
     The matched batch's ``bz`` field (the operator-edited master record on
-    ``para_pub``) is the canonical source of multi-line structure.  When the
-    perf-entry's own ``raw_remark`` is a partial token (e.g. ``"LR6 UD501"``)
-    while the master ``bz`` is the full composite (``"LR6 UD501 UD502"`` or
-    ``"LR6 UD501 UD502 15"``), positional tray assignment must follow the
-    master record so each production-line group lands on the correct slot of
-    the active-tray split.  Without this, a single-group entry whose master
-    bz is multi-line falls through to ``_split_active_trays_for_group_count(1, …)``
-    and incorrectly averages all 9 trays into one row (Request #246 follow-up).
+    ``para_pub``) is the canonical and sole source of multi-line structure.
+    The left-to-right order of production-line tokens in ``bz`` is the
+    physical tray order: the DMP machine loads batteries in remark order,
+    so the first token occupies slot 0 (lowest-numbered active trays) and
+    subsequent tokens occupy successive slots.
 
-    The optional *batch_chuyens* parameter (typically derived from
-    ``para_singl.scdw`` via :func:`_parse_scdw_chuyens`) carries the
-    per-batch production-line tag and is the authoritative source of
-    which lines a batch's data actually came from (the ``bz`` field is
-    operator-edited free text and may name lines that do not match the
-    physical batteries — e.g. a batch with ``scdw="503-504"`` saved
-    against ``bz="LR6 UD501 UD502 15"``).  When ``scdw`` differs from the
-    canonical chuyens at all, routing is intersection-based:
+    When the perf-entry's own ``raw_remark`` is a partial token (e.g.
+    ``"LR6 UD501"`` while the master ``bz`` is ``"LR6 UD501 UD502"``) the
+    positional split follows the master record so each group lands on the
+    correct slot.
 
-      * Each chuyen in ``scdw ∩ canonical`` becomes a positional slot
-        (sorted ascending so the lower-numbered line always lands on the
-        lower trays — independent of the order in which the chuyens
-        appear in either remark).
-      * Canonical chuyens *not* in ``scdw`` are mapped to
-        ``_DMP_CHUYEN_SLOT_ABSENT`` so the batch contributes no trays
-        for those lines (avoiding wrong-line data leakage).
-      * An empty intersection (``scdw`` is parseable but disjoint from
-        canonical, e.g. ``scdw="503-504"`` vs canonical ``{501, 502}``)
-        marks every canonical chuyen absent so the batch contributes
-        nothing anywhere — its data belongs to production lines that the
-        entry did not request.
+    The ``bz`` is always preferred over ``entry_clean_remark`` when lengths
+    are equal (``>=``), ensuring a reversed entry remark does not override
+    the authoritative bz order stored in the database.
 
-    This fixes the previous misbehaviour where two single-line batches
-    sharing the same multi-line ``bz`` had each batch's data sequentially
-    assigned to *both* lines based on bz token order (causing swapped or
-    missing rows depending on remark order), and the related case where a
-    batch tagged with a *different* production line (scdw disjoint from
-    bz) silently contaminated both lines' positional split with unrelated
-    data.
-
-    When ``scdw`` is missing/unparseable or matches the canonical chuyens
-    exactly, the existing positional split is preserved unchanged so
-    well-behaved multi-line batches continue to load both lines.
+    ``scdw``-based routing is intentionally not performed: the remark (bz)
+    is the single source of truth for slot assignment regardless of what
+    ``para_singl.scdw`` contains.
 
     Returns ``(auto_trays, chuyen_to_pos)`` where:
 
-    * ``auto_trays`` is the per-slot tray list (length matches the number of
-      slots in the active split — either ``len(scdw_chuyens)``, the
-      canonical group count when the master bz contributes more groups than
-      the entry, or ``len(eff_groups)``).
-    * ``chuyen_to_pos`` maps each canonical chuyen to its slot index, used by
-      :func:`_resolve_dmp_tray_list` to look up the correct slot.  Empty when
-      no canonical positional remap is needed (i.e. when ``eff_groups`` already
-      covers every line in the master bz **and** ``scdw`` does not narrow
-      the batch to a subset).
-
-    The canonical source preference is:
-    1. ``batch_bz`` cleaned of ``Q`` / ``15`` suffixes — when present and
-       parsing yields **at least as many** groups as ``entry_clean_remark``
-       (i.e. always preferred when a batch is matched, even when lengths are
-       equal).  The batch bz is the operator-saved master record and its
-       left-to-right token order is the authoritative physical tray order.
-    2. ``entry_clean_remark`` — fallback used only when ``batch_bz`` is empty
-       (no master record matched) or parses to fewer groups than the entry.
+    * ``auto_trays`` is the per-slot tray list.
+    * ``chuyen_to_pos`` maps each canonical chuyen to its slot index, used
+      by :func:`_resolve_dmp_tray_list` to look up the correct trays for
+      each production-line group.
 
     Explicit per-group ``trays`` configuration in the entry bypasses the
     positional remap entirely (handled by :func:`_resolve_dmp_tray_list`).
@@ -5837,75 +5798,33 @@ def _resolve_dmp_canonical_split(
         bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
     bz_groups: list[dict] = _parse_bz_groups(bz_clean) if bz_clean else []
 
-    # Pick whichever canonical source has the most (or equal) line count,
-    # always preferring the batch bz when lengths are the same.  The batch
-    # bz is the operator-saved master record on ``para_pub`` and therefore
-    # the authoritative source of which physical tray slot belongs to which
-    # production line — the DMP machine assigns batteries in bz left-to-right
-    # order, so the bz order IS the physical tray order.  Using the entry's
-    # remark order instead (old ``>`` strict check) caused the two-line equal-
-    # length case (e.g. entry remark "LR6 UD502 UD501" vs bz "LR6 UD501 UD502")
-    # to pick the entry's reversed order, swapping which line received which
-    # physical trays.
+    # Pick canonical source: prefer batch bz when it has at least as many
+    # groups as the entry remark.  The batch bz is the operator-saved master
+    # record; its left-to-right token order is the authoritative physical
+    # tray order.  Using ``>=`` (not the previous strict ``>``) ensures the
+    # bz is chosen even when both sources have the same group count, so an
+    # entry remark typed in reverse order does not override the bz layout.
     canonical = bz_groups if len(bz_groups) >= len(entry_groups) else entry_groups
     canon_n = len(canonical)
-    canonical_chuyens = [str(rg.get("chuyen", "") or "") for rg in canonical]
-    canonical_chuyen_set = {c for c in canonical_chuyens if c}
-
-    # Per-batch scdw routing: when the batch's production-line tag (scdw)
-    # is parseable and differs from the canonical chuyens (whether by
-    # narrowing, partial overlap, or being completely disjoint), the bz
-    # canonical positional split is unsafe — the batch's physical data
-    # belongs to the scdw lines, not to whichever lines bz happens to
-    # name.  Build a chuyen_to_pos that:
-    #   - assigns each chuyen in (scdw ∩ canonical) to a sorted slot, and
-    #   - marks every canonical chuyen NOT in scdw with the absent
-    #     sentinel so the resolver returns [] (skipping this batch for
-    #     that line group).
-    # When the intersection is empty the batch contributes nothing
-    # anywhere (its data is for production lines the entry did not
-    # request).  This is the authoritative per-batch routing and
-    # supersedes the bz canonical positional split.  Skipped only when
-    # scdw equals the canonical chuyens (no narrowing required) or scdw
-    # is missing/unparseable (no per-batch information available — keep
-    # the legacy positional split as a safe fallback).
-    if (
-        no_explicit_trays
-        and batch_chuyens
-        and canonical_chuyen_set
-    ):
-        scdw_chuyen_set = {str(c) for c in batch_chuyens if str(c)}
-        if scdw_chuyen_set and scdw_chuyen_set != canonical_chuyen_set:
-            intersection = scdw_chuyen_set & canonical_chuyen_set
-            sorted_int = sorted(
-                intersection,
-                key=lambda c: (0, int(c), c) if c.isdigit() else (1, 0, c),
-            )
-            chuyen_to_pos: dict[str, int] = {
-                c: i for i, c in enumerate(sorted_int)
-            }
-            for c in canonical_chuyen_set:
-                if c not in chuyen_to_pos:
-                    chuyen_to_pos[c] = _DMP_CHUYEN_SLOT_ABSENT
-            auto_trays = (
-                _split_active_trays_for_group_count(len(sorted_int), active_trays)
-                if sorted_int
-                else []
-            )
-            return auto_trays, chuyen_to_pos
 
     # Build chuyen_to_pos from canonical's **remark order** (not sorted by
     # chuyen number).  The DMP machine assigns physical tray slots strictly
     # left-to-right as production lines appear in the bz string:
     #   "LR6 UD501 UD502"  →  501 = slot 0 (trays 1-4),  502 = slot 1 (trays 5-8)
     #   "LR6 UD502 UD501"  →  502 = slot 0 (trays 1-4),  501 = slot 1 (trays 5-8)
-    # Using a chuyen-number sort (previous approach) was wrong whenever the
-    # operator typed lines in non-ascending order because the sort always put
-    # the lower-numbered line first regardless of the physical slot it
-    # actually occupies.  Building from remark order fixes this for both the
-    # ``canon_n > n_eff`` case (entry remark partial: single group against a
-    # composite bz) and the ``canon_n == n_eff`` case (entry remark full:
-    # same group count as bz but possibly different left-to-right order).
+    # Sorting by chuyen number was wrong whenever the operator typed lines in
+    # non-ascending order because the sort always placed the lower-numbered
+    # line first regardless of its actual physical tray slot.
+    #
+    # ``max(canon_n, n_eff)`` ensures the split covers at least as many
+    # slots as the effective groups require.  In the normal case
+    # ``canon_n >= n_eff`` (bz canonical preferred), so ``max`` resolves to
+    # ``canon_n``.  When ``n_eff > canon_n`` (entry has more configured
+    # groups than the matched bz parses — unusual, but safe) the split
+    # creates ``n_eff`` slots so every configured group gets a slot; the
+    # extra chuyen_to_pos entries derived from canonical still bind the
+    # known lines to their correct slots and the extra groups fall through
+    # to ``g_idx``-based assignment.
     chuyen_to_pos: dict[str, int] = {}
     if canonical and no_explicit_trays:
         for _i, _rg in enumerate(canonical):
@@ -7456,30 +7375,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _dmp_active_trays = (
             _get_dmp_active_trays(actual_batch_id) if batch_rows else list(range(1, 10))
         )
-        # Per-batch production-line tag from para_singl.scdw.  When the
-        # batch carries data for only a strict subset of the lines listed
-        # in bz (e.g. scdw="VN501" while bz="LR6 UD501 UD502 15"),
-        # _resolve_dmp_canonical_split uses this to route ALL of the
-        # batch's active trays to the scdw line(s) only — fixing the
-        # mis-routing that occurred when two single-line batches shared
-        # the same multi-line bz remark (data was sequentially assigned
-        # to both lines based on bz token order).
-        _dmp_batch_chuyens = (
-            _parse_scdw_chuyens(_get_dmp_batch_scdw(actual_batch_id))
-            if batch_rows else []
-        )
-
         # Canonical positional split: the matched batch's bz is the master
-        # record and dictates the multi-line structure.  When the entry's own
-        # raw_remark only mentions a subset of the master's lines (e.g. entry
-        # raw_remark "LR6 UD501" while batch bz is "LR6 UD501 UD502 [15]"),
-        # this routes the configured group to its correct slot in the master
-        # split rather than treating the lone group as if it owned every
-        # active tray.  Applies uniformly to all multi-line bz patterns
-        # (Request #246 follow-up).
+        # record and dictates the multi-line structure.  Remark (bz) order
+        # is the sole source of truth for slot assignment — scdw is not used.
         auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
             _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays,
-            batch_chuyens=_dmp_batch_chuyens,
         )
 
         # Hoist model/no-chuyen check outside the loop so the synthetic-group
@@ -7556,16 +7456,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
             _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
             _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
-            # Per-batch scdw routing — see main batch above.
-            _xb_batch_chuyens = _parse_scdw_chuyens(_get_dmp_batch_scdw(_xb_id))
             # Per-batch canonical split: each extra batch's bz is its own
             # master record and dictates the multi-line structure for that
-            # batch's tray assignment.  Mixing splits across batches with
-            # different bz shapes (Bug 1) would mis-route trays for any
-            # batch whose master record differs from the main batch.
+            # batch's tray assignment.  Remark (bz) order is the sole
+            # source of truth for slot assignment — scdw is not used.
             _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
                 _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays,
-                batch_chuyens=_xb_batch_chuyens,
             )
 
             # Resolve made date (para_singl.scrq) for the extra batch.

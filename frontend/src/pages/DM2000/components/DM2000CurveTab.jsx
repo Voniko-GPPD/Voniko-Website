@@ -13,12 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import {
-  fetchDM2000AverageCurve,
-  fetchDM2000Batteries,
-  fetchDM2000Curve,
-  fetchDM2000Stats,
-} from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const SHOW_ALL_VALUE = -1;
@@ -74,7 +69,8 @@ function downloadChartAsPng(containerRef, filename) {
   img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgData)}`;
 }
 
-export default function DM2000CurveTab({ stationId, selection }) {
+export default function DM2000CurveTab({ stationId, selection, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const chartRef = useRef(null);
   const [loading, setLoading] = useState(false);
@@ -105,7 +101,7 @@ export default function DM2000CurveTab({ stationId, selection }) {
       setBatteryLoading(true);
       setError('');
       try {
-        const rows = await fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal });
+        const rows = await api.fetchBatteries(stationId, selection.archname, { signal: controller.signal });
         if (!active) return;
         setBatteries(
           (rows || [])
@@ -153,12 +149,12 @@ export default function DM2000CurveTab({ stationId, selection }) {
           const [curveResults, statsResults] = await Promise.all([
             Promise.all(
               batteries.map((baty) =>
-                fetchDM2000Curve(stationId, selection.archname, baty, { signal: controller.signal }).then((rows) => ({ baty, rows: rows || [] })),
+                api.fetchCurve(stationId, selection.archname, baty, { signal: controller.signal }).then((rows) => ({ baty, rows: rows || [] })),
               ),
             ),
             Promise.all(
               batteries.map((baty) =>
-                fetchDM2000Stats(stationId, selection.archname, baty, { signal: controller.signal }).then((s) => ({ baty, stats: s || {} })),
+                api.fetchStats(stationId, selection.archname, baty, { signal: controller.signal }).then((s) => ({ baty, stats: s || {} })),
               ),
             ),
           ]);
@@ -202,9 +198,9 @@ export default function DM2000CurveTab({ stationId, selection }) {
       try {
         const [curveRows, statsRows] = await Promise.all([
           selectedBaty > 0
-            ? fetchDM2000Curve(stationId, selection.archname, selectedBaty, { signal: controller.signal })
-            : fetchDM2000AverageCurve(stationId, selection.archname, { signal: controller.signal }),
-          fetchDM2000Stats(stationId, selection.archname, selectedBaty, { signal: controller.signal }),
+            ? api.fetchCurve(stationId, selection.archname, selectedBaty, { signal: controller.signal })
+            : api.fetchAverageCurve(stationId, selection.archname, { signal: controller.signal }),
+          api.fetchStats(stationId, selection.archname, selectedBaty, { signal: controller.signal }),
         ]);
         if (!active) return;
         setCurve(curveRows || []);

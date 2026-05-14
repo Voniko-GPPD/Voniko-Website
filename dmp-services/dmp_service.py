@@ -14,7 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pyodbc
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
@@ -28,21 +28,57 @@ logger = logging.getLogger(__name__)
 DMP_STATION_NAME: str = os.environ.get("DMP_STATION_NAME", "").strip()
 VONIKO_SERVER_URL: str = os.environ.get("VONIKO_SERVER_URL", "").rstrip("/")
 DMP_STATION_PORT: int = int(os.environ.get("DMP_STATION_PORT", "8766"))
+
+# ── PATHS — configured via environment, see dmp-services/start_dmp.bat ───────
+# All DMP / DM2000 / DM3000 source-data directories and template directories
+# are read from environment variables.  To change a path on a station machine
+# (e.g. DMP1 stores DMP at C:\DMP and DMP2 stores DMP at D:\DMP) edit ONLY the
+# values in start_dmp.bat (or set the corresponding env var) and restart the
+# service — no source-code changes are required.  The defaults below are used
+# when an env var is not set.
+#
+# Per-machine examples:
+#
+#   DMP1                              DMP2
+#   ────                              ────
+#   DMP_DATA_DIR     = C:\DMP\Data    DMP_DATA_DIR     = D:\DMP\Data
+#   DM2000_DATA_DIR  = D:\DM2000\…    DM2000_DATA_DIR  = D:\DM2000\…
+#   DM3000_DATA_DIR  = D:\DM3000\…    DM3000_DATA_DIR  = D:\DM3000\…
+#
+# DMP (live discharge data — battery groups + per-tray .mdb files)
 DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
+DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
+
+# DM2000 (historic discharge archive — Ohm-based load resistance)
 DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
 DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
 DM2000_PERF_TEMPLATES_DIR: str = os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates")
-DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
-# Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
-# every request reads from the cached copy instead of making a new shadow copy.
+
+# DM3000 (historic discharge archive — mA-based discharge current).  Same
+# schema as DM2000; only the unit on fzdz / Dis-condition differs.
+DM3000_DATA_DIR: str = os.environ.get("DM3000_DATA_DIR", r"D:\DM3000\dmdatabase")
+DM3000_TEMPLATES_DIR: str = os.environ.get("DM3000_TEMPLATES_DIR", "./dm3000_templates")
+DM3000_PERF_TEMPLATES_DIR: str = os.environ.get(
+    "DM3000_PERF_TEMPLATES_DIR",
+    # Default per the task spec: ``./dm3000_perf_templates``.  The resolver
+    # _resolve_dm_perf_template_path falls back to the DM2000 perf-templates
+    # directory when a requested workbook is missing here, so DM3000 can
+    # reuse DM2000 templates until module-specific layouts are introduced.
+    "./dm3000_perf_templates",
+)
+
+# Local cache directories: persistent copies of dmdata_ls.mdb / DMPDATA.mdb
+# are kept here so that every request reads from the cached copy instead of
+# making a new shadow copy each time.
 DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "../backend/data/dm2000_cache")
-# Local cache directory: persistent copy of DMPDATA.mdb is kept here so that
-# every batch/channel request reads from the cached copy instead of making a
-# new shadow copy each time.
+DM3000_CACHE_DIR: str = os.environ.get("DM3000_CACHE_DIR", "../backend/data/dm3000_cache")
 DMPDATA_CACHE_DIR: str = os.environ.get("DMPDATA_CACHE_DIR", "../backend/data/dmpdata_cache")
+
 # Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
 DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
+DM3000_COMPANY_NAME: str = os.environ.get("DM3000_COMPANY_NAME", DM2000_COMPANY_NAME)
+# ── end PATHS ────────────────────────────────────────────────────────────────
 WATCH_INTERVAL_SECONDS: int = 5
 # Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
 MAX_BATTERY_NUMBER: int = 99
@@ -59,12 +95,10 @@ _ACCESS_QUERY_TIMEOUT: float = 20.0  # seconds to wait for a DB slot before retu
 # mtime every WATCH_INTERVAL_SECONDS and atomically replaces the cached file
 # when the source has been updated.  All read operations use the cached path
 # directly; no per-request file copy or concurrency lock is needed.
-_DM2000_LS_CACHE_PATH: str = ""           # path to the current cached copy
-_DM2000_LS_SOURCE_MTIME: float = -1.0    # mtime of the last successfully cached source
-_DM2000_LS_CACHE_WRITE_LOCK = threading.Lock()   # one writer at a time
-_DM2000_LS_CACHE_READY = threading.Event()        # set once the first copy is done
 # Seconds to wait for the initial cache build before returning 503 to callers.
-_DM2000_LS_CACHE_READY_TIMEOUT: float = 30.0
+_DM_LS_CACHE_READY_TIMEOUT: float = 30.0
+# Backward-compat alias — older code paths reference the DM2000 timeout name.
+_DM2000_LS_CACHE_READY_TIMEOUT: float = _DM_LS_CACHE_READY_TIMEOUT
 
 # ── Persistent local cache for DMPDATA.mdb ───────────────────────────────────
 # DMPDATA.mdb accumulates data since 2019 and grows very large.  Maintaining a
@@ -79,27 +113,183 @@ _DMPDATA_CACHE_READY_TIMEOUT: float = 30.0
 _TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
 _TELEMETRY_CACHE_LOCK = threading.Lock()
 _TELEMETRY_CACHE_TTL: float = 60.0  # seconds
-_DM2000_CURVE_CACHE: dict[tuple, tuple[list, float]] = {}
-_DM2000_CURVE_CACHE_LOCK = threading.Lock()
-_DM2000_CURVE_CACHE_TTL: float = 300.0  # seconds
-_DM2000_ARCHIVES_CACHE: dict[str, tuple[list, float]] = {}
-_DM2000_ARCHIVES_CACHE_LOCK = threading.Lock()
-_DM2000_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
-_DM2000_BATTERIES_CACHE: dict[str, tuple[list, float]] = {}
-_DM2000_BATTERIES_CACHE_LOCK = threading.Lock()
-_DM2000_BATTERIES_CACHE_TTL: float = 60.0  # seconds
-_DM2000_STATS_CACHE: dict[tuple, tuple[dict, float]] = {}
-_DM2000_STATS_CACHE_LOCK = threading.Lock()
-_DM2000_STATS_CACHE_TTL: float = 300.0  # seconds
-# Cache for full time-at-voltage data per archive (all batteries, all voltage thresholds).
-# Populated by _load_vtime_for_archive and reused by both _get_batys_for_archive and
-# _get_tav_for_batteries to avoid repeated ODBC queries for the same archive.
-_DM2000_TAV_CACHE: dict[str, tuple[dict, float]] = {}
-_DM2000_TAV_CACHE_LOCK = threading.Lock()
-_DM2000_TAV_CACHE_TTL: float = 120.0  # seconds
-_DM2000_CACHE_MAX_ENTRIES: int = 100
+# Shared TTL constants used by both DM2000 and DM3000 module instances.
+_DM_CURVE_CACHE_TTL: float = 300.0  # seconds
+_DM_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
+_DM_BATTERIES_CACHE_TTL: float = 60.0  # seconds
+_DM_STATS_CACHE_TTL: float = 300.0  # seconds
+_DM_TAV_CACHE_TTL: float = 120.0  # seconds
+_DM_CACHE_MAX_ENTRIES: int = 100
+# Backward-compat aliases for the historical DM2000 names.
+_DM2000_CURVE_CACHE_TTL: float = _DM_CURVE_CACHE_TTL
+_DM2000_ARCHIVES_CACHE_TTL: float = _DM_ARCHIVES_CACHE_TTL
+_DM2000_BATTERIES_CACHE_TTL: float = _DM_BATTERIES_CACHE_TTL
+_DM2000_STATS_CACHE_TTL: float = _DM_STATS_CACHE_TTL
+_DM2000_TAV_CACHE_TTL: float = _DM_TAV_CACHE_TTL
+_DM2000_CACHE_MAX_ENTRIES: int = _DM_CACHE_MAX_ENTRIES
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DmModule — bundles per-module state for the historic discharge databases.
+#
+# DM2000 and DM3000 share an identical Access schema (`ls_jb_cs`, `ls_evolt`,
+# `ls_spt_volt`, `ls_vtime`, `ls_pam2`, `ls_timev`, plus per-archive `*.mdb`
+# files); the only material difference is the unit on the discharge condition
+# field (`fzdz`).  DM2000 stores load resistance in Ohms, DM3000 stores
+# discharge current in mA.  All endpoint logic, cache management and template
+# rendering is therefore shared via this DmModule wrapper — only the unit-
+# dependent helpers branch on ``cfg.unit_suffix``.
+# ─────────────────────────────────────────────────────────────────────────────
+class DmModule:
+    """Bundle of per-module configuration, on-disk paths and in-memory caches.
+
+    Two singleton instances are created at module load (see ``DM2000_MOD`` and
+    ``DM3000_MOD``).  Endpoint implementations receive an instance via the
+    ``cfg`` parameter and read all module-specific state from it.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        data_dir: str,
+        cache_dir: str,
+        templates_dir: str,
+        perf_templates_dir: str,
+        company_name: str,
+        unit_suffix: str,
+        unit_label: str,
+        ls_filename: str = "dmdata_ls.mdb",
+        cache_filename: str = "dmdata_ls.mdb",
+        main_filename: str = "DM2000.mdb",
+    ) -> None:
+        self.name = name
+        self.data_dir = data_dir
+        self.cache_dir = cache_dir
+        self.templates_dir = templates_dir
+        self.perf_templates_dir = perf_templates_dir
+        self.company_name = company_name
+        # Unit suffix shown in the Dis-condition string ('ohm' for DM2000,
+        # 'mA' for DM3000).  ``unit_label`` is the verbose form used in
+        # report headers ('Ohm' / 'mA').
+        self.unit_suffix = unit_suffix
+        self.unit_label = unit_label
+        self.ls_filename = ls_filename
+        self.cache_filename = cache_filename
+        self.main_filename = main_filename
+
+        # ── Mutable state for the persistent dmdata_ls cache ────────────
+        # Path to the current cached copy (may be the cache_final, the live
+        # source path as a fallback, or empty until the first refresh).
+        self.ls_cache_path: str = ""
+        # mtime of the last successfully cached source file.
+        self.ls_source_mtime: float = -1.0
+        # One writer at a time when refreshing the cache.
+        self.ls_cache_write_lock = threading.Lock()
+        # Set once the first cache copy is in place; reads block on this.
+        self.ls_cache_ready = threading.Event()
+
+        # ── In-memory caches (per-module) ────────────────────────────────
+        # Curve / archives / batteries / stats / time-at-voltage caches.
+        # Each is a dict-of-(value, timestamp) protected by its own lock.
+        self.curve_cache: dict[tuple, tuple[list, float]] = {}
+        self.curve_cache_lock = threading.Lock()
+        self.archives_cache: dict[str, tuple[list, float]] = {}
+        self.archives_cache_lock = threading.Lock()
+        self.batteries_cache: dict[str, tuple[list, float]] = {}
+        self.batteries_cache_lock = threading.Lock()
+        self.stats_cache: dict[tuple, tuple[dict, float]] = {}
+        self.stats_cache_lock = threading.Lock()
+        self.tav_cache: dict[str, tuple[dict, float]] = {}
+        self.tav_cache_lock = threading.Lock()
+
+    # ── Path helpers ────────────────────────────────────────────────────
+    def get_ls_path(self) -> str:
+        return str(Path(self.data_dir).resolve() / self.ls_filename)
+
+    def get_main_path(self) -> str:
+        return str(Path(self.data_dir).resolve() / self.main_filename)
+
+    def get_cache_dir(self) -> Path:
+        return Path(self.cache_dir).resolve()
+
+    def get_cache_final_path(self) -> Path:
+        return self.get_cache_dir() / self.cache_filename
+
+    def clear_all_caches(self) -> None:
+        """Invalidate every in-memory cache for this module."""
+        with self.curve_cache_lock:
+            self.curve_cache.clear()
+        with self.archives_cache_lock:
+            self.archives_cache.clear()
+        with self.batteries_cache_lock:
+            self.batteries_cache.clear()
+        with self.stats_cache_lock:
+            self.stats_cache.clear()
+        with self.tav_cache_lock:
+            self.tav_cache.clear()
+
+
+# Singleton instances — created at module load.
+DM2000_MOD = DmModule(
+    name="dm2000",
+    data_dir=DM2000_DATA_DIR,
+    cache_dir=DM2000_CACHE_DIR,
+    templates_dir=DM2000_TEMPLATES_DIR,
+    perf_templates_dir=DM2000_PERF_TEMPLATES_DIR,
+    company_name=DM2000_COMPANY_NAME,
+    unit_suffix="ohm",
+    unit_label="Ohm",
+)
+DM3000_MOD = DmModule(
+    name="dm3000",
+    data_dir=DM3000_DATA_DIR,
+    cache_dir=DM3000_CACHE_DIR,
+    templates_dir=DM3000_TEMPLATES_DIR,
+    perf_templates_dir=DM3000_PERF_TEMPLATES_DIR,
+    company_name=DM3000_COMPANY_NAME,
+    unit_suffix="mA",
+    unit_label="mA",
+    main_filename="DM3000.mdb",
+)
+DM_MODULES: dict[str, DmModule] = {"dm2000": DM2000_MOD, "dm3000": DM3000_MOD}
+
+
+def _resolve_dm_module(request: Request) -> DmModule:
+    """Map an incoming ``/dm2000/*`` or ``/dm3000/*`` request path to its
+    :class:`DmModule` configuration object.
+
+    Routes shared between DM2000 and DM3000 are registered with two
+    decorators (one per prefix); the handler then reads ``request.url.path``
+    to dispatch to the correct module's caches and on-disk files.  Defaults
+    to DM2000 if the path doesn't contain a recognised module prefix —
+    callers should never reach this branch in practice because the routes
+    are registered with explicit prefixes.
+    """
+    path = request.url.path
+    if "/dm3000/" in path or path.endswith("/dm3000"):
+        return DM_MODULES["dm3000"]
+    return DM_MODULES["dm2000"]
+
+# Backward-compatibility aliases.  Many existing DM2000 code paths refer to
+# the historical module-level globals directly; binding them to the DM2000
+# module instance keeps that code working unchanged.  Reassigning these
+# names rebinds only the alias, NOT the cfg attribute, so writers must use
+# ``DM2000_MOD.x = ...`` to mutate the underlying state.
+_DM2000_LS_CACHE_WRITE_LOCK = DM2000_MOD.ls_cache_write_lock
+_DM2000_LS_CACHE_READY = DM2000_MOD.ls_cache_ready
+_DM2000_CURVE_CACHE = DM2000_MOD.curve_cache
+_DM2000_CURVE_CACHE_LOCK = DM2000_MOD.curve_cache_lock
+_DM2000_ARCHIVES_CACHE = DM2000_MOD.archives_cache
+_DM2000_ARCHIVES_CACHE_LOCK = DM2000_MOD.archives_cache_lock
+_DM2000_BATTERIES_CACHE = DM2000_MOD.batteries_cache
+_DM2000_BATTERIES_CACHE_LOCK = DM2000_MOD.batteries_cache_lock
+_DM2000_STATS_CACHE = DM2000_MOD.stats_cache
+_DM2000_STATS_CACHE_LOCK = DM2000_MOD.stats_cache_lock
+_DM2000_TAV_CACHE = DM2000_MOD.tav_cache
+_DM2000_TAV_CACHE_LOCK = DM2000_MOD.tav_cache_lock
 def _get_local_ip() -> str:
     try:
         host = VONIKO_SERVER_URL.split("://")[-1].split(":")[0].split("/")[0]
@@ -171,8 +361,9 @@ def _watch_dmp_changes_loop() -> None:
                     if previous is None or mtime > previous:
                         _WATCHED_CHANGES[stem] = now
                     _WATCHED_MDB_MTIME[stem] = mtime
-            # Keep dm2000 and dmpdata local caches in sync with source files
+            # Keep dm2000, dm3000 and dmpdata local caches in sync with source files
             _dm2000_refresh_ls_cache()
+            _dm3000_refresh_ls_cache()
             _dmpdata_refresh_cache()
         except (OSError, ValueError, pyodbc.Error, HTTPException) as exc:
             # Never let the watcher thread die — log and continue.
@@ -180,49 +371,51 @@ def _watch_dmp_changes_loop() -> None:
         time.sleep(WATCH_INTERVAL_SECONDS)
 
 
-def _dm2000_refresh_ls_cache(force: bool = False) -> None:
-    """Copy dmdata_ls.mdb to the local cache directory if the source has changed.
+def _dm_refresh_ls_cache(cfg: DmModule, force: bool = False) -> None:
+    """Copy ``<data_dir>/<ls_filename>`` to the local cache directory if the
+    source has changed.
+
+    Parameterized over the DM module (``cfg``) so DM2000 and DM3000 share
+    the same atomic-rename / fallback / magic-byte-validation logic.
 
     Uses an atomic rename (os.replace) so readers always see a complete file.
-    Invalidates all DM2000 in-memory caches after a successful refresh.
+    Invalidates all in-memory caches for ``cfg`` after a successful refresh.
     If the source cannot be read but a previous cache exists, keeps using it.
     """
-    global _DM2000_LS_CACHE_PATH, _DM2000_LS_SOURCE_MTIME  # noqa: PLW0603
-
-    ls_path = Path(get_dm2000_ls_path())
+    ls_path = Path(cfg.get_ls_path())
     if not ls_path.exists():
         # Source not present; signal ready using live path as fallback if cache exists
-        if not _DM2000_LS_CACHE_READY.is_set():
-            _DM2000_LS_CACHE_READY.set()
+        if not cfg.ls_cache_ready.is_set():
+            cfg.ls_cache_ready.set()
         return
 
     try:
         current_mtime = ls_path.stat().st_mtime
     except OSError:
-        if not _DM2000_LS_CACHE_READY.is_set():
-            _DM2000_LS_CACHE_READY.set()
+        if not cfg.ls_cache_ready.is_set():
+            cfg.ls_cache_ready.set()
         return
 
-    with _DM2000_LS_CACHE_WRITE_LOCK:
-        if not force and current_mtime <= _DM2000_LS_SOURCE_MTIME and _DM2000_LS_CACHE_READY.is_set():
+    with cfg.ls_cache_write_lock:
+        if not force and current_mtime <= cfg.ls_source_mtime and cfg.ls_cache_ready.is_set():
             return  # source unchanged
 
-        cache_dir = Path(DM2000_CACHE_DIR).resolve()
+        cache_dir = cfg.get_cache_dir()
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            logger.warning("dm2000_cache: cannot create cache dir %s: %s", cache_dir, exc)
-            if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = str(ls_path)
-                _DM2000_LS_CACHE_READY.set()
+            logger.warning("%s_cache: cannot create cache dir %s: %s", cfg.name, cache_dir, exc)
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = str(ls_path)
+                cfg.ls_cache_ready.set()
             return
 
-        cache_final = str(cache_dir / "dmdata_ls.mdb")
-        cache_tmp = str(cache_dir / "dmdata_ls_new.mdb")
+        cache_final = str(cache_dir / cfg.cache_filename)
+        cache_tmp = str(cache_dir / (Path(cfg.cache_filename).stem + "_new" + Path(cfg.cache_filename).suffix))
         try:
             shutil.copy2(str(ls_path), cache_tmp)
         except (OSError, PermissionError) as exc:
-            logger.warning("dm2000_cache: copy failed (%s), falling back to live source: %s", ls_path, exc)
+            logger.warning("%s_cache: copy failed (%s), falling back to live source: %s", cfg.name, ls_path, exc)
             try:
                 os.unlink(cache_tmp)
             except OSError:
@@ -231,23 +424,14 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             # pick up the latest data.  If the source is exclusively locked,
             # ODBC will also fail, but this is no worse than using a stale copy.
             preferred = str(ls_path)
-            if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = preferred
-                _DM2000_LS_CACHE_READY.set()
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
             else:
                 # Always update the path and clear caches so the next ODBC
                 # read picks up whatever data is available in preferred.
-                _DM2000_LS_CACHE_PATH = preferred
-                with _DM2000_ARCHIVES_CACHE_LOCK:
-                    _DM2000_ARCHIVES_CACHE.clear()
-                with _DM2000_BATTERIES_CACHE_LOCK:
-                    _DM2000_BATTERIES_CACHE.clear()
-                with _DM2000_TAV_CACHE_LOCK:
-                    _DM2000_TAV_CACHE.clear()
-                with _DM2000_STATS_CACHE_LOCK:
-                    _DM2000_STATS_CACHE.clear()
-                with _DM2000_CURVE_CACHE_LOCK:
-                    _DM2000_CURVE_CACHE.clear()
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
             return
 
         # Validate magic bytes before replacing.
@@ -262,7 +446,7 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
                 if magic != b"\x00\x01\x00\x00":
                     raise ValueError(f"Not a valid Access DB (magic={magic!r})")
         except (OSError, ValueError) as exc:
-            logger.warning("dm2000_cache: validation failed for %s: %s", cache_tmp, exc)
+            logger.warning("%s_cache: validation failed for %s: %s", cfg.name, cache_tmp, exc)
             try:
                 os.unlink(cache_tmp)
             except OSError:
@@ -270,21 +454,12 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             # Fall back to the live source path so ODBC reads are never
             # blocked by a partially-written or corrupt temporary file.
             preferred = str(ls_path)
-            if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = preferred
-                _DM2000_LS_CACHE_READY.set()
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
             else:
-                _DM2000_LS_CACHE_PATH = preferred
-                with _DM2000_ARCHIVES_CACHE_LOCK:
-                    _DM2000_ARCHIVES_CACHE.clear()
-                with _DM2000_BATTERIES_CACHE_LOCK:
-                    _DM2000_BATTERIES_CACHE.clear()
-                with _DM2000_TAV_CACHE_LOCK:
-                    _DM2000_TAV_CACHE.clear()
-                with _DM2000_STATS_CACHE_LOCK:
-                    _DM2000_STATS_CACHE.clear()
-                with _DM2000_CURVE_CACHE_LOCK:
-                    _DM2000_CURVE_CACHE.clear()
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
             return
 
         # Atomically replace the cached copy.  On Windows a concurrent pyodbc
@@ -331,8 +506,9 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             if cache_final_mtime > current_mtime:
                 # User edited the cache file; keep it as the read target.
                 logger.warning(
-                    "dm2000_cache: rename failed (file in use?), keeping user-edited"
+                    "%s_cache: rename failed (file in use?), keeping user-edited"
                     " cache_final (mtime %.0f > source %.0f): %s",
+                    cfg.name,
                     cache_final_mtime,
                     current_mtime,
                     replace_exc,
@@ -341,47 +517,38 @@ def _dm2000_refresh_ls_cache(force: bool = False) -> None:
             else:
                 # Source is newer or cache_final absent; fall back to source.
                 logger.warning(
-                    "dm2000_cache: rename failed (file in use?), falling back to"
+                    "%s_cache: rename failed (file in use?), falling back to"
                     " source: %s",
+                    cfg.name,
                     replace_exc,
                 )
                 preferred = str(ls_path)
 
-            if not _DM2000_LS_CACHE_READY.is_set():
-                _DM2000_LS_CACHE_PATH = preferred
-                _DM2000_LS_CACHE_READY.set()
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
             else:
                 # Always update the path and clear caches so the next ODBC read
                 # sees fresh data, even if preferred equals the previous path.
-                _DM2000_LS_CACHE_PATH = preferred
-                with _DM2000_ARCHIVES_CACHE_LOCK:
-                    _DM2000_ARCHIVES_CACHE.clear()
-                with _DM2000_BATTERIES_CACHE_LOCK:
-                    _DM2000_BATTERIES_CACHE.clear()
-                with _DM2000_TAV_CACHE_LOCK:
-                    _DM2000_TAV_CACHE.clear()
-                with _DM2000_STATS_CACHE_LOCK:
-                    _DM2000_STATS_CACHE.clear()
-                with _DM2000_CURVE_CACHE_LOCK:
-                    _DM2000_CURVE_CACHE.clear()
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
             return
-        _DM2000_LS_CACHE_PATH = cache_final
-        _DM2000_LS_SOURCE_MTIME = current_mtime
-        logger.info("dm2000_cache: refreshed local copy from %s (mtime=%s)", ls_path, current_mtime)
+        cfg.ls_cache_path = cache_final
+        cfg.ls_source_mtime = current_mtime
+        logger.info("%s_cache: refreshed local copy from %s (mtime=%s)", cfg.name, ls_path, current_mtime)
 
-        # Invalidate all DM2000 in-memory caches
-        with _DM2000_CURVE_CACHE_LOCK:
-            _DM2000_CURVE_CACHE.clear()
-        with _DM2000_ARCHIVES_CACHE_LOCK:
-            _DM2000_ARCHIVES_CACHE.clear()
-        with _DM2000_BATTERIES_CACHE_LOCK:
-            _DM2000_BATTERIES_CACHE.clear()
-        with _DM2000_TAV_CACHE_LOCK:
-            _DM2000_TAV_CACHE.clear()
-        with _DM2000_STATS_CACHE_LOCK:
-            _DM2000_STATS_CACHE.clear()
+        # Invalidate all in-memory caches for this module
+        cfg.clear_all_caches()
 
-        _DM2000_LS_CACHE_READY.set()
+
+def _dm2000_refresh_ls_cache(force: bool = False) -> None:
+    """Backward-compatible wrapper that refreshes the DM2000 cache."""
+    _dm_refresh_ls_cache(DM2000_MOD, force=force)
+
+
+def _dm3000_refresh_ls_cache(force: bool = False) -> None:
+    """Refresh the DM3000 cache (parallel to DM2000)."""
+    _dm_refresh_ls_cache(DM3000_MOD, force=force)
 
 
 def _dmpdata_refresh_cache(force: bool = False) -> None:
@@ -505,6 +672,7 @@ async def _lifespan(application):
     # respond immediately; DB-backed endpoints wait for the *_CACHE_READY events.
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: _dm2000_refresh_ls_cache(force=True))
+    await loop.run_in_executor(None, lambda: _dm3000_refresh_ls_cache(force=True))
     await loop.run_in_executor(None, lambda: _dmpdata_refresh_cache(force=True))
     # Register with the Voniko server only AFTER the local caches are ready so
     # that requests proxied to this station are not met with a premature 503.
@@ -798,11 +966,21 @@ def get_dmpdata_path() -> str:
 
 
 def get_dm2000_ls_path() -> str:
-    return str(Path(DM2000_DATA_DIR).resolve() / "dmdata_ls.mdb")
+    """Backward-compatible accessor — returns the DM2000 ls.mdb source path."""
+    return DM2000_MOD.get_ls_path()
+
+
+def get_dm3000_ls_path() -> str:
+    """Returns the DM3000 ls.mdb source path."""
+    return DM3000_MOD.get_ls_path()
 
 
 def get_dm2000_main_path() -> str:
-    return str(Path(DM2000_DATA_DIR).resolve() / "DM2000.mdb")
+    return DM2000_MOD.get_main_path()
+
+
+def get_dm3000_main_path() -> str:
+    return DM3000_MOD.get_main_path()
 
 
 def compute_stats(rows: list[dict]) -> dict:
@@ -1055,42 +1233,45 @@ def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
         return query_mdb(copied, sql, params)
 
 
-def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
-    """Query the persistent local cache of dmdata_ls.mdb.
+def _read_dm_ls(cfg: DmModule, sql: str, params: tuple = ()) -> list[dict]:
+    """Query the persistent local cache of ``<module>/dmdata_ls.mdb``.
 
-    Waits up to _DM2000_LS_CACHE_READY_TIMEOUT seconds for the initial cache to be built (startup), then reads
-    directly from the cached copy without creating a new shadow copy per request.
-    The global ACCESS_QUERY_LOCK inside query_mdb still caps concurrent ODBC
+    Parameterised over the DM module so DM2000 and DM3000 share the same
+    code path.  Waits up to ``_DM_LS_CACHE_READY_TIMEOUT`` seconds for the
+    initial cache to be built (startup), then reads directly from the cached
+    copy without creating a new shadow copy per request.  The global
+    ACCESS_QUERY_LOCK inside ``query_mdb`` still caps concurrent ODBC
     connections, but no per-request file duplication overhead exists.
     """
-    if not _DM2000_LS_CACHE_READY.wait(timeout=_DM2000_LS_CACHE_READY_TIMEOUT):
+    if not cfg.ls_cache_ready.wait(timeout=_DM_LS_CACHE_READY_TIMEOUT):
         raise HTTPException(
             status_code=503,
-            detail="DM2000 database not ready, please retry shortly",
+            detail=f"{cfg.name.upper()} database not ready, please retry shortly",
         )
-    if not _DM2000_LS_CACHE_PATH:
-        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
-    return query_mdb(_DM2000_LS_CACHE_PATH, sql, params)
+    if not cfg.ls_cache_path:
+        raise HTTPException(status_code=404, detail=f"{cfg.ls_filename} not found")
+    return query_mdb(cfg.ls_cache_path, sql, params)
 
 
-def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
-    """Execute a list of (sql, params) queries against the persistent local cache
-    of dmdata_ls.mdb, returning the first successful result.
+def _read_dm_ls_multi(cfg: DmModule, queries: list[tuple[str, tuple]]) -> list[dict]:
+    """Execute a list of (sql, params) queries against the persistent local
+    cache of ``<module>/dmdata_ls.mdb`` for *cfg*, returning the first
+    successful result.
 
     Raises HTTPException(503) when the cache is not yet ready.
     Re-raises the last :class:`pyodbc.Error` when every query in *queries* fails.
     """
-    if not _DM2000_LS_CACHE_READY.wait(timeout=_DM2000_LS_CACHE_READY_TIMEOUT):
+    if not cfg.ls_cache_ready.wait(timeout=_DM_LS_CACHE_READY_TIMEOUT):
         raise HTTPException(
             status_code=503,
-            detail="DM2000 database not ready, please retry shortly",
+            detail=f"{cfg.name.upper()} database not ready, please retry shortly",
         )
-    if not _DM2000_LS_CACHE_PATH:
-        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+    if not cfg.ls_cache_path:
+        raise HTTPException(status_code=404, detail=f"{cfg.ls_filename} not found")
     last_exc: "pyodbc.Error | None" = None
     for sql, params in queries:
         try:
-            return query_mdb(_DM2000_LS_CACHE_PATH, sql, params)
+            return query_mdb(cfg.ls_cache_path, sql, params)
         except pyodbc.Error as exc:
             last_exc = exc
     if last_exc is not None:
@@ -1098,11 +1279,27 @@ def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
     return []  # only reached when queries is empty
 
 
-def _resolve_dm2000_template_path(template_name: str) -> str:
+# Backward-compatible thin wrappers — many existing callers reference the
+# DM2000-specific names.
+def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
+    return _read_dm_ls(DM2000_MOD, sql, params)
+
+
+def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
+    return _read_dm_ls_multi(DM2000_MOD, queries)
+
+
+def _resolve_dm_template_path(cfg: DmModule, template_name: str) -> str:
+    """Resolve *template_name* against ``cfg.templates_dir`` with traversal checks.
+
+    Shared by DM2000 and DM3000.  The two modules use separate templates
+    directories (``./dm2000_templates`` and ``./dm3000_templates`` by default)
+    so they can ship distinct workbooks with the right unit headers.
+    """
     if not _is_valid_template_name(template_name):
         raise HTTPException(status_code=400, detail="Invalid template")
 
-    base = Path(DM2000_TEMPLATES_DIR).resolve()
+    base = Path(cfg.templates_dir).resolve()
     allowed = {
         f.name for f in base.iterdir()
         if f.is_file() and _is_valid_template_name(f.name)
@@ -1119,16 +1316,39 @@ def _resolve_dm2000_template_path(template_name: str) -> str:
     return str(result)
 
 
-def _resolve_perf_template_path(template_name: str) -> str:
+def _resolve_dm2000_template_path(template_name: str) -> str:
+    return _resolve_dm_template_path(DM2000_MOD, template_name)
+
+
+def _resolve_dm_perf_template_path(cfg: DmModule, template_name: str) -> str:
+    """Resolve *template_name* against ``cfg.perf_templates_dir`` with
+    traversal checks.  When the requested template is missing from the
+    DM3000 directory, fall back to the DM2000 directory so the two modules
+    can share workbooks until DM3000-specific perf templates exist."""
     if not _is_valid_template_name(template_name):
         raise HTTPException(status_code=400, detail="Invalid template")
 
-    base = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    base = Path(cfg.perf_templates_dir).resolve()
     allowed = {
         f.name: f for f in base.iterdir()
         if f.is_file() and _is_valid_template_name(f.name)
     } if base.exists() else {}
     if template_name not in allowed:
+        # Fallback: DM3000 may reuse DM2000 perf templates initially
+        if cfg.name != "dm2000":
+            fallback = Path(DM2000_MOD.perf_templates_dir).resolve()
+            fb_allowed = {
+                f.name: f for f in fallback.iterdir()
+                if f.is_file() and _is_valid_template_name(f.name)
+            } if fallback.exists() else {}
+            if template_name in fb_allowed:
+                fb_result = fb_allowed[template_name].resolve()
+                try:
+                    fb_result.relative_to(fallback)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+                if fb_result.is_file():
+                    return str(fb_result)
         raise HTTPException(status_code=404, detail="Perf template not found")
     # Use the filesystem-derived Path object (not raw user input) to avoid taint
     result = allowed[template_name].resolve()
@@ -1139,6 +1359,11 @@ def _resolve_perf_template_path(template_name: str) -> str:
     if not result.is_file():
         raise HTTPException(status_code=404, detail="Perf template not found")
     return str(result)
+
+
+def _resolve_perf_template_path(template_name: str) -> str:
+    """Backward-compatible wrapper — resolves against the DM2000 perf templates dir."""
+    return _resolve_dm_perf_template_path(DM2000_MOD, template_name)
 
 
 def _perf_cell_value_with_merge(ws, row: int, col: int):
@@ -2381,13 +2606,13 @@ def _cache_set_with_cap(cache: dict, key, value) -> None:
     cache.pop(oldest_key, None)
 
 
-def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
+def _read_dm_curve_rows(cfg: DmModule, archname: str, baty: int) -> list[dict]:
     cache_key = (archname, baty)
-    with _DM2000_CURVE_CACHE_LOCK:
-        cached = _DM2000_CURVE_CACHE.get(cache_key)
+    with cfg.curve_cache_lock:
+        cached = cfg.curve_cache.get(cache_key)
         if cached is not None:
             rows, ts = cached
-            if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
+            if time.time() - ts < _DM_CURVE_CACHE_TTL:
                 return rows
 
     if baty <= 0 or baty > 99:
@@ -2396,7 +2621,7 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
     # Try both schema variants in a single shadow copy to avoid duplicate file
     # copies when the primary archname-based schema is not present.
     try:
-        raw = _read_dm2000_ls_multi([
+        raw = _read_dm_ls_multi(cfg, [
             ("SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC", (archname, baty)),
             (f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC", (archname,)),
         ])
@@ -2431,23 +2656,28 @@ def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
         # average VOLT to collapse any duplicate measurements from multiple sessions.
         rows = _compute_average_curve(raw)
 
-    with _DM2000_CURVE_CACHE_LOCK:
-        _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (rows, time.time()))
+    with cfg.curve_cache_lock:
+        _cache_set_with_cap(cfg.curve_cache, cache_key, (rows, time.time()))
     return rows
 
 
-def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
+def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
+    """Backward-compat wrapper — DM2000 curve rows."""
+    return _read_dm_curve_rows(DM2000_MOD, archname, baty)
+
+
+def _read_dm_average_curve_rows(cfg: DmModule, archname: str) -> list[dict]:
     cache_key = ("avg", archname)
-    with _DM2000_CURVE_CACHE_LOCK:
-        cached = _DM2000_CURVE_CACHE.get(cache_key)
+    with cfg.curve_cache_lock:
+        cached = cfg.curve_cache.get(cache_key)
         if cached is not None:
             rows, ts = cached
-            if time.time() - ts < _DM2000_CURVE_CACHE_TTL:
+            if time.time() - ts < _DM_CURVE_CACHE_TTL:
                 return rows
 
     # Try both schema variants in a single shadow copy to avoid two separate file copies.
     try:
-        raw = _read_dm2000_ls_multi([
+        raw = _read_dm_ls_multi(cfg, [
             ("SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC", (archname,)),
             (
                 "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
@@ -2469,9 +2699,14 @@ def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
     else:
         avg_rows = _compute_average_curve(raw)
 
-    with _DM2000_CURVE_CACHE_LOCK:
-        _cache_set_with_cap(_DM2000_CURVE_CACHE, cache_key, (avg_rows, time.time()))
+    with cfg.curve_cache_lock:
+        _cache_set_with_cap(cfg.curve_cache, cache_key, (avg_rows, time.time()))
     return avg_rows
+
+
+def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
+    """Backward-compat wrapper — DM2000 average curve rows."""
+    return _read_dm_average_curve_rows(DM2000_MOD, archname)
 
 
 def _parse_iso_date_param(value: str | None, field_name: str) -> date | None:
@@ -3352,15 +3587,18 @@ def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
 
 # ─── DM2000 Historic Database Routes ────────────────────────────────────────
 
-def _build_dis_condition_display(archive: dict) -> str:
+def _build_dis_condition_display(cfg: DmModule, archive: dict) -> str:
     """Build the human-readable Dis-condition string exactly as the frontend does.
 
-    Format: ``{resistance}ohm {fdfs} to {endpoint_voltage}V``
-    A bare numeric load_resistance is auto-suffixed with "ohm".
+    Format: ``{value}<unit> {fdfs} to {endpoint_voltage}V`` where the unit is
+    ``ohm`` for DM2000 and ``mA`` for DM3000 (driven by ``cfg.unit_suffix``).
+    A bare numeric load_resistance/discharge-current is auto-suffixed with
+    the cfg unit; otherwise the raw string is used as-is so values that
+    already include a unit (e.g. ``620+10k``) are preserved.
     """
     raw_res = str(archive.get("load_resistance") or "").strip()
     if raw_res and re.match(r'^\d+(\.\d+)?$', raw_res):
-        resistance = f"{raw_res}ohm"
+        resistance = f"{raw_res}{cfg.unit_suffix}"
     else:
         resistance = raw_res
     fdfs = str(archive.get("fdfs") or "").strip()
@@ -3370,8 +3608,9 @@ def _build_dis_condition_display(archive: dict) -> str:
     return prefix + suffix
 
 
+@app.get("/dm3000/archives")
 @app.get("/dm2000/archives")
-def get_dm2000_archives(
+def get_dm2000_archives(request: Request, 
     date_from: str = None,
     date_to: str = None,
     type_filter: str = None,
@@ -3382,29 +3621,30 @@ def get_dm2000_archives(
     keyword: str = None,
     limit: Optional[int] = None,
 ):
+    cfg = _resolve_dm_module(request)
     table_names_to_try = ["ls_jb_cs", "ls_pam2", "ls_cs", "ls_jbcs", "ls_archive"]
     rows = None
     cache_key = "all_archives"
-    with _DM2000_ARCHIVES_CACHE_LOCK:
-        cached = _DM2000_ARCHIVES_CACHE.get(cache_key)
+    with cfg.archives_cache_lock:
+        cached = cfg.archives_cache.get(cache_key)
         if cached is not None:
             cached_rows, ts = cached
-            if time.time() - ts < _DM2000_ARCHIVES_CACHE_TTL:
+            if time.time() - ts < _DM_ARCHIVES_CACHE_TTL:
                 rows = cached_rows
 
     if rows is None:
         # Use a single shadow copy to try every candidate table name, avoiding
         # the O(n) shadow-copy cost that previously caused proxy timeouts.
         try:
-            rows = _read_dm2000_ls_multi([
+            rows = _read_dm_ls_multi(cfg, [
                 (f"SELECT * FROM {t}", ()) for t in table_names_to_try
             ])
         except (pyodbc.Error, HTTPException):
             rows = None
         if rows is None:
             return {"archives": [], "total": 0, "warning": "Archive table not found in dmdata_ls.mdb"}
-        with _DM2000_ARCHIVES_CACHE_LOCK:
-            _cache_set_with_cap(_DM2000_ARCHIVES_CACHE, cache_key, (rows, time.time()))
+        with cfg.archives_cache_lock:
+            _cache_set_with_cap(cfg.archives_cache, cache_key, (rows, time.time()))
 
     date_from_parsed = _parse_iso_date_param(date_from, "date_from")
     date_to_parsed = _parse_iso_date_param(date_to, "date_to")
@@ -3454,14 +3694,14 @@ def get_dm2000_archives(
                 "temp", "hjt", "qw", "t", "csh", "jchj",
             ),
             "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts"),
-            "company": DM2000_COMPANY_NAME or None,
+            "company": cfg.company_name or None,
         }
         # Build database file path from archname and data directory
         archname_val = item.get("archname") or ""
-        item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
+        item["database"] = str(Path(cfg.data_dir) / f"{archname_val}.mdb") if archname_val else None
         # Pre-compute the human-readable Dis-condition display string (same formula
         # as the frontend renderer) so keyword and dis_condition_filter can match it.
-        item["_dis_condition_display"] = _build_dis_condition_display(item)
+        item["_dis_condition_display"] = _build_dis_condition_display(cfg, item)
         archives.append(item)
 
     def _contains(value, pattern):
@@ -3510,8 +3750,10 @@ def get_dm2000_archives(
     return {"archives": filtered, "total": len(filtered)}
 
 
+@app.get("/dm3000/dis-condition-options")
 @app.get("/dm2000/dis-condition-options")
-def get_dm2000_dis_condition_options():
+def get_dm2000_dis_condition_options(request: Request):
+    cfg = _resolve_dm_module(request)
     """Return unique Dis-condition display strings derived from the archive cache.
 
     The strings are computed with the same formula used by the frontend renderer
@@ -3542,14 +3784,14 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
     """
     select_cols = ", ".join(f"time{i}" for i in range(1, 10))
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             f"SELECT {select_cols} FROM ls_vtime WHERE cdid = ?",
             (archname,),
         )
     except (pyodbc.Error, HTTPException):
         # cdid-based schema failed; try archname-based schema
         try:
-            baty_rows = _read_dm2000_ls(
+            baty_rows = _read_dm_ls(cfg, 
                 "SELECT DISTINCT baty FROM ls_vtime WHERE archname = ? ORDER BY baty ASC",
                 (archname,),
             )
@@ -3582,19 +3824,21 @@ def _derive_dm2000_batteries_from_vtime(archname: str) -> list[dict]:
     return [{"baty": i} for i in sorted(active)]
 
 
+@app.get("/dm3000/archives/{archname}/batteries")
 @app.get("/dm2000/archives/{archname}/batteries")
-def get_dm2000_batteries(archname: str):
+def get_dm2000_batteries(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
 
-    with _DM2000_BATTERIES_CACHE_LOCK:
-        cached = _DM2000_BATTERIES_CACHE.get(archname)
+    with cfg.batteries_cache_lock:
+        cached = cfg.batteries_cache.get(archname)
         if cached is not None:
             rows, ts = cached
-            if time.time() - ts < _DM2000_BATTERIES_CACHE_TTL:
+            if time.time() - ts < _DM_BATTERIES_CACHE_TTL:
                 return {"batteries": rows, "archname": archname}
 
     try:
-        rows = _read_dm2000_ls_multi([
+        rows = _read_dm_ls_multi(cfg, [
             ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
             ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
         ])
@@ -3640,7 +3884,7 @@ def get_dm2000_batteries(archname: str):
     # with per-pin voltages in volt1..volt9.  ls_pam2 does not carry these
     # per-pin measured values in the cdid schema.
     try:
-        evolt_ocv_fcv = _read_dm2000_ls(
+        evolt_ocv_fcv = _read_dm_ls(cfg, 
             "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
             " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
             (archname,),
@@ -3673,15 +3917,17 @@ def get_dm2000_batteries(archname: str):
             if row.get("fcv") is None:
                 row["fcv"] = evolt_map[b].get("FCV")
 
-    with _DM2000_BATTERIES_CACHE_LOCK:
-        _cache_set_with_cap(_DM2000_BATTERIES_CACHE, archname, (rows, time.time()))
+    with cfg.batteries_cache_lock:
+        _cache_set_with_cap(cfg.batteries_cache, archname, (rows, time.time()))
     return {"batteries": rows, "archname": archname}
 
 
+@app.get("/dm3000/archives/{archname}/curve")
 @app.get("/dm2000/archives/{archname}/curve")
-def get_dm2000_curve(archname: str, baty: int):
+def get_dm2000_curve(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
-    rows = _read_dm2000_curve_rows(archname, baty)
+    rows = _read_dm_curve_rows(cfg, archname, baty)
     # Prepend the initial loaded voltage (FCV) at t=0 so the chart shows the
     # full discharge curve starting from the actual measured starting voltage.
     if not rows or rows[0].get("TIM", 0) > 0:
@@ -3693,28 +3939,32 @@ def get_dm2000_curve(archname: str, baty: int):
     return {"curve": rows, "archname": archname, "baty": baty, "time_unit": "minutes"}
 
 
+@app.get("/dm3000/archives/{archname}/average-curve")
 @app.get("/dm2000/archives/{archname}/average-curve")
-def get_dm2000_average_curve(archname: str):
+def get_dm2000_average_curve(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
-    avg = _read_dm2000_average_curve_rows(archname)
+    avg = _read_dm_average_curve_rows(cfg, archname)
     return {"curve": avg, "archname": archname, "baty": "average", "time_unit": "minutes"}
 
 
+@app.get("/dm3000/archives/{archname}/stats")
 @app.get("/dm2000/archives/{archname}/stats")
-def get_dm2000_stats(archname: str, baty: int = 0):
+def get_dm2000_stats(request: Request, archname: str, baty: int = 0):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
     cache_key = (archname, baty)
-    with _DM2000_STATS_CACHE_LOCK:
-        cached = _DM2000_STATS_CACHE.get(cache_key)
+    with cfg.stats_cache_lock:
+        cached = cfg.stats_cache.get(cache_key)
         if cached is not None:
             result, ts = cached
-            if time.time() - ts < _DM2000_STATS_CACHE_TTL:
+            if time.time() - ts < _DM_STATS_CACHE_TTL:
                 return result
 
     if baty == 0:
-        rows = _read_dm2000_average_curve_rows(archname)
+        rows = _read_dm_average_curve_rows(cfg, archname)
     else:
-        rows = _read_dm2000_curve_rows(archname, baty)
+        rows = _read_dm_curve_rows(cfg, archname, baty)
     stats = compute_dm2000_stats(rows)
     # Override VOLT_MAX/VOLT_MIN with the true OCV/FCV stored in ls_pam2.
     # ls_pam2 holds the instrument-measured open-circuit voltage (OCV, before
@@ -3730,16 +3980,18 @@ def get_dm2000_stats(archname: str, baty: int = 0):
             stats["OCV"] = pam2_stats["VOLT_MAX"]
             stats["FCV"] = pam2_stats["VOLT_MIN"]
 
-    with _DM2000_STATS_CACHE_LOCK:
-        _cache_set_with_cap(_DM2000_STATS_CACHE, cache_key, (stats, time.time()))
+    with cfg.stats_cache_lock:
+        _cache_set_with_cap(cfg.stats_cache, cache_key, (stats, time.time()))
     return stats
 
 
+@app.get("/dm3000/archives/{archname}/daily-voltage")
 @app.get("/dm2000/archives/{archname}/daily-voltage")
-def get_dm2000_daily_voltage(archname: str, baty: int):
+def get_dm2000_daily_voltage(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             "SELECT * FROM ls_evolt WHERE archname = ? AND baty = ? ORDER BY date ASC",
             (archname, baty),
         )
@@ -3753,7 +4005,7 @@ def get_dm2000_daily_voltage(archname: str, baty: int):
             raise HTTPException(status_code=400, detail="Invalid baty")
         volt_col = f"volt{baty}"
         try:
-            rows = _read_dm2000_ls(
+            rows = _read_dm_ls(cfg, 
                 f"SELECT daytime, {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
                 (archname,),
             )
@@ -3769,11 +4021,13 @@ def get_dm2000_daily_voltage(archname: str, baty: int):
         return {"daily_voltage": normalized, "archname": archname, "baty": baty}
 
 
+@app.get("/dm3000/archives/{archname}/time-at-voltage")
 @app.get("/dm2000/archives/{archname}/time-at-voltage")
-def get_dm2000_time_at_voltage(archname: str, baty: int):
+def get_dm2000_time_at_voltage(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(archname)
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
             (archname, baty),
         )
@@ -3786,7 +4040,7 @@ def get_dm2000_time_at_voltage(archname: str, baty: int):
         raise HTTPException(status_code=400, detail="Invalid baty")
     tim_col = f"tim_vot{baty}"
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
             (archname,),
         )
@@ -3799,7 +4053,7 @@ def get_dm2000_time_at_voltage(archname: str, baty: int):
     # schema using dy (voltage threshold) and time1..time9 columns (values in minutes).
     time_col = f"time{baty}"
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
             (archname,),
         )
@@ -3808,14 +4062,18 @@ def get_dm2000_time_at_voltage(archname: str, baty: int):
         return {"time_at_voltage": [], "archname": archname, "baty": baty}
 
 
+@app.get("/dm3000/config")
 @app.get("/dm2000/config")
-def get_dm2000_config():
+def get_dm2000_config(request: Request):
+    cfg = _resolve_dm_module(request)
     """Return station-level configuration (e.g. company name) for use in report previews."""
-    return {"company": DM2000_COMPANY_NAME or ""}
+    return {"company": cfg.company_name or ""}
 
 
+@app.get("/dm3000/archives/{archname}/schema")
 @app.get("/dm2000/archives/{archname}/schema")
-def get_dm2000_archive_schema(archname: str):
+def get_dm2000_archive_schema(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
     """Return raw column names and non-null values for an archive row from ls_jb_cs.
 
     This diagnostic endpoint helps identify the actual column names used in the
@@ -3824,7 +4082,7 @@ def get_dm2000_archive_schema(archname: str):
     """
     _validate_dm2000_archname(archname)
     try:
-        rows = _read_dm2000_ls_multi([
+        rows = _read_dm_ls_multi(cfg, [
             ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (archname,)),
             ("SELECT * FROM ls_jb_cs WHERE archname = ?", (archname,)),
         ])
@@ -3843,8 +4101,10 @@ def get_dm2000_archive_schema(archname: str):
     return {"archname": archname, "columns": columns}
 
 
+@app.post("/dm3000/refresh-archives")
 @app.post("/dm2000/refresh-archives")
-def refresh_dm2000_archives():
+def refresh_dm2000_archives(request: Request):
+    cfg = _resolve_dm_module(request)
     """Force-refresh the DM2000 archives in-memory cache.
 
     Clears the in-memory archives cache and attempts to re-copy the source
@@ -3856,18 +4116,20 @@ def refresh_dm2000_archives():
     changes without waiting for the next auto-refresh cycle.
     """
     # Attempt a forced file-copy refresh (skips the mtime short-circuit).
-    _dm2000_refresh_ls_cache(force=True)
+    _dm_refresh_ls_cache(cfg, force=True)
     # Always clear the in-memory archives cache regardless of whether the
     # file copy succeeded, so the very next query reads fresh data from DB.
-    with _DM2000_ARCHIVES_CACHE_LOCK:
-        _DM2000_ARCHIVES_CACHE.clear()
-    with _DM2000_TAV_CACHE_LOCK:
-        _DM2000_TAV_CACHE.clear()
-    return {"status": "ok", "cache_path": _DM2000_LS_CACHE_PATH}
+    with cfg.archives_cache_lock:
+        cfg.archives_cache.clear()
+    with cfg.tav_cache_lock:
+        cfg.tav_cache.clear()
+    return {"status": "ok", "cache_path": DM2000_MOD.ls_cache_path}
 
 
+@app.get("/dm3000/perf-debug")
 @app.get("/dm2000/perf-debug")
-def dm2000_perf_debug(archname: str, battery_type: str = ""):
+def dm2000_perf_debug(request: Request, archname: str, battery_type: str = ""):
+    cfg = _resolve_dm_module(request)
     """Diagnostic endpoint: show how an archive's raw fields are translated into
     a Performance-Report condition label and which IEC frequency group it maps to.
 
@@ -3880,11 +4142,11 @@ def dm2000_perf_debug(archname: str, battery_type: str = ""):
     """
     _validate_dm2000_archname(archname)
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             "SELECT * FROM ls_jb_cs WHERE cdid = ?", (archname,)
         )
         if not rows:
-            rows = _read_dm2000_ls(
+            rows = _read_dm_ls(cfg, 
                 "SELECT * FROM ls_jb_cs WHERE archname = ?", (archname,)
             )
     except pyodbc.Error as exc:
@@ -3929,8 +4191,10 @@ def dm2000_perf_debug(archname: str, battery_type: str = ""):
     }
 
 
+@app.post("/dm3000/update-archive-meta")
 @app.post("/dm2000/update-archive-meta")
-def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
+def update_dm2000_archive_meta(request: Request, payload: DM2000UpdateArchiveMetaRequest):
+    cfg = _resolve_dm_module(request)
     """Write remarks (bz) and/or serialno (dcph) directly to the live dmdata_ls.mdb.
 
     Updates the LIVE Access database file (not the local read-cache) so that the
@@ -3943,7 +4207,7 @@ def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
     """
     _validate_dm2000_archname(payload.archname)
 
-    ls_path = Path(get_dm2000_ls_path())
+    ls_path = Path(cfg.get_ls_path())
     if not ls_path.exists():
         raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
 
@@ -4031,11 +4295,11 @@ def update_dm2000_archive_meta(payload: DM2000UpdateArchiveMetaRequest):
         raise HTTPException(status_code=500, detail=f"Access write failed: {exc}") from exc
 
     # Force-refresh the local read-cache so the next query sees the updated value
-    _dm2000_refresh_ls_cache(force=True)
-    with _DM2000_ARCHIVES_CACHE_LOCK:
-        _DM2000_ARCHIVES_CACHE.clear()
-    with _DM2000_TAV_CACHE_LOCK:
-        _DM2000_TAV_CACHE.clear()
+    _dm_refresh_ls_cache(cfg, force=True)
+    with cfg.archives_cache_lock:
+        cfg.archives_cache.clear()
+    with cfg.tav_cache_lock:
+        cfg.tav_cache.clear()
 
     return {"status": "ok", "updated": rows_updated}
 
@@ -4152,9 +4416,11 @@ def get_dm2000_templates():
     return {"templates": templates}
 
 
+@app.get("/dm3000/perf-templates")
 @app.get("/dm2000/perf-templates")
-def get_dm2000_perf_templates():
-    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+def get_dm2000_perf_templates(request: Request):
+    cfg = _resolve_dm_module(request)
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
     if not templates_dir.exists():
         return {"templates": []}
     templates = sorted([
@@ -4164,8 +4430,10 @@ def get_dm2000_perf_templates():
     return {"templates": templates}
 
 
+@app.post("/dm3000/perf-template/upload")
 @app.post("/dm2000/perf-template/upload")
-async def upload_dm2000_perf_template(file: UploadFile = File(...)):
+async def upload_dm2000_perf_template(request: Request, file: UploadFile = File(...)):
+    cfg = _resolve_dm_module(request)
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
     # Extract only the basename (no directory components)
@@ -4178,7 +4446,7 @@ async def upload_dm2000_perf_template(file: UploadFile = File(...)):
     if not sanitized_stem:
         sanitized_stem = "template"
     safe_name = sanitized_stem + ".xlsx"
-    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
     templates_dir.mkdir(parents=True, exist_ok=True)
     # Re-join using only the validated basename to prevent any path traversal
     dest = templates_dir / safe_name
@@ -4189,17 +4457,19 @@ async def upload_dm2000_perf_template(file: UploadFile = File(...)):
     return {"ok": True, "name": safe_name}
 
 
+@app.post("/dm3000/report")
 @app.post("/dm2000/report")
-def generate_dm2000_report(payload: DM2000ReportRequest):
+def generate_dm2000_report(request: Request, payload: DM2000ReportRequest):
+    cfg = _resolve_dm_module(request)
     _validate_dm2000_archname(payload.archname)
 
     try:
-        archive_rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,))
+        archive_rows = _read_dm_ls(cfg, "SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,))
     except pyodbc.Error:
         archive_rows = []
     if not archive_rows:
         try:
-            archive_rows = _read_dm2000_ls("SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,))
+            archive_rows = _read_dm_ls(cfg, "SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,))
         except pyodbc.Error:
             archive_rows = []
     if not archive_rows:
@@ -4207,10 +4477,10 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
     archive = archive_rows[0]
 
     if payload.baty == 0:
-        curve_data = _read_dm2000_average_curve_rows(payload.archname)
+        curve_data = _read_dm_average_curve_rows(cfg, payload.archname)
         baty_label = "Average"
     else:
-        curve_data = _read_dm2000_curve_rows(payload.archname, payload.baty)
+        curve_data = _read_dm_curve_rows(cfg, payload.archname, payload.baty)
         baty_label = str(payload.baty)
 
     def _apply_override(db_val, override_val):
@@ -4243,7 +4513,7 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh"), payload.override_remarks),
         "BATTERY_NO": baty_label,
         # Extra fields for full template support
-        "COMPANY": DM2000_COMPANY_NAME or "",
+        "COMPANY": cfg.company_name or "",
         "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date", "fzrq", "stopdate", "fdend") or ""),
         "VOLTAGE_TYPE": str(_dm2000_get_value(
             archive,
@@ -4270,7 +4540,7 @@ def generate_dm2000_report(payload: DM2000ReportRequest):
         "HISTORY_DATA": curve_data,
     }
 
-    template_path = _resolve_dm2000_template_path(payload.template_name)
+    template_path = _resolve_dm_template_path(cfg, payload.template_name)
     report_bytes = render_excel_template(template_path, context)
     filename = f"dm2000_report_{payload.archname}_{baty_label}.xlsx"
     return StreamingResponse(
@@ -4731,8 +5001,10 @@ def _build_preview_workbook(  # noqa: C901
     return buf.getvalue()
 
 
+@app.post("/dm3000/report-simple")
 @app.post("/dm2000/report-simple")
-def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
+def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportRequest):
+    cfg = _resolve_dm_module(request)
     """Generate a preview-style Excel report without requiring a template file."""
     _validate_dm2000_archname(payload.archname)
 
@@ -4745,7 +5017,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
 
     # Fetch archive metadata
     try:
-        archive_rows = _read_dm2000_ls_multi([
+        archive_rows = _read_dm_ls_multi(cfg, [
             ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,)),
             ("SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,)),
         ])
@@ -4798,7 +5070,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
 
     # Fetch per-battery params (OCV/FCV/SOt)
     try:
-        batt_rows = _read_dm2000_ls_multi([
+        batt_rows = _read_dm_ls_multi(cfg, [
             ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (payload.archname,)),
             ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (payload.archname,)),
         ])
@@ -4823,7 +5095,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
 
     # Supplement OCV/FCV from ls_evolt
     try:
-        evolt_rows = _read_dm2000_ls(
+        evolt_rows = _read_dm_ls(cfg, 
             "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
             " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
             (payload.archname,),
@@ -4856,7 +5128,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
     time_at_volt_map: dict = {}
     for b in batys:
         try:
-            stats_map[b] = compute_dm2000_stats(_read_dm2000_curve_rows(payload.archname, b))
+            stats_map[b] = compute_dm2000_stats(_read_dm_curve_rows(cfg, payload.archname, b))
             pam2 = _get_pam2_ocv_fcv(payload.archname, b)
             if pam2:
                 stats_map[b].update(pam2)
@@ -4873,13 +5145,13 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
 
         tav: list = []
         try:
-            tav = _read_dm2000_ls("SELECT * FROM ls_timev WHERE archname = ? AND baty = ?", (payload.archname, b))
+            tav = _read_dm_ls(cfg, "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?", (payload.archname, b))
         except (pyodbc.Error, HTTPException):
             pass
         if not tav:
             tim_col = f"tim_vot{b}"
             try:
-                tav = _read_dm2000_ls(
+                tav = _read_dm_ls(cfg, 
                     f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
                     (payload.archname,),
                 )
@@ -4888,7 +5160,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
         if not tav:
             time_col = f"time{b}"
             try:
-                tav = _read_dm2000_ls(
+                tav = _read_dm_ls(cfg, 
                     f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
                     (payload.archname,),
                 )
@@ -4914,7 +5186,7 @@ def generate_dm2000_simple_report(payload: DM2000SimpleReportRequest):
     try:
         workbook_bytes = _build_preview_workbook(
             archive_fields=archive_fields,
-            company=DM2000_COMPANY_NAME or "",
+            company=cfg.company_name or "",
             batys=batys,
             stats_map=stats_map,
             time_at_volt_map=time_at_volt_map,
@@ -4941,7 +5213,7 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
     each entry is one voltage threshold row.  Rows where the time column is NULL,
     empty, or ``"--"`` are omitted so callers see only meaningful data points.
 
-    Results are cached (TTL=``_DM2000_TAV_CACHE_TTL`` s) so repeated calls for
+    Results are cached (TTL=``_DM_TAV_CACHE_TTL`` s) so repeated calls for
     the same archive within the same request — e.g. ``_get_batys_for_archive``
     followed by ``_get_tav_for_batteries`` — hit the cache instead of querying
     the database again.
@@ -4950,11 +5222,11 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
     1. ``ls_vtime cdid-based`` — SELECT dy, time1..time9 WHERE cdid=? (primary)
     2. ``ls_timev cdid-based`` — SELECT sj, tim_vot1..tim_vot9 WHERE cdid=?
     """
-    with _DM2000_TAV_CACHE_LOCK:
-        cached = _DM2000_TAV_CACHE.get(archname)
+    with cfg.tav_cache_lock:
+        cached = cfg.tav_cache.get(archname)
         if cached is not None:
             data, ts = cached
-            if time.time() - ts < _DM2000_TAV_CACHE_TTL:
+            if time.time() - ts < _DM_TAV_CACHE_TTL:
                 return data
 
     full_data: dict[int, list[dict]] = {}
@@ -4963,7 +5235,7 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
     # This replaces the original loop that issued one SELECT per battery channel.
     vtime_cols = ", ".join(f"time{i}" for i in range(1, 10))
     try:
-        rows = _read_dm2000_ls(
+        rows = _read_dm_ls(cfg, 
             f"SELECT dy, {vtime_cols} FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
             (archname,),
         )
@@ -4990,7 +5262,7 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
         # Try 2: ls_timev cdid-based — same single-query bulk approach.
         timev_cols = ", ".join(f"tim_vot{i}" for i in range(1, 10))
         try:
-            rows = _read_dm2000_ls(
+            rows = _read_dm_ls(cfg, 
                 f"SELECT sj, {timev_cols} FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
                 (archname,),
             )
@@ -5016,8 +5288,8 @@ def _load_vtime_for_archive(archname: str) -> dict[int, list[dict]]:
     # Cache the result (empty dict is also cached to avoid re-querying on
     # archives whose cdid schemas are absent; legacy archname path is handled
     # outside this function).
-    with _DM2000_TAV_CACHE_LOCK:
-        _cache_set_with_cap(_DM2000_TAV_CACHE, archname, (full_data, time.time()))
+    with cfg.tav_cache_lock:
+        _cache_set_with_cap(cfg.tav_cache, archname, (full_data, time.time()))
 
     return full_data
 
@@ -5038,7 +5310,7 @@ def _get_batys_for_archive(archname: str) -> list[int]:
     rows = _derive_dm2000_batteries_from_vtime(archname)
     if not rows:
         try:
-            rows = _read_dm2000_ls_multi([
+            rows = _read_dm_ls_multi(cfg, [
                 ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
                 ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
             ])
@@ -5070,11 +5342,11 @@ def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[di
         return {}
 
     # Use cache populated by _load_vtime_for_archive (cdid-based schemas).
-    with _DM2000_TAV_CACHE_LOCK:
-        cached = _DM2000_TAV_CACHE.get(archname)
+    with cfg.tav_cache_lock:
+        cached = cfg.tav_cache.get(archname)
         if cached is not None:
             full_data, ts = cached
-            if time.time() - ts < _DM2000_TAV_CACHE_TTL:
+            if time.time() - ts < _DM_TAV_CACHE_TTL:
                 if full_data:
                     return {b: full_data.get(b, []) for b in batys}
                 # Cache contains empty dict → cdid schemas absent; fall through
@@ -5090,7 +5362,7 @@ def _get_tav_for_batteries(archname: str, batys: list[int]) -> dict[int, list[di
     for b in batys:
         tav: list[dict] = []
         try:
-            tav = _read_dm2000_ls(
+            tav = _read_dm_ls(cfg, 
                 "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
                 (archname, b),
             )
@@ -5356,8 +5628,10 @@ def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
     return buf.getvalue()
 
 
+@app.post("/dm3000/perf-report")
 @app.post("/dm2000/perf-report")
-def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
+def generate_dm2000_perf_report(request: Request, payload: PerfReportRequest):  # noqa: C901
+    cfg = _resolve_dm_module(request)
     """Generate a performance monitoring report (Bảng theo dõi hiệu suất pin).
 
     For each entry the caller specifies the archive name, battery type label
@@ -5391,14 +5665,14 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
 
         # Fetch archive metadata
         try:
-            archive_rows = _read_dm2000_ls(
+            archive_rows = _read_dm_ls(cfg, 
                 "SELECT * FROM ls_jb_cs WHERE cdid = ?", (entry.archname,)
             )
         except pyodbc.Error:
             archive_rows = []
         if not archive_rows:
             try:
-                archive_rows = _read_dm2000_ls(
+                archive_rows = _read_dm_ls(cfg, 
                     "SELECT * FROM ls_jb_cs WHERE archname = ?", (entry.archname,)
                 )
             except pyodbc.Error:
@@ -5495,7 +5769,7 @@ def generate_dm2000_perf_report(payload: PerfReportRequest):  # noqa: C901
         )
 
     if payload.template_name:
-        template_path = _resolve_perf_template_path(payload.template_name)
+        template_path = _resolve_dm_perf_template_path(cfg, payload.template_name)
         workbook_bytes = _render_perf_template(template_path, groups)
         filename = payload.template_name
     else:

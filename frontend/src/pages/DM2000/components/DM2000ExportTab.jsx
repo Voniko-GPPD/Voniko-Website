@@ -4,12 +4,7 @@ import {
   Form, Input, Row, Select, Space, Spin, Typography, notification,
 } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
-import {
-  downloadDM2000SimpleReport,
-  fetchDM2000Batteries, fetchDM2000Config,
-  fetchDM2000Stats, fetchDM2000TimeAtVoltage,
-  fetchDM2000Options, addDM2000Option,
-} from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 import { useAuth } from '../../../contexts/AuthContext';
 
@@ -32,7 +27,8 @@ function getBatteryField(row, ...keys) {
   return null;
 }
 
-export default function DM2000ExportTab({ stationId, selection }) {
+export default function DM2000ExportTab({ stationId, selection, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const { isAdmin } = useAuth();
   const [loading, setLoading] = useState(false);
@@ -68,7 +64,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
       setLoading(true);
       setError('');
       try {
-        const configResult = await fetchDM2000Config(stationId, { signal: controller.signal }).catch(() => ({}));
+        const configResult = await api.fetchConfig(stationId, { signal: controller.signal }).catch(() => ({}));
         if (!active) return;
         setCompanyName(configResult?.company || '');
       } catch (err) {
@@ -89,11 +85,11 @@ export default function DM2000ExportTab({ stationId, selection }) {
 
   useEffect(() => {
     let active = true;
-    fetchDM2000Options('type').then((opts) => {
+    api.fetchOptions('type').then((opts) => {
       if (!active) return;
       setTypeOptions(opts.map((o) => ({ label: o.value, value: o.value })));
     }).catch((err) => { console.error('Failed to load type options', err); });
-    fetchDM2000Options('manufacturer').then((opts) => {
+    api.fetchOptions('manufacturer').then((opts) => {
       if (!active) return;
       setManufacturerOptions(opts.map((o) => ({ label: o.value, value: o.value })));
     }).catch((err) => { console.error('Failed to load manufacturer options', err); });
@@ -137,7 +133,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     setBatteryParams({});
     if (!stationId || !selection?.archname) return () => {};
 
-    fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal })
+    api.fetchBatteries(stationId, selection.archname, { signal: controller.signal })
       .then((rows) => {
         if (!active) return;
         const nums = (rows || [])
@@ -200,7 +196,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     const controller = new AbortController();
     Promise.all([
       Promise.all(missing.map((baty) =>
-        fetchDM2000Stats(stationId, selection.archname, baty, { signal: controller.signal })
+        api.fetchStats(stationId, selection.archname, baty, { signal: controller.signal })
           .then((s) => [baty, s || {}])
           .catch((err) => {
             if (err.name === 'AbortError') throw err;
@@ -208,7 +204,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
           }),
       )),
       Promise.all(missing.map((baty) =>
-        fetchDM2000TimeAtVoltage(stationId, selection.archname, baty, { signal: controller.signal })
+        api.fetchTimeAtVoltage(stationId, selection.archname, baty, { signal: controller.signal })
           .then((rows) => [baty, rows || []])
           .catch((err) => {
             if (err.name === 'AbortError') throw err;
@@ -230,7 +226,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     const val = newTypeInput.trim();
     if (!val) return;
     try {
-      await addDM2000Option('type', val);
+      await api.addOption('type', val);
       setTypeOptions((prev) => {
         if (prev.some((o) => o.value === val)) return prev;
         return [...prev, { label: val, value: val }];
@@ -246,7 +242,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     const val = newMfgInput.trim();
     if (!val) return;
     try {
-      await addDM2000Option('manufacturer', val);
+      await api.addOption('manufacturer', val);
       setManufacturerOptions((prev) => {
         if (prev.some((o) => o.value === val)) return prev;
         return [...prev, { label: val, value: val }];
@@ -266,7 +262,7 @@ export default function DM2000ExportTab({ stationId, selection }) {
     }
     setDownloading(true);
     try {
-      await downloadDM2000SimpleReport({
+      await api.downloadSimpleReport({
         stationId,
         archname: selection.archname,
         batys: previewBatys,

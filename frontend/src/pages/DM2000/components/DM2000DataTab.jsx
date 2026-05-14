@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Empty, Input, Select, Space, Spin, Table, Typography } from 'antd';
-import { fetchDM2000AverageCurve, fetchDM2000Batteries, fetchDM2000Curve } from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 function safeNum(value) {
@@ -8,7 +8,8 @@ function safeNum(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-export default function DM2000DataTab({ stationId, selection }) {
+export default function DM2000DataTab({ stationId, selection, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [batteryLoading, setBatteryLoading] = useState(false);
@@ -35,7 +36,7 @@ export default function DM2000DataTab({ stationId, selection }) {
     const load = async () => {
       setBatteryLoading(true);
       try {
-        const result = await fetchDM2000Batteries(stationId, selection.archname, { signal: controller.signal });
+        const result = await api.fetchBatteries(stationId, selection.archname, { signal: controller.signal });
         if (!active) return;
         setBatteries(
           (result || [])
@@ -73,9 +74,9 @@ export default function DM2000DataTab({ stationId, selection }) {
       try {
         let result;
         if (selectedBaty > 0) {
-          result = await fetchDM2000Curve(stationId, selection.archname, selectedBaty, { signal: controller.signal });
+          result = await api.fetchCurve(stationId, selection.archname, selectedBaty, { signal: controller.signal });
         } else {
-          result = await fetchDM2000AverageCurve(stationId, selection.archname, { signal: controller.signal });
+          result = await api.fetchAverageCurve(stationId, selection.archname, { signal: controller.signal });
         }
         if (!active) return;
         setRows(result || []);

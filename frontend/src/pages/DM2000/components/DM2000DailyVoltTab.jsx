@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Empty, Select, Space, Spin, Table } from 'antd';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { fetchDM2000DailyVoltage } from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 function safeNum(value) {
@@ -9,7 +9,8 @@ function safeNum(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-export default function DM2000DailyVoltTab({ stationId, selection }) {
+export default function DM2000DailyVoltTab({ stationId, selection, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -41,7 +42,7 @@ export default function DM2000DailyVoltTab({ stationId, selection }) {
       setLoading(true);
       setError('');
       try {
-        const result = await fetchDM2000DailyVoltage(stationId, selection.archname, selectedBaty, { signal: controller.signal });
+        const result = await api.fetchDailyVoltage(stationId, selection.archname, selectedBaty, { signal: controller.signal });
         if (!active) return;
         setRows(result || []);
       } catch (err) {

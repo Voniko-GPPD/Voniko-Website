@@ -6,13 +6,38 @@ cd /d "%~dp0"
 :: ============================================================
 ::  Cau hinh may tram DMP — Chi can sua cac dong duoi day
 :: ============================================================
+::
+::  Tat ca duong dan database/template duoc cau hinh tap trung tai day.
+::  Khi can doi duong dan tren mot may tram, CHI sua cac dong duoi —
+::  KHONG can tim/sua trong source code.
+::
+::  Vi du:
+::      Tren may DMP1:                Tren may DMP2:
+::      DMP_DATA_DIR    = C:\DMP      DMP_DATA_DIR    = D:\DMP
+::      DM2000_DATA_DIR = D:\DM2000   DM2000_DATA_DIR = D:\DM2000
+::      DM3000_DATA_DIR = D:\DM3000   DM3000_DATA_DIR = D:\DM3000
+::
 
 set DMP_STATION_NAME=DMP1
 :: Dung localhost khi backend chay tren cung may - tranh bi mat ket noi khi IP thay doi sau khi reset may:
 :: set VONIKO_SERVER_URL=http://localhost:3001
 set VONIKO_SERVER_URL=http://10.4.1.31:3001
-set DMP_DATA_DIR=C:\DMP\Data
 set DMP_STATION_PORT=8766
+
+:: ─── DMP (live discharge data) ───────────────────────────────
+set DMP_DATA_DIR=C:\DMP\Data
+:: set DMP_TEMPLATES_DIR=./dmp_templates
+:: set DMP_PERF_TEMPLATES_DIR=./dmp_perf_templates
+
+:: ─── DM2000 (historic discharge — Ohm) ───────────────────────
+set DM2000_DATA_DIR=D:\DM2000\dmdatabase
+:: set DM2000_TEMPLATES_DIR=./dm2000_templates
+:: set DM2000_PERF_TEMPLATES_DIR=./dm2000_perf_templates
+
+:: ─── DM3000 (historic discharge — mA) ────────────────────────
+set DM3000_DATA_DIR=D:\DM3000\dmdatabase
+:: set DM3000_TEMPLATES_DIR=./dm3000_templates
+:: set DM3000_PERF_TEMPLATES_DIR=./dm3000_perf_templates
 
 :: ============================================================
 ::  (Khong can sua gi them phia duoi)
@@ -26,7 +51,9 @@ echo  ^|       VONIKO — KHOI DONG TRAM DU LIEU DMP        ^|
 echo  ^|  Tram  : %DMP_STATION_NAME%
 echo  ^|  Server: %VONIKO_SERVER_URL%
 echo  ^|  Port  : %DMP_STATION_PORT%
-echo  ^|  Data  : %DMP_DATA_DIR%
+echo  ^|  DMP   : %DMP_DATA_DIR%
+echo  ^|  DM2000: %DM2000_DATA_DIR%
+echo  ^|  DM3000: %DM3000_DATA_DIR%
 echo  +===================================================+
 echo.
 
@@ -130,7 +157,9 @@ echo.
 echo [OK] DMP Service va Watchdog dang chay voi PM2.
 echo      Ten tram : %DMP_STATION_NAME%
 echo      Server   : %VONIKO_SERVER_URL%
-echo      Data Dir : %DMP_DATA_DIR%
+echo      DMP Dir  : %DMP_DATA_DIR%
+echo      DM2000   : %DM2000_DATA_DIR%
+echo      DM3000   : %DM3000_DATA_DIR%
 echo.
 echo  Lenh quan ly:
 echo    pm2 logs dmp-service      (xem log service)

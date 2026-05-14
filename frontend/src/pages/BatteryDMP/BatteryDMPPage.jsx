@@ -16,6 +16,7 @@ import DMPChartTab from './components/DMPChartTab';
 import DMPHistoryTab from './components/DMPHistoryTab';
 import DMPExportTab from './components/DMPExportTab';
 import DM2000Page from '../DM2000/DM2000Page';
+import DM3000Page from '../DM3000/DM3000Page';
 import DMPPerfReportTab from './components/DMPPerfReportTab';
 
 const SEARCH_TAB_KEY = 'search';
@@ -203,6 +204,16 @@ export default function BatteryDMPPage() {
               </span>
             ),
             children: <DM2000Page />,
+          },
+          {
+            key: 'dm3000',
+            label: (
+              <span>
+                <DatabaseOutlined style={{ marginRight: 6 }} />
+                {t('dm3000Title')}
+              </span>
+            ),
+            children: <DM3000Page />,
           },
           {
             key: 'perf-report',

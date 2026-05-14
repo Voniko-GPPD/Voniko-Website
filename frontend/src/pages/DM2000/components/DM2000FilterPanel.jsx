@@ -2,12 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, AutoComplete, Button, Col, DatePicker, Form, Input, Modal, Row, Space, Table, Tooltip, Typography } from 'antd';
 import { EditOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { fetchDM2000Archives, fetchDM2000DisConditionOptions, refreshDM2000Archives, saveDM2000ArchiveOverride } from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const dateFormat = 'YYYY-MM-DD';
 
-export default function DM2000FilterPanel({ stationId, selectedArchname, onSelect }) {
+export default function DM2000FilterPanel({ stationId, selectedArchname, onSelect, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const [form] = Form.useForm();
   const [editForm] = Form.useForm();
@@ -26,7 +27,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
   useEffect(() => {
     if (!stationId) return;
     let active = true;
-    fetchDM2000DisConditionOptions(stationId)
+    api.fetchDisConditionOptions(stationId)
       .then((opts) => { if (active) setDisConditionOptions(opts); })
       .catch(() => {});
     return () => { active = false; };
@@ -50,7 +51,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     setError('');
     setSearched(true);
     try {
-      const result = await fetchDM2000Archives(stationId, queryFilters);
+      const result = await api.fetchArchives(stationId, queryFilters);
       setArchives(result.archives || []);
       setTotal(result.total || 0);
       setPagination((prev) => ({ ...prev, current: 1 }));
@@ -78,7 +79,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     setReloading(true);
     setError('');
     try {
-      await refreshDM2000Archives(stationId);
+      await api.refreshArchives(stationId);
       if (searched) await onSearch(lastFiltersRef.current);
     } catch (err) {
       setError(err.message || 'Reload failed');
@@ -101,7 +102,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     const values = editForm.getFieldsValue();
     setEditSaving(true);
     try {
-      await saveDM2000ArchiveOverride(stationId, editingArchive.archname, {
+      await api.saveArchiveOverride(stationId, editingArchive.archname, {
         serialno: values.serialno?.trim() || null,
         remarks: values.remarks?.trim() || null,
       });
@@ -154,8 +155,11 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
       width: 240,
       render: (_, record) => {
         const rawRes = String(record.load_resistance || '').trim();
-        // Append "ohm" unit when the value is a bare number (e.g. "10" → "10ohm")
-        const resistance = rawRes && /^\d+(\.\d+)?$/.test(rawRes) ? `${rawRes}ohm` : rawRes;
+        // Unit suffix depends on the module: DM2000 measures Ohms,
+        // DM3000 measures discharge current in mA.  When the value is
+        // a bare number (e.g. "10" → "10ohm" / "35mA") we append it.
+        const unit = module === 'dm3000' ? 'mA' : 'ohm';
+        const resistance = rawRes && /^\d+(\.\d+)?$/.test(rawRes) ? `${rawRes}${unit}` : rawRes;
         const fdfs = String(record.fdfs || '').trim();
         const endpoint = String(record.endpoint_voltage || '').trim();
         const prefix = [resistance, fdfs].filter(Boolean).join(' ');

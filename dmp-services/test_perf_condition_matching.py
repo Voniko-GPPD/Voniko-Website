@@ -1833,3 +1833,112 @@ def test_per_batch_mode_assigns_by_tray_slot_not_db_order(
     # Both sheets must contain performance data (non-empty row dict).
     assert groups["LR6 501"], "sheet 'LR6 501' must contain performance rows"
     assert groups["LR6 502"], "sheet 'LR6 502' must contain performance rows"
+
+
+# --------------------------------------------------------------------------- #
+# DM3000 module — parameterised parallel of DM2000 with mA discharge unit
+# --------------------------------------------------------------------------- #
+
+
+def test_dm3000_module_config_distinct_from_dm2000():
+    """DM2000_MOD and DM3000_MOD must be distinct DmModule instances with
+    independent caches, paths and units.  This is the contract that lets the
+    parameterised endpoint handlers serve both modules without state leaks."""
+    assert m.DM2000_MOD is not m.DM3000_MOD
+    assert m.DM2000_MOD.name == "dm2000"
+    assert m.DM3000_MOD.name == "dm3000"
+    assert m.DM2000_MOD.unit_suffix == "ohm"
+    assert m.DM3000_MOD.unit_suffix == "mA"
+    # Independent in-memory caches — mutating one must not affect the other.
+    assert m.DM2000_MOD.archives_cache is not m.DM3000_MOD.archives_cache
+    assert m.DM2000_MOD.curve_cache is not m.DM3000_MOD.curve_cache
+    assert m.DM2000_MOD.archives_cache_lock is not m.DM3000_MOD.archives_cache_lock
+
+
+def test_dm3000_module_default_paths():
+    """Default DM3000 paths must match the supplier-app layout the user
+    described in the task: ``D:\\DM3000\\dmdatabase`` for the source MDB
+    files, and ``./dm3000_templates`` / ``./dm3000_perf_templates`` for the
+    workbook templates.  The module-level constants drive cfg.get_ls_path /
+    cfg.get_main_path so the paths must round-trip through DM3000_MOD."""
+    import os
+    # Only assert the default layout when the env var is unset, so this test
+    # remains valid in dev environments that override DM3000_DATA_DIR.
+    if not os.environ.get("DM3000_DATA_DIR"):
+        assert m.DM3000_DATA_DIR.endswith("dmdatabase")
+        assert "DM3000" in m.DM3000_DATA_DIR
+        assert m.DM3000_MOD.get_ls_path().endswith("dmdata_ls.mdb")
+        assert m.DM3000_MOD.get_main_path().endswith("DM3000.mdb")
+    if not os.environ.get("DM3000_TEMPLATES_DIR"):
+        assert m.DM3000_TEMPLATES_DIR.endswith("dm3000_templates")
+    if not os.environ.get("DM3000_PERF_TEMPLATES_DIR"):
+        assert m.DM3000_PERF_TEMPLATES_DIR.endswith("dm3000_perf_templates")
+
+
+def test_dm3000_dis_condition_uses_mA_unit():
+    """A bare numeric load_resistance (e.g. ``35``) must be auto-suffixed with
+    ``mA`` for DM3000 — exactly matching the ``35mA,24h/d to 0.90V`` /
+    ``1000mA,24h/d to 5.40V`` strings shown in the supplier-app screenshots
+    captured for this task."""
+    archive = {
+        "load_resistance": "35",
+        "fdfs": "24h/d",
+        "endpoint_voltage": "0.90",
+    }
+    label = m._build_dis_condition_display(m.DM3000_MOD, archive)
+    assert label == "35mA 24h/d to 0.90V", label
+
+    archive2 = {
+        "load_resistance": "1000",
+        "fdfs": "24h/d",
+        "endpoint_voltage": "5.40",
+    }
+    label2 = m._build_dis_condition_display(m.DM3000_MOD, archive2)
+    assert label2 == "1000mA 24h/d to 5.40V", label2
+
+
+def test_dm2000_dis_condition_still_uses_ohm_unit():
+    """Regression: parameterising _build_dis_condition_display must not change
+    DM2000's existing ohm output — the function must still produce the same
+    ``620ohm 4m/h,8h/d to 0.900V`` string after the cfg refactor."""
+    archive = {
+        "load_resistance": "620",
+        "fdfs": "4m/h,8h/d",
+        "endpoint_voltage": "0.900",
+    }
+    label = m._build_dis_condition_display(m.DM2000_MOD, archive)
+    assert label == "620ohm 4m/h,8h/d to 0.900V", label
+
+
+def test_dm3000_preserves_explicit_unit_in_load_resistance():
+    """When the raw value already contains text (e.g. ``1000mA`` or
+    ``620+10k``) it must be passed through unchanged — no auto-suffix.  This
+    protects DM3000 from double-suffixing values the operator entered with
+    an explicit unit."""
+    archive = {
+        "load_resistance": "1000mA",
+        "fdfs": "24h/d",
+        "endpoint_voltage": "5.40",
+    }
+    assert m._build_dis_condition_display(m.DM3000_MOD, archive) == "1000mA 24h/d to 5.40V"
+
+
+def test_dm_modules_registry_maps_prefixes():
+    """_resolve_dm_module is driven by request.url.path containing /dm2000/
+    or /dm3000/.  The registry that backs it must expose both prefixes."""
+    assert "dm2000" in m.DM_MODULES
+    assert "dm3000" in m.DM_MODULES
+    assert m.DM_MODULES["dm2000"] is m.DM2000_MOD
+    assert m.DM_MODULES["dm3000"] is m.DM3000_MOD
+
+
+def test_dm3000_routes_registered_in_fastapi_app():
+    """Every /dm2000/* endpoint must have a parallel /dm3000/* registration
+    so the proxy can route DM3000 requests without code changes per call."""
+    from fastapi.routing import APIRoute
+    paths = {r.path for r in m.app.routes if isinstance(r, APIRoute)}
+    dm2000_paths = {p for p in paths if p.startswith("/dm2000/")}
+    assert dm2000_paths, "no /dm2000/* routes registered — refactor regression"
+    for p in dm2000_paths:
+        mirror = p.replace("/dm2000/", "/dm3000/", 1)
+        assert mirror in paths, f"missing DM3000 mirror for {p}"

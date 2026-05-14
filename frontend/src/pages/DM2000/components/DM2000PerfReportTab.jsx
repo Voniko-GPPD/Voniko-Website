@@ -3,7 +3,7 @@ import {
   Alert, Button, Empty, Input, Select, Space, Table, Typography, notification,
 } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
-import { downloadDM2000PerfReport } from '../../../api/dm2000Api';
+import { getDmHistoricApi } from '../../../api/dm2000Api';
 import { useLang } from '../../../contexts/LangContext';
 
 const BATTERY_TYPE_OPTIONS = [
@@ -26,7 +26,8 @@ function autoSheetName(dcxh, serialno) {
   return parts.join(' ').trim();
 }
 
-export default function DM2000PerfReportTab({ stationId, selection }) {
+export default function DM2000PerfReportTab({ stationId, selection, module = 'dm2000' }) {
+  const api = getDmHistoricApi(module);
   const { t } = useLang();
   const [entries, setEntries] = useState([]);
   const [downloading, setDownloading] = useState(false);
@@ -74,7 +75,7 @@ export default function DM2000PerfReportTab({ stationId, selection }) {
     }
     setDownloading(true);
     try {
-      await downloadDM2000PerfReport({
+      await api.downloadPerfReport({
         stationId,
         entries: valid.map((e) => ({
           archname: e.archname.trim(),

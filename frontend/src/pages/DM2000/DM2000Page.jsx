@@ -12,7 +12,7 @@ import DM2000ExportTab from './components/DM2000ExportTab';
 const SEARCH_TAB_KEY = 'search';
 const CURVE_TAB_KEY = 'curve';
 
-export default function DM2000Page() {
+export default function DM2000Page({ module = 'dm2000' }) {
   const { t } = useLang();
   const { isQC } = useAuth();
   const [stations, setStations] = useState([]);
@@ -20,6 +20,9 @@ export default function DM2000Page() {
   const [stationError, setStationError] = useState('');
   const [selection, setSelection] = useState(null);
   const [activeTab, setActiveTab] = useState(SEARCH_TAB_KEY);
+  // Module-specific i18n keys: 'dm2000Title' / 'dm3000Title', etc.
+  // Generic shared labels keep the dm2000* keys.
+  const tm = (suffix) => t(`${module}${suffix}`);
 
   useEffect(() => {
     let mounted = true;
@@ -64,7 +67,7 @@ export default function DM2000Page() {
 
   return (
     <div style={{ background: '#fff', minHeight: 'calc(100vh - 112px)', padding: '0 16px' }}>
-      <Typography.Title level={4}>{t('dm2000Title')}</Typography.Title>
+      <Typography.Title level={4}>{tm('Title')}</Typography.Title>
 
       {stationError && <Alert type="error" message={stationError} showIcon style={{ marginBottom: 12 }} />}
 
@@ -109,54 +112,59 @@ export default function DM2000Page() {
         items={[
           {
             key: SEARCH_TAB_KEY,
-            label: t('dm2000SearchTab'),
+            label: tm('SearchTab'),
             children: (
               <DM2000FilterPanel
                 stationId={selectedStationId}
                 selectedArchname={selection?.archname}
                 onSelect={handleSelectArchive}
+                module={module}
               />
             ),
           },
           ...(!isQC ? [
             {
               key: CURVE_TAB_KEY,
-              label: t('dm2000CurveTab'),
+              label: tm('CurveTab'),
               children: (
                 <DM2000CurveTab
                   stationId={selectedStationId}
                   selection={selection}
+                  module={module}
                 />
               ),
             },
             {
               key: 'data',
-              label: t('dm2000DataTab'),
+              label: tm('DataTab'),
               children: (
                 <DM2000DataTab
                   stationId={selectedStationId}
                   selection={selection}
+                  module={module}
                 />
               ),
             },
             {
               key: 'daily',
-              label: t('dm2000DailyVoltTab'),
+              label: tm('DailyVoltTab'),
               children: (
                 <DM2000DailyVoltTab
                   stationId={selectedStationId}
                   selection={selection}
+                  module={module}
                 />
               ),
             },
           ] : []),
           {
             key: 'export',
-            label: t('dm2000ExportTab'),
+            label: tm('ExportTab'),
             children: (
               <DM2000ExportTab
                 stationId={selectedStationId}
                 selection={selection}
+                module={module}
               />
             ),
           },

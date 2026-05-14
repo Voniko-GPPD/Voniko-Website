@@ -28,21 +28,57 @@ logger = logging.getLogger(__name__)
 DMP_STATION_NAME: str = os.environ.get("DMP_STATION_NAME", "").strip()
 VONIKO_SERVER_URL: str = os.environ.get("VONIKO_SERVER_URL", "").rstrip("/")
 DMP_STATION_PORT: int = int(os.environ.get("DMP_STATION_PORT", "8766"))
+
+# ── PATHS — configured via environment, see dmp-services/start_dmp.bat ───────
+# All DMP / DM2000 / DM3000 source-data directories and template directories
+# are read from environment variables.  To change a path on a station machine
+# (e.g. DMP1 stores DMP at C:\DMP and DMP2 stores DMP at D:\DMP) edit ONLY the
+# values in start_dmp.bat (or set the corresponding env var) and restart the
+# service — no source-code changes are required.  The defaults below are used
+# when an env var is not set.
+#
+# Per-machine examples:
+#
+#   DMP1                              DMP2
+#   ────                              ────
+#   DMP_DATA_DIR     = C:\DMP\Data    DMP_DATA_DIR     = D:\DMP\Data
+#   DM2000_DATA_DIR  = D:\DM2000\…    DM2000_DATA_DIR  = D:\DM2000\…
+#   DM3000_DATA_DIR  = D:\DM3000\…    DM3000_DATA_DIR  = D:\DM3000\…
+#
+# DMP (live discharge data — battery groups + per-tray .mdb files)
 DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
 DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
+DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
+
+# DM2000 (historic discharge archive — Ohm-based load resistance)
 DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
 DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
 DM2000_PERF_TEMPLATES_DIR: str = os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates")
-DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
-# Local cache directory: persistent copies of dmdata_ls.mdb are kept here so that
-# every request reads from the cached copy instead of making a new shadow copy.
+
+# DM3000 (historic discharge archive — mA-based discharge current).  Same
+# schema as DM2000; only the unit on fzdz / Dis-condition differs.
+DM3000_DATA_DIR: str = os.environ.get("DM3000_DATA_DIR", r"D:\DM3000\dmdatabase")
+DM3000_TEMPLATES_DIR: str = os.environ.get("DM3000_TEMPLATES_DIR", "./dm3000_templates")
+DM3000_PERF_TEMPLATES_DIR: str = os.environ.get(
+    "DM3000_PERF_TEMPLATES_DIR",
+    # By default DM3000 reuses the DM2000 perf-report templates because the
+    # report layout is identical apart from the unit label.  Set
+    # DM3000_PERF_TEMPLATES_DIR explicitly to point at a separate directory
+    # if/when DM3000-specific templates are introduced.
+    os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates"),
+)
+
+# Local cache directories: persistent copies of dmdata_ls.mdb / DMPDATA.mdb
+# are kept here so that every request reads from the cached copy instead of
+# making a new shadow copy each time.
 DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "../backend/data/dm2000_cache")
-# Local cache directory: persistent copy of DMPDATA.mdb is kept here so that
-# every batch/channel request reads from the cached copy instead of making a
-# new shadow copy each time.
+DM3000_CACHE_DIR: str = os.environ.get("DM3000_CACHE_DIR", "../backend/data/dm3000_cache")
 DMPDATA_CACHE_DIR: str = os.environ.get("DMPDATA_CACHE_DIR", "../backend/data/dmpdata_cache")
+
 # Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
 DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
+DM3000_COMPANY_NAME: str = os.environ.get("DM3000_COMPANY_NAME", DM2000_COMPANY_NAME)
+# ── end PATHS ────────────────────────────────────────────────────────────────
 WATCH_INTERVAL_SECONDS: int = 5
 # Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
 MAX_BATTERY_NUMBER: int = 99

@@ -373,75 +373,6 @@ def test_merge_bz_suffix_flags_does_not_strip_substring_15() -> None:
     assert m._merge_bz_suffix_flags(False, False, "LR6 UDQ7") == (False, False)
 
 
-# --------------------------------------------------------------------------- #
-# DMP tray assignment — Bug 1 fix (Request #241 follow-up)
-#
-# When the frontend filters a composite-remark entry to only the relevant
-# production line (e.g. chuyen=501 from "LR6 UD501 UD502"), the backend
-# receives entry.groups with only one group.  The fix detects that
-# _remark_bz_groups has more entries than entry.groups and uses the full
-# remark's group count for positional tray assignment.
-# --------------------------------------------------------------------------- #
-
-
-def _remark_chuyen_to_pos_from_remark(clean_remark: str) -> dict:
-    """Helper: build the chuyen→slot index map the Bug 1 fix uses at runtime."""
-    remark_groups = m._parse_bz_groups(clean_remark)
-    sorted_remark = sorted(
-        remark_groups,
-        key=lambda rg: (
-            (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
-            if str(rg.get("chuyen", "")).isdigit()
-            else (1, 0, str(rg.get("chuyen", "")))
-        ),
-    )
-    return {str(rg.get("chuyen", "")): i for i, rg in enumerate(sorted_remark)}
-
-
-def test_dmp_tray_assignment_composite_remark_chuyen501() -> None:
-    """Entry filtered to chuyen=501 from "LR6 UD501 UD502 15":
-    chuyen 501 should receive trays 1–4 (slot 0 of the 2-group split), NOT
-    all 9 trays which was the bug.
-    """
-    clean_remark = "LR6 UD501 UD502"  # suffix stripped by _strip_remark_suffixes
-    remark_groups = m._parse_bz_groups(clean_remark)
-    assert len(remark_groups) == 2, "remark must parse to 2 groups"
-
-    eff_groups = m._sort_eff_groups_for_tray_assignment(
-        [{"loai": "UD", "chuyen": "501", "trays": [], "_orig_idx": 0}]
-    )
-    n_groups = len(eff_groups)  # 1 — filtered entry
-    remark_n = len(remark_groups)  # 2 — full remark
-
-    # Without fix: n_groups=1, all 9 trays — demonstrates the bug
-    auto_trays_buggy = m._DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
-    assert auto_trays_buggy == [list(range(1, 10))], "baseline: buggy assigns all 9 trays"
-
-    # With fix: use remark_n=2, find slot for chuyen 501
-    remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
-    auto_trays_fixed = m._split_active_trays_for_group_count(remark_n, list(range(1, 10)))
-    dg_pos = remark_pos.get("501", 0)
-    trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
-
-    assert trays == [1, 2, 3, 4], f"chuyen 501 must map to trays 1-4, got {trays}"
-
-
-def test_dmp_tray_assignment_composite_remark_chuyen502() -> None:
-    """Entry filtered to chuyen=502 from "LR6 UD501 UD502" should receive the
-    next 4 active trays (slot 1 of the 2-group split).
-    """
-    clean_remark = "LR6 UD501 UD502"
-    remark_groups = m._parse_bz_groups(clean_remark)
-    remark_n = len(remark_groups)  # 2
-
-    remark_pos = _remark_chuyen_to_pos_from_remark(clean_remark)
-    auto_trays_fixed = m._split_active_trays_for_group_count(remark_n, list(range(1, 10)))
-    dg_pos = remark_pos.get("502", 0)
-    trays = auto_trays_fixed[dg_pos] if dg_pos < len(auto_trays_fixed) else []
-
-    assert trays == [5, 6, 7, 8], f"chuyen 502 must map to trays 5-8, got {trays}"
-
-
 def test_dmp_tray_assignment_two_lines_uses_first_eight_active_trays() -> None:
     """For two-line remarks, empty/broken trays are skipped before assigning
     the first 4 active trays to line 1 and the next 4 active trays to line 2.
@@ -490,37 +421,23 @@ def test_dmp_tray_assignment_single_line_accepts_any_active_count() -> None:
 
 
 def test_dmp_tray_assignment_single_group_unchanged() -> None:
-    """When the remark has only one production-line group, the fix is a no-op
-    and all 9 trays are still assigned (correct for single-line batches).
-    """
-    clean_remark = "LR6 UDP501"
-    remark_groups = m._parse_bz_groups(clean_remark)
-    remark_n = len(remark_groups)  # 1
-
+    """_sort_eff_groups_for_tray_assignment returns a single-group list unchanged."""
     eff_groups = m._sort_eff_groups_for_tray_assignment(
         [{"loai": "UD+", "chuyen": "501", "trays": [], "_orig_idx": 0}]
     )
-    n_groups = len(eff_groups)  # 1
-
-    # remark_n == n_groups → fix does not activate
-    assert remark_n == n_groups
-    auto_trays = m._DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
-    assert auto_trays == [list(range(1, 10))], "single-group remark must still use all 9 trays"
+    assert len(eff_groups) == 1
+    auto_trays = m._DMP_TRAY_ASSIGNMENT.get(1, [list(range(1, 10))])
+    assert auto_trays == [list(range(1, 10))], "single-group fallback must cover all 9 trays"
 
 
 def test_dmp_tray_assignment_explicit_trays_bypassed() -> None:
-    """When entry.groups carries explicit tray lists, the positional assignment
-    is bypassed entirely.  The Bug 1 code path must not activate.
+    """_sort_eff_groups_for_tray_assignment returns the list unchanged when
+    explicit trays are already set (any(g['trays']) is True).
     """
-    # eff_groups with explicit trays → _sort_eff_groups_for_tray_assignment
-    # returns them unchanged because any(g.get("trays")) is True.
     eff_groups = [{"loai": "UD", "chuyen": "501", "trays": [1, 2, 3, 4], "_orig_idx": 0}]
     result = m._sort_eff_groups_for_tray_assignment(eff_groups)
-    # The function returns the list unchanged when explicit trays are present
     assert result[0]["trays"] == [1, 2, 3, 4]
-    # With explicit trays, _no_explicit_trays would be False → fix skipped
-    has_explicit = any(g.get("trays") for g in result)
-    assert has_explicit, "explicit trays must be detected"
+    assert any(g.get("trays") for g in result), "explicit trays must be detected"
 
 
 # --------------------------------------------------------------------------- #
@@ -932,10 +849,9 @@ def _install_dmp_batch_fakes(
     populated and a sibling batch with trays 6-9 populated).  Falls back to
     *active_trays* (default 1..9) for batch ids not present in the map.
 
-    *scdw_by_batch* attaches a per-batch ``para_singl.scdw`` value (the
-    production-line tag, e.g. ``"VN501"``).  Used by the perf-report writer
-    to route data from single-line batches to the correct line group when
-    they share a multi-line ``bz`` remark with a sibling batch.
+    *scdw_by_batch* supplies a per-batch ``para_singl.scdw`` value for tests
+    that need to confirm scdw is **ignored** for routing (bz order is the sole
+    source of truth for tray slot assignment).
     """
     if active_trays is None:
         active_trays = list(range(1, 10))
@@ -1280,28 +1196,6 @@ def test_dmp_canonical_split_explicit_trays_bypass_canonical_logic(
 # --------------------------------------------------------------------------- #
 # Bz-order positional split — various configurations
 # --------------------------------------------------------------------------- #
-# The remark (bz) field is the sole source of truth for which production line
-# occupies which physical tray slot.  scdw is intentionally not used.
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "scdw,expected",
-    [
-        ("VN501", ["501"]),
-        ("VN 502", ["502"]),
-        ("VN501-502", ["501", "502"]),
-        ("VN 502-501", ["502", "501"]),
-        ("VN501-502-503", ["501", "502", "503"]),
-        ("503-504", ["503", "504"]),
-        ("VN", []),
-        ("", []),
-        (None, []),
-        ("VN501 15", ["501"]),
-    ],
-)
-def test_parse_scdw_chuyens(scdw, expected) -> None:
-    assert m._parse_scdw_chuyens(scdw) == expected
 
 
 def test_dmp_bz_positional_split_single_group_501(
@@ -1879,7 +1773,7 @@ def test_dmp_per_batch_mode_extra_batches_beyond_canonical_use_split(
     assert [5, 6, 7, 8] in b2_trays, f"B2 (normal split): 502 must take [5-8]; got {b2_trays}"
 
 
-def test_dmp_per_batch_mode_db_reverse_order_still_assigns_correctly(
+def test_per_batch_mode_assigns_by_tray_slot_not_db_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression: database returns the batch for line 502 FIRST (e.g. because

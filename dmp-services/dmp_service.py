@@ -100,17 +100,6 @@ _DM2000_TAV_CACHE_TTL: float = 120.0  # seconds
 _DM2000_CACHE_MAX_ENTRIES: int = 100
 _WATCHED_MDB_MTIME: dict[str, float] = {}
 _WATCHED_CHANGES: dict[str, float] = {}
-_SCHEMA_TABLE_WHITELIST = {
-    "para_singl",
-    "para_pub",
-    "para_pur",
-    "vidata",
-    "ls_jb_cs",
-    "ls_pam2",
-    "ls_vtime",
-    "ls_evolt",
-    "ls_timev",
-}
 def _get_local_ip() -> str:
     try:
         host = VONIKO_SERVER_URL.split("://")[-1].split(":")[0].split("/")[0]
@@ -2656,26 +2645,6 @@ def _read_telemetry_multi(cdmc: str, channels: list[int]) -> dict[int, list[dict
             result.setdefault(ch, [])
 
     return result
-
-
-def _get_table_columns(mdb_path: str, table_name: str) -> set[str]:
-    if table_name.lower() not in _SCHEMA_TABLE_WHITELIST:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Table '{table_name}' is not whitelisted for schema lookup",
-        )
-    conn_str = (
-        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
-        f"DBQ={mdb_path};"
-    )
-    with _acquire_query_lock():
-        with pyodbc.connect(conn_str, timeout=10) as conn:
-            cursor = conn.cursor()
-            return {
-                str(row.column_name).lower()
-                for row in cursor.columns(table=table_name)
-                if getattr(row, "column_name", None)
-            }
 
 
 @app.get("/")
@@ -5689,58 +5658,6 @@ def _get_dmp_active_trays(batch_id: str) -> list[int]:
     return sorted(set(active))
 
 
-def _get_dmp_batch_scdw(batch_id: str) -> str:
-    """Return the manufacturer/production-line tag (``para_singl.scdw``) for a batch.
-
-    ``scdw`` is consistent across all rows of a single ``sid`` (verified
-    against the production database: zero sids have mixed scdw values).  It
-    encodes which production line(s) the batch's batteries actually came
-    from — e.g. ``"VN501"`` (line 501 only), ``"VN501-502"`` (a pair),
-    ``"503-504"``.
-
-    Note: this function is retained as a utility but is no longer called by the
-    performance-report writer.  The ``bz`` remark field is the sole source of
-    truth for tray slot assignment; ``scdw`` is not used for routing.
-    """
-    if not batch_id:
-        return ""
-    try:
-        rows = _read_dmpdata(
-            "SELECT scdw FROM para_singl WHERE sid = ?", (batch_id,)
-        )
-    except pyodbc.Error:
-        rows = []
-    for row in rows or []:
-        scdw = _dm2000_get_value(row, "scdw")
-        if scdw is not None and not _dmp_is_empty(scdw):
-            return str(scdw).strip()
-    return ""
-
-
-def _parse_scdw_chuyens(scdw: Optional[str]) -> list[str]:
-    """Extract production-line chuyen tokens from a ``para_singl.scdw`` value.
-
-    The DMP machine writes ``scdw`` in many free-form variants:
-
-      * ``"VN501"``           → ``["501"]``
-      * ``"VN 502"``          → ``["502"]``
-      * ``"VN501-502"``       → ``["501", "502"]``
-      * ``"VN 502-501"``      → ``["502", "501"]`` (preserves source order)
-      * ``"VN501-502-503"``   → ``["501", "502", "503"]``
-      * ``"503-504"``         → ``["503", "504"]``
-      * ``"VN"`` / ``""`` / ``None`` → ``[]``
-
-    Returns the chuyen tokens in their original textual order (callers that
-    need ascending numeric order should sort the result themselves).  Only
-    tokens with at least three digits are recognised so accidental matches
-    against non-line numbers (e.g. ``"15"`` from a date-suffix) are ignored.
-    """
-    if not scdw:
-        return []
-    return re.findall(r"\d{3,}", str(scdw))
-
-
-
 def _resolve_dmp_canonical_split(
     batch_bz: Optional[str],
     entry_clean_remark: str,
@@ -6305,197 +6222,6 @@ def _group_to_bz_token(loai: str, chuyen: str) -> str:
     if loai_upper == "UD":
         return f"UD{chuyen_str}"
     return chuyen_str
-
-
-def _dm2000_all_archives_match_all_groups(arch_rows: list[dict], groups: list) -> bool:
-    """Return True when every archive matches every group's chuyen AND all archives
-    have distinct start dates.
-
-    This signals the "same-bz, different-dates" scenario: multiple archives
-    share an identical remark (e.g. "LR6 UDP501 HP503") and therefore each
-    archive covers ALL production lines.  In this case each archive must be
-    processed with all groups independently (using *_parse_bz_groups* +
-    *_DMP_TRAY_ASSIGNMENT* battery splits) rather than a 1-archive-per-group
-    positional pairing.
-
-    When two or more archives share the same start date they represent
-    same-day per-grade runs (e.g. a UD+ archive on channels 1-4 and an HP
-    archive on channels 6-9, both with remark "LR6 UDP501 HP503").  In that
-    case the positional pairing path must be used so each archive is matched
-    to its own group and queried with its own actual batteries — not with
-    the fixed [1-4]/[6-9] splits that *_DMP_TRAY_ASSIGNMENT* prescribes
-    (which fail when DM2000 renumbers each archive's channels from 1).
-    """
-    if not arch_rows or not groups:
-        return False
-    if not all(
-        all(_dm2000_archive_matches_chuyen(a, g.chuyen) for g in groups)
-        for a in arch_rows
-    ):
-        return False
-    # Require unique start dates.  When any two archives share the same date
-    # this is a same-day per-grade scenario, not different-dates same-bz.
-    # Archives with no start date are excluded from the uniqueness check
-    # (they cannot be distinguished by date and are treated as unique).
-    def _date_str(raw) -> str:
-        if raw is None:
-            return ""
-        if hasattr(raw, "strftime"):
-            return raw.strftime("%Y-%m-%d")
-        s = str(raw).strip()
-        # Validate YYYY-MM-DD (or YYYY/MM/DD after replace) to avoid treating
-        # truncated or non-date strings as matching dates.
-        s = s.replace("/", "-")[:10]
-        return s if len(s) == 10 and s[4] == "-" and s[7] == "-" else ""
-
-    valid_dates = [_date_str(_dm2000_get_value(a, "startdate", "fdrq")) for a in arch_rows]
-    valid_dates = [d for d in valid_dates if d]
-    if valid_dates and len(valid_dates) != len(set(valid_dates)):
-        return False
-    return True
-
-
-def _dm2000_archive_matches_loai(arch_meta: dict, loai: str) -> bool:
-    """Return True if the archive's battery-type field (``dcxh``) matches *loai*.
-
-    DM2000 stores the battery type/grade in the ``dcxh`` column of ``ls_jb_cs``
-    (e.g. ``"LR6UD-UD+"``, ``"LR6HP"``, ``"LR6UD-UD"``).  This is Strategy 2
-    in the archive-to-group pairing hierarchy: it is tried after chuyen-based
-    matching (:func:`_dm2000_archive_matches_chuyen`) and before positional
-    (sort-by-battery-number) fallback.
-
-    Matching rules (case-insensitive):
-
-    * ``loai="UD+"`` — ``dcxh`` must contain ``"UD+"``
-    * ``loai="HP"``  — ``dcxh`` must contain ``"HP"`` but **not** ``"UDP"``
-      (to avoid matching ``"LR6UDP-UD+"`` as HP)
-    * ``loai="UD"``  — ``dcxh`` must contain ``"UD"`` but **not** ``"+"``
-    * other loai     — ``dcxh`` must contain the loai string verbatim
-    """
-    loai = str(loai or "").strip()
-    if not loai:
-        return False
-    dcxh = str(_dm2000_get_value(arch_meta, "dcxh", "baty") or "").strip()
-    if not dcxh:
-        return False
-    dcxh_upper = dcxh.upper()
-    loai_upper = loai.upper()
-    if loai_upper == "UD+":
-        return "UD+" in dcxh_upper
-    if loai_upper == "HP":
-        return "HP" in dcxh_upper and "UDP" not in dcxh_upper
-    if loai_upper == "UD":
-        return "UD" in dcxh_upper and "+" not in dcxh_upper
-    return loai_upper in dcxh_upper
-
-
-def _pair_dm2000_archives_to_groups(
-    arch_rows: list[dict],
-    groups: list,
-) -> list[tuple[int, int]]:
-    """Return ``[(arch_idx, grp_idx), ...]`` pairs for multi-archive DM2000 data.
-
-    **Strategy 1 — bijective chuyen matching** (preferred):
-    Build a 1-to-1 mapping where each archive uniquely matches exactly one group
-    via :func:`_dm2000_archive_matches_chuyen` and each group is matched by
-    exactly one archive.  Used when manufacturers differ between archives (e.g.
-    ``"501"`` vs ``"503"``).
-
-    **Strategy 2 — bijective loai (battery-type) matching**:
-    When chuyen matching is ambiguous (both archives share the same remark
-    ``"LR6 UDP501 HP503"`` so both match both groups), try to distinguish
-    archives by their ``dcxh`` battery-type field (e.g. ``"LR6UD-UD+"`` vs
-    ``"LR6HP"``).  Used for the common scenario where DM2000 creates one archive
-    per grade on separate channels (each archive starting from channel 1), with
-    both archives carrying the same composite remark.
-
-    **Strategy 3 — positional fallback**:
-    When both chuyen and loai matching are ambiguous — e.g. both archives share
-    the same manufacturer field (``"501-502"``), so both match all groups —
-    sort archives by their minimum battery number (ascending) and pair them with
-    chuyen-sorted groups.  This correctly assigns the archive whose channels
-    start at 1 (batteries 1-4) to the group with the lower production-line
-    number and the archive whose channels start at 6 (batteries 6-9) to the
-    higher-numbered group.
-    """
-    n_archs = len(arch_rows)
-    n_grps = len(groups)
-
-    # ── Strategy 1: bijective by chuyen ───────────────────────────────────────
-    arch_to_grp: dict[int, int] = {}   # ai → gi  (only when the match is unique)
-    grp_to_archs: dict[int, list[int]] = {}
-    for ai, a in enumerate(arch_rows):
-        matches = [
-            gi for gi, g in enumerate(groups)
-            if _dm2000_archive_matches_chuyen(a, g.chuyen)
-        ]
-        if len(matches) == 1:
-            arch_to_grp[ai] = matches[0]
-            grp_to_archs.setdefault(matches[0], []).append(ai)
-
-    # Bijective: every archive has exactly one match AND every matched group is
-    # claimed by exactly one archive AND all groups are covered.
-    is_bijective = (
-        len(arch_to_grp) == n_archs
-        and all(len(v) == 1 for v in grp_to_archs.values())
-        and len(grp_to_archs) == min(n_archs, n_grps)
-    )
-
-    if is_bijective:
-        return list(arch_to_grp.items())
-
-    # ── Strategy 2: bijective by loai (dcxh battery-type field) ───────────────
-    # Handles the scenario where each archive covers a single grade but both
-    # archives carry the same composite remark (e.g. "LR6 UDP501 HP503") so
-    # Strategy 1 cannot distinguish them.  The dcxh field is grade-specific
-    # (e.g. "LR6UD-UD+" vs "LR6HP") and gives an unambiguous 1-to-1 mapping.
-    arch_to_grp_loai: dict[int, int] = {}
-    grp_to_archs_loai: dict[int, list[int]] = {}
-    for ai, a in enumerate(arch_rows):
-        loai_matches = [
-            gi for gi, g in enumerate(groups)
-            if _dm2000_archive_matches_loai(a, getattr(g, "loai", None))
-        ]
-        if len(loai_matches) == 1:
-            arch_to_grp_loai[ai] = loai_matches[0]
-            grp_to_archs_loai.setdefault(loai_matches[0], []).append(ai)
-
-    is_bijective_loai = (
-        len(arch_to_grp_loai) == n_archs
-        and all(len(v) == 1 for v in grp_to_archs_loai.values())
-        and len(grp_to_archs_loai) == min(n_archs, n_grps)
-    )
-
-    if is_bijective_loai:
-        return list(arch_to_grp_loai.items())
-
-    # ── Strategy 3: positional fallback ───────────────────────────────────────
-    # Sort archives by min battery number then pair.
-    # Archives with no battery data sort last (using MAX_BATTERY_NUMBER + 1).
-    _NO_BATTERY_SORT_VALUE = MAX_BATTERY_NUMBER + 1
-
-    def _min_battery_key(ai: int) -> tuple:
-        cdid = str(_dm2000_get_value(arch_rows[ai], "cdid", "archname") or "").strip()
-        batys = _get_batys_for_archive(cdid) if cdid else []
-        return (min(batys) if batys else _NO_BATTERY_SORT_VALUE, cdid, ai)
-
-    sorted_ais = sorted(range(n_archs), key=_min_battery_key)
-
-    # Sort groups by chuyen number so the archive with the lowest min battery
-    # is paired with the group whose production-line number is also lowest.
-    # This is essential when entry.groups is stored in reverse or arbitrary
-    # order (e.g. [HP 503, UD+ 501]): without this sort the archive with
-    # batteries 1-4 (UD+ data) would be paired with group HP 503 and the
-    # wrong data would appear on each production-line sheet.
-    def _grp_chuyen_key(gi: int) -> tuple:
-        c = str(getattr(groups[gi], "chuyen", None) or "")
-        try:
-            return (0, int(c), c)
-        except (ValueError, TypeError):
-            return (1, 0, c)
-
-    sorted_gis = sorted(range(n_grps), key=_grp_chuyen_key)
-    return [(sorted_ais[i], sorted_gis[i]) for i in range(min(len(sorted_ais), n_grps))]
 
 
 def _compute_dmp_perf_groups(  # noqa: C901
@@ -7417,7 +7143,48 @@ def _compute_dmp_perf_groups(  # noqa: C901
             and len(batch_rows) >= _n_canonical
             and _all_same_bz
         )
-        _main_batch_line_idx: Optional[int] = 0 if _per_batch_mode else None
+        # Pre-initialise so the extra-batches loop can reference these
+        # variables regardless of which branch below is taken.
+        _pb_all_active: dict[str, list[int]] = {}
+        _pb_split: list[list[int]] = []
+        _main_batch_line_idx: Optional[int] = None
+
+        # In per-batch mode, assign each batch to its canonical slot based on
+        # the physical tray positions of its batteries rather than its index in
+        # batch_rows.  The database can return batches in any order (e.g. 502's
+        # batch before 501's batch because of Access MDB insertion order), so
+        # the old positional assumption "batch_rows[0] → slot 0, …" is wrong.
+        #
+        # Instead: collect all active trays from all matched batches, compute
+        # the combined sequential split (remark-order slots), then identify
+        # which slot exclusively contains each batch's active trays.  A batch
+        # whose trays are a subset of split[s] is assigned to canonical slot s.
+        # When a batch's trays span multiple slots it is treated as a combined
+        # batch and receives the normal positional split (batch_line_idx=None).
+        if _per_batch_mode:
+            _pb_all_active = {actual_batch_id: _dmp_active_trays}
+            for _pb in batch_rows[1:]:
+                _pb_id = str(_dm2000_get_value(_pb, "id") or "")
+                if _pb_id and _pb_id not in _pb_all_active:
+                    _pb_all_active[_pb_id] = _get_dmp_active_trays(_pb_id) or []
+            _pb_combined = sorted({
+                t for ts in _pb_all_active.values()
+                for t in ts if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+            })
+            _pb_split = _split_active_trays_for_group_count(_n_canonical, _pb_combined)
+
+            def _pb_canonical_slot(trays: list[int]) -> Optional[int]:
+                tray_set = {
+                    t for t in trays if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+                }
+                if not tray_set:
+                    return None
+                for _s, _st in enumerate(_pb_split):
+                    if tray_set <= set(_st):
+                        return _s
+                return None
+
+            _main_batch_line_idx = _pb_canonical_slot(_dmp_active_trays)
         auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
             _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays,
             batch_line_idx=_main_batch_line_idx,
@@ -7495,14 +7262,20 @@ def _compute_dmp_perf_groups(  # noqa: C901
         for _xb_abs_idx, _xb in enumerate(batch_rows[1:], start=1):
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
-            _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
+            # Re-use pre-fetched trays when in per-batch mode (avoids a redundant
+            # DB call; trays were already fetched during _pb_all_active setup above).
+            _xb_active_trays = (
+                _pb_all_active.get(_xb_id)
+                if _per_batch_mode and _xb_id in _pb_all_active
+                else None
+            ) or _get_dmp_active_trays(_xb_id) or list(range(1, 10))
             _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
-            # Per-batch canonical split: each extra batch's bz is its own
-            # master record and dictates the multi-line structure for that
-            # batch's tray assignment.  Remark (bz) order is the sole
-            # source of truth for slot assignment.
+            # Tray-slot-based per-batch assignment: find which canonical slot
+            # this batch's active trays exclusively belong to.  Uses the same
+            # _pb_canonical_slot helper and combined split computed above so
+            # assignment is stable regardless of database row order.
             _xb_batch_line_idx: Optional[int] = (
-                _xb_abs_idx if _per_batch_mode and _xb_abs_idx < _n_canonical else None
+                _pb_canonical_slot(_xb_active_trays) if _per_batch_mode else None
             )
             _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
                 _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays,

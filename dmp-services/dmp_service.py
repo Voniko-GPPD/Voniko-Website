@@ -5815,9 +5815,12 @@ def _resolve_dmp_canonical_split(
 
     The canonical source preference is:
     1. ``batch_bz`` cleaned of ``Q`` / ``15`` suffixes — when present and
-       parsing yields more groups than ``entry_clean_remark``.
-    2. ``entry_clean_remark`` — fallback used when ``batch_bz`` is empty
-       (no master record matched) or contributes no extra groups.
+       parsing yields **at least as many** groups as ``entry_clean_remark``
+       (i.e. always preferred when a batch is matched, even when lengths are
+       equal).  The batch bz is the operator-saved master record and its
+       left-to-right token order is the authoritative physical tray order.
+    2. ``entry_clean_remark`` — fallback used only when ``batch_bz`` is empty
+       (no master record matched) or parses to fewer groups than the entry.
 
     Explicit per-group ``trays`` configuration in the entry bypasses the
     positional remap entirely (handled by :func:`_resolve_dmp_tray_list`).
@@ -5834,11 +5837,17 @@ def _resolve_dmp_canonical_split(
         bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
     bz_groups: list[dict] = _parse_bz_groups(bz_clean) if bz_clean else []
 
-    # Pick whichever canonical source has the largest line count.  This is
-    # safe because the LIKE-fallback batch search guarantees the matched bz
-    # contains the entry's line token(s) as a substring, so the master bz
-    # strictly extends the entry remark when they differ.
-    canonical = bz_groups if len(bz_groups) > len(entry_groups) else entry_groups
+    # Pick whichever canonical source has the most (or equal) line count,
+    # always preferring the batch bz when lengths are the same.  The batch
+    # bz is the operator-saved master record on ``para_pub`` and therefore
+    # the authoritative source of which physical tray slot belongs to which
+    # production line — the DMP machine assigns batteries in bz left-to-right
+    # order, so the bz order IS the physical tray order.  Using the entry's
+    # remark order instead (old ``>`` strict check) caused the two-line equal-
+    # length case (e.g. entry remark "LR6 UD502 UD501" vs bz "LR6 UD501 UD502")
+    # to pick the entry's reversed order, swapping which line received which
+    # physical trays.
+    canonical = bz_groups if len(bz_groups) >= len(entry_groups) else entry_groups
     canon_n = len(canonical)
     canonical_chuyens = [str(rg.get("chuyen", "") or "") for rg in canonical]
     canonical_chuyen_set = {c for c in canonical_chuyens if c}
@@ -5885,20 +5894,27 @@ def _resolve_dmp_canonical_split(
             )
             return auto_trays, chuyen_to_pos
 
+    # Build chuyen_to_pos from canonical's **remark order** (not sorted by
+    # chuyen number).  The DMP machine assigns physical tray slots strictly
+    # left-to-right as production lines appear in the bz string:
+    #   "LR6 UD501 UD502"  →  501 = slot 0 (trays 1-4),  502 = slot 1 (trays 5-8)
+    #   "LR6 UD502 UD501"  →  502 = slot 0 (trays 1-4),  501 = slot 1 (trays 5-8)
+    # Using a chuyen-number sort (previous approach) was wrong whenever the
+    # operator typed lines in non-ascending order because the sort always put
+    # the lower-numbered line first regardless of the physical slot it
+    # actually occupies.  Building from remark order fixes this for both the
+    # ``canon_n > n_eff`` case (entry remark partial: single group against a
+    # composite bz) and the ``canon_n == n_eff`` case (entry remark full:
+    # same group count as bz but possibly different left-to-right order).
     chuyen_to_pos: dict[str, int] = {}
-    if canon_n > n_eff and no_explicit_trays:
-        sorted_canon = sorted(
-            canonical,
-            key=lambda rg: (
-                (0, int(str(rg.get("chuyen", "") or "0")), str(rg.get("chuyen", "")))
-                if str(rg.get("chuyen", "")).isdigit()
-                else (1, 0, str(rg.get("chuyen", "")))
-            ),
+    if canonical and no_explicit_trays:
+        for _i, _rg in enumerate(canonical):
+            _c = str(_rg.get("chuyen", "") or "")
+            if _c and _c not in chuyen_to_pos:
+                chuyen_to_pos[_c] = _i
+        auto_trays = _split_active_trays_for_group_count(
+            max(canon_n, n_eff), active_trays
         )
-        chuyen_to_pos = {
-            str(rg.get("chuyen", "")): i for i, rg in enumerate(sorted_canon)
-        }
-        auto_trays = _split_active_trays_for_group_count(canon_n, active_trays)
     else:
         auto_trays = _split_active_trays_for_group_count(n_eff, active_trays)
 

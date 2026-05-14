@@ -1721,3 +1721,245 @@ def test_dmp_scdw_disjoint_routing_independent_of_remark_order(
         f"disjoint-scdw batch must be excluded regardless of remark "
         f"order; forward={list(forward)} reversed={list(reversed_)}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Single-batch reversed-bz tray assignment (Request #250 fix)
+# --------------------------------------------------------------------------- #
+# When a single DMP batch covers BOTH production lines (scdw="501-502") and its
+# bz has the lines in non-ascending order (e.g. "LR6 UD502 UD501 15"), the
+# physical tray assignment MUST follow the bz order (502→slot 0, 501→slot 1)
+# rather than the numerically sorted chuyen order (which would always put 501
+# first regardless of operator intent).
+#
+# Root cause: (1) canonical was picked via strict ``>`` so equal-length bz and
+# entry remark fell back to entry order; (2) legacy fallthrough only built
+# chuyen_to_pos when ``canon_n > n_eff``, leaving it empty and falling back
+# to sorted-chuyen-based g_idx when both counts were equal.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_single_full_batch_reversed_bz_maps_to_correct_trays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single batch covering both lines with bz='LR6 UD502 UD501 15'
+    (reversed) and scdw='VN501-502' must assign trays 1-4 to production
+    line 502 (first in bz) and trays 6-8 to production line 501 (second
+    in bz).  The old code sorted by chuyen number and always put 501 on
+    the lower-index slot, giving the wrong physical-slot mapping.
+
+    Use 7 active trays (4 in slot 0, 3 in slot 1) so the avg_count in
+    the returned groups dict can distinguish which sheet got which slot.
+    """
+    batch = _make_dmp_batch(batch_id="BREV", bz="LR6 UD502 UD501 15")
+    _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch],
+        like_batches=[],
+        # 7 active trays → split-for-2 → [[1,2,3,4], [6,7,8]]
+        # slot 0 has 4 trays, slot 1 has 3 trays — distinguishable by avg_count.
+        active_trays_by_batch={"BREV": [1, 2, 3, 4, 6, 7, 8]},
+        scdw_by_batch={"BREV": "VN501-502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                ],
+                raw_remark="LR6 UD502 UD501 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    def _avg_count(sheet: str) -> int:
+        """Return avg_count from the first perf value in a sheet."""
+        for row_data in groups.get(sheet, {}).values():
+            for perf in row_data.values():
+                if isinstance(perf, dict) and "avg_count" in perf:
+                    return perf["avg_count"]
+        return -1
+
+    # bz says 502 first → 502 owns slot 0 (4 trays → avg_count=4)
+    # bz says 501 second → 501 owns slot 1 (3 trays → avg_count=3)
+    assert "LR6 502" in groups, "LR6 502 sheet must be present"
+    assert "LR6 501" in groups, "LR6 501 sheet must be present"
+    c502 = _avg_count("LR6 502")
+    c501 = _avg_count("LR6 501")
+    assert c502 == 4, (
+        f"reversed bz: 502 must occupy slot 0 (4 active trays → avg_count=4); "
+        f"got avg_count={c502}"
+    )
+    assert c501 == 3, (
+        f"reversed bz: 501 must occupy slot 1 (3 active trays → avg_count=3); "
+        f"got avg_count={c501}"
+    )
+
+
+def test_dmp_single_full_batch_ascending_bz_unaffected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity-check the well-behaved case: bz='LR6 UD501 UD502' (ascending)
+    with scdw='VN501-502' must still assign 501→slot 0 (4 trays) and
+    502→slot 1 (3 trays).  The fix must not regress the common case.
+    """
+    batch = _make_dmp_batch(batch_id="BASC", bz="LR6 UD501 UD502")
+    _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],
+        like_batches=[batch],
+        active_trays_by_batch={"BASC": [1, 2, 3, 4, 6, 7, 8]},
+        scdw_by_batch={"BASC": "VN501-502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    def _avg_count(sheet: str) -> int:
+        for row_data in groups.get(sheet, {}).values():
+            for perf in row_data.values():
+                if isinstance(perf, dict) and "avg_count" in perf:
+                    return perf["avg_count"]
+        return -1
+
+    assert "LR6 501" in groups, "LR6 501 sheet must be present"
+    assert "LR6 502" in groups, "LR6 502 sheet must be present"
+    c501 = _avg_count("LR6 501")
+    c502 = _avg_count("LR6 502")
+    assert c501 == 4, (
+        f"ascending bz: 501 must keep slot 0 (4 trays → avg_count=4); "
+        f"got avg_count={c501}"
+    )
+    assert c502 == 3, (
+        f"ascending bz: 502 must keep slot 1 (3 trays → avg_count=3); "
+        f"got avg_count={c502}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Single-batch reversed-bz tray assignment (Request #250 fix)
+# --------------------------------------------------------------------------- #
+# When a single DMP batch covers BOTH production lines (scdw="501-502") and its
+# bz has the lines in non-ascending order (e.g. "LR6 UD502 UD501 15"), the
+# physical tray assignment MUST follow the bz order (502→slot 0, 501→slot 1)
+# rather than the numerically sorted chuyen order (which would always put 501
+# first regardless of operator intent).
+#
+# This was the root cause of the "reversed remark swaps datasets" bug reported
+# in problem statement #250: the entry's raw_remark order was being used as
+# canonical (instead of the batch bz) when both had the same group count, and
+# the legacy fallthrough path sorted by chuyen number instead of bz order.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_single_full_batch_reversed_bz_maps_to_correct_trays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single batch covering both lines with bz='LR6 UD502 UD501 15'
+    (reversed) and scdw='VN501-502' must assign trays 1-4 to production
+    line 502 (first in bz) and trays 6-9 to production line 501 (second
+    in bz).  The old code sorted by chuyen number and always put 501 on
+    trays 1-4, giving the wrong physical-slot mapping.
+    """
+    batch = _make_dmp_batch(batch_id="BREV", bz="LR6 UD502 UD501 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch],
+        like_batches=[],
+        active_trays_by_batch={"BREV": [1, 2, 3, 4, 6, 7, 8, 9]},
+        scdw_by_batch={"BREV": "VN501-502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                ],
+                raw_remark="LR6 UD502 UD501 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    all_trays = {
+        chuyen: trays
+        for (bid, chuyen), trays in captured.items()
+        if bid == "BREV"
+    }
+    # bz says 502 first → 502 owns slot 0 (trays 1-4), 501 owns slot 1 (trays 6-9).
+    assert all_trays.get("502") == [1, 2, 3, 4], (
+        f"reversed bz: 502 must take trays 1-4 (slot 0 = first in bz); "
+        f"got {all_trays.get('502')}"
+    )
+    assert all_trays.get("501") == [6, 7, 8, 9], (
+        f"reversed bz: 501 must take trays 6-9 (slot 1 = second in bz); "
+        f"got {all_trays.get('501')}"
+    )
+
+
+def test_dmp_single_full_batch_ascending_bz_unaffected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity-check the well-behaved case: bz='LR6 UD501 UD502' (ascending)
+    with scdw='VN501-502' must still assign 501→trays 1-4, 502→trays 5-8.
+    The fix must not regress the common ascending-order case.
+    """
+    batch = _make_dmp_batch(batch_id="BASC", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],
+        like_batches=[batch],
+        scdw_by_batch={"BASC": "VN501-502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    all_trays = {
+        chuyen: trays
+        for (bid, chuyen), trays in captured.items()
+        if bid == "BASC"
+    }
+    assert all_trays.get("501") == [1, 2, 3, 4], (
+        f"ascending bz: 501 must keep trays 1-4 (slot 0); got {all_trays.get('501')}"
+    )
+    assert all_trays.get("502") == [5, 6, 7, 8], (
+        f"ascending bz: 502 must keep trays 5-8 (slot 1); got {all_trays.get('502')}"
+    )

@@ -5746,6 +5746,7 @@ def _resolve_dmp_canonical_split(
     entry_clean_remark: str,
     eff_groups: list[dict],
     active_trays: list[int],
+    batch_line_idx: Optional[int] = None,
 ) -> tuple[list[list[int]], dict[str, int]]:
     """Compute positional tray split for a single DMP batch.
 
@@ -5765,9 +5766,14 @@ def _resolve_dmp_canonical_split(
     are equal (``>=``), ensuring a reversed entry remark does not override
     the authoritative bz order stored in the database.
 
-    ``scdw``-based routing is intentionally not performed: the remark (bz)
-    is the single source of truth for slot assignment regardless of what
-    ``para_singl.scdw`` contains.
+    ``scdw`` is not used for routing.  When the caller knows that the
+    current batch is a per-line record (one of several records that share
+    the same composite bz, each covering only one production line), it
+    passes ``batch_line_idx`` — the 0-based position of this batch in the
+    matched batch list.  In that mode ALL of the batch's active trays are
+    assigned to the canonical slot at ``batch_line_idx`` and every other
+    slot is left empty, so the correct production line gets its data and the
+    other lines are skipped cleanly.
 
     Returns ``(auto_trays, chuyen_to_pos)`` where:
 
@@ -5824,9 +5830,24 @@ def _resolve_dmp_canonical_split(
             _c = str(_rg.get("chuyen", "") or "")
             if _c and _c not in chuyen_to_pos:
                 chuyen_to_pos[_c] = _i
-        auto_trays = _split_active_trays_for_group_count(
-            max(canon_n, n_eff), active_trays
-        )
+
+        if batch_line_idx is not None:
+            # Per-batch positional mode: this batch covers exactly one
+            # canonical line (the one at position batch_line_idx in the bz).
+            # Assign ALL of the batch's active trays to that slot and leave
+            # every other slot empty so the correct chuyen gets its data and
+            # the remaining groups are skipped cleanly.
+            n_total = max(canon_n, n_eff)
+            _active_sorted = sorted(
+                {t for t in active_trays if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER}
+            )
+            auto_trays = [[] for _ in range(n_total)]
+            if batch_line_idx < n_total:
+                auto_trays[batch_line_idx] = _active_sorted
+        else:
+            auto_trays = _split_active_trays_for_group_count(
+                max(canon_n, n_eff), active_trays
+            )
     else:
         auto_trays = _split_active_trays_for_group_count(n_eff, active_trays)
 
@@ -7368,9 +7389,38 @@ def _compute_dmp_perf_groups(  # noqa: C901
         )
         # Canonical positional split: the matched batch's bz is the master
         # record and dictates the multi-line structure.  Remark (bz) order
-        # is the sole source of truth for slot assignment — scdw is not used.
+        # is the sole source of truth for slot assignment.
+        #
+        # Per-batch positional mode: when (a) the bz describes multiple
+        # canonical lines, (b) len(batch_rows) >= _n_canonical, AND (c) all
+        # matched batches share the same bz value, the system has one separate
+        # para_pub record per production line (the DMP machine stores lines
+        # individually even though the operator typed a composite bz such as
+        # "LR6 UD501 UD502 15").  In that mode each batch is assigned to its
+        # corresponding canonical line by position:
+        # batch_rows[0] → line 0 (first in bz), batch_rows[1] → line 1, …
+        # The "same bz" guard prevents false activation when extra batches
+        # come from a LIKE fallback and carry different bz values (different
+        # sessions with different multi-line shapes must be split normally).
+        # This is determined purely from the bz order — scdw is not used.
+        _bz_for_n = _matched_bz or _clean_remark
+        _bz_for_n_stripped, _, _ = _strip_remark_suffixes(_bz_for_n)
+        _n_canonical = len(
+            [g for g in _parse_bz_groups(_bz_for_n_stripped) if g.get("chuyen")]
+        )
+        _all_same_bz = len(batch_rows) < 2 or all(
+            str(_dm2000_get_value(_b, "bz") or "").strip() == _matched_bz
+            for _b in batch_rows[1:]
+        )
+        _per_batch_mode = (
+            _n_canonical > 1
+            and len(batch_rows) >= _n_canonical
+            and _all_same_bz
+        )
+        _main_batch_line_idx: Optional[int] = 0 if _per_batch_mode else None
         auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
             _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays,
+            batch_line_idx=_main_batch_line_idx,
         )
 
         # Hoist model/no-chuyen check outside the loop so the synthetic-group
@@ -7442,7 +7492,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # Process every additional matched DMP batch so repeated runs with the
         # same remark (including LIKE fallback matches where bz lacks a "15"/"Q"
         # suffix) each produce their own report row.
-        for _xb in batch_rows[1:]:
+        for _xb_abs_idx, _xb in enumerate(batch_rows[1:], start=1):
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
             _xb_active_trays = _get_dmp_active_trays(_xb_id) or list(range(1, 10))
@@ -7450,9 +7500,13 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # Per-batch canonical split: each extra batch's bz is its own
             # master record and dictates the multi-line structure for that
             # batch's tray assignment.  Remark (bz) order is the sole
-            # source of truth for slot assignment — scdw is not used.
+            # source of truth for slot assignment.
+            _xb_batch_line_idx: Optional[int] = (
+                _xb_abs_idx if _per_batch_mode and _xb_abs_idx < _n_canonical else None
+            )
             _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
                 _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays,
+                batch_line_idx=_xb_batch_line_idx,
             )
 
             # Resolve made date (para_singl.scrq) for the extra batch.

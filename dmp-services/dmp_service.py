@@ -536,6 +536,7 @@ def _dm_refresh_ls_cache(cfg: DmModule, force: bool = False) -> None:
         cfg.ls_cache_path = cache_final
         cfg.ls_source_mtime = current_mtime
         logger.info("%s_cache: refreshed local copy from %s (mtime=%s)", cfg.name, ls_path, current_mtime)
+        cfg.ls_cache_ready.set()
 
         # Invalidate all in-memory caches for this module
         cfg.clear_all_caches()
@@ -3753,7 +3754,6 @@ def get_dm2000_archives(request: Request,
 @app.get("/dm3000/dis-condition-options")
 @app.get("/dm2000/dis-condition-options")
 def get_dm2000_dis_condition_options(request: Request):
-    cfg = _resolve_dm_module(request)
     """Return unique Dis-condition display strings derived from the archive cache.
 
     The strings are computed with the same formula used by the frontend renderer

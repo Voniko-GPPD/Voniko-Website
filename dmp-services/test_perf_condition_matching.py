@@ -421,13 +421,60 @@ def test_dmp_tray_assignment_single_line_accepts_any_active_count() -> None:
 
 
 def test_dmp_tray_assignment_single_group_unchanged() -> None:
-    """_sort_eff_groups_for_tray_assignment returns a single-group list unchanged."""
+    """For a single-group entry the helper returns the active-tray list as-is.
+
+    The legacy ``_DMP_TRAY_ASSIGNMENT`` constant has been removed: there is
+    no hardcoded "all 9 trays" fallback any more.  The single-line slot is
+    just whatever active trays the caller supplies.
+    """
     eff_groups = m._sort_eff_groups_for_tray_assignment(
         [{"loai": "UD+", "chuyen": "501", "trays": [], "_orig_idx": 0}]
     )
     assert len(eff_groups) == 1
-    auto_trays = m._DMP_TRAY_ASSIGNMENT.get(1, [list(range(1, 10))])
-    assert auto_trays == [list(range(1, 10))], "single-group fallback must cover all 9 trays"
+    # Single line, all 9 physical trays measured: every tray is assigned to
+    # the single group.
+    assert m._split_active_trays_for_group_count(
+        1, list(range(1, 10))
+    ) == [list(range(1, 10))]
+
+
+def test_dmp_tray_assignment_two_lines_tray1_damaged() -> None:
+    """Spec example: tray 1 damaged → line 1 = [2,3,4,5], line 2 = [6,7,8,9]."""
+    assert m._split_active_trays_for_group_count(
+        2, [2, 3, 4, 5, 6, 7, 8, 9]
+    ) == [[2, 3, 4, 5], [6, 7, 8, 9]]
+
+
+def test_dmp_tray_assignment_two_lines_tray2_damaged() -> None:
+    """Spec example: tray 2 damaged → line 1 = [1,3,4,5], line 2 = [6,7,8,9]."""
+    assert m._split_active_trays_for_group_count(
+        2, [1, 3, 4, 5, 6, 7, 8, 9]
+    ) == [[1, 3, 4, 5], [6, 7, 8, 9]]
+
+
+def test_dmp_tray_assignment_two_lines_tray5_damaged() -> None:
+    """Spec example: tray 5 damaged → line 1 = [1,2,3,4], line 2 = [6,7,8,9]."""
+    assert m._split_active_trays_for_group_count(
+        2, [1, 2, 3, 4, 6, 7, 8, 9]
+    ) == [[1, 2, 3, 4], [6, 7, 8, 9]]
+
+
+def test_dmp_tray_assignment_no_hardcoded_fallback_when_empty() -> None:
+    """No active trays → empty slots, never the legacy 1-4 / 5-8 fallback.
+
+    The rewrite removed the ``_DMP_TRAY_ASSIGNMENT`` constant because the
+    operator-facing requirement forbids any hardcoded tray index.  When the
+    caller has no valid measurement data the helper returns empty groups so
+    the report-rendering loop skips the entry instead of fabricating data on
+    unmeasured trays.
+    """
+    assert m._split_active_trays_for_group_count(2, []) == [[], []]
+    assert m._split_active_trays_for_group_count(1, []) == [[]]
+    assert m._split_active_trays_for_group_count(3, []) == [[], [], []]
+    assert not hasattr(m, "_DMP_TRAY_ASSIGNMENT"), (
+        "Legacy _DMP_TRAY_ASSIGNMENT must be removed — it embedded the "
+        "fixed 1-4/5-8 grouping the rewrite is meant to eliminate."
+    )
 
 
 def test_dmp_tray_assignment_explicit_trays_bypassed() -> None:

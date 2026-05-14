@@ -5799,15 +5799,13 @@ def _resolve_dmp_perf_template_path(template_name: str) -> str:
     return str(result)
 
 
-# Fallback tray assignment by group count.  When the active tray list for a
-# batch/archive is known, use _split_active_trays_for_group_count instead so
-# empty/broken trays are skipped before assigning the first 4 trays to line 1
-# and the next 4 trays to line 2.
-_DMP_TRAY_ASSIGNMENT: dict[int, list[list[int]]] = {
-    1: [list(range(1, 10))],              # 9 trays
-    2: [list(range(1, 5)), list(range(5, 9))],    # fallback: first 4 + next 4
-    3: [list(range(1, 4)), list(range(4, 7)), list(range(7, 10))],  # 3 + 3 + 3
-}
+# NOTE: tray assignment is *purely* derived at runtime from the list of trays
+# that actually contain valid measurement data — no hardcoded `1-4` / `5-8` /
+# `6-9` mappings are allowed anywhere in this module.  Operators may move a
+# battery to any spare tray when one is damaged, so the physical tray index a
+# group lands on is not knowable in advance.  The single source of truth is
+# :func:`_split_active_trays_for_group_count`, which slices the sequentially
+# filtered active-tray list into per-line slots.
 
 # Standard sheet ordering for all reports: LR6 → LR03 → LR61 → 9V → 6LR61 → others
 _SHEET_MODEL_ORDER: list[str] = ["LR6", "LR03", "LR61", "9V", "6LR61"]
@@ -5863,32 +5861,58 @@ def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
 
 
 def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) -> list[list[int]]:
-    """Split active trays for positional production-line assignment.
+    """Split valid-data trays into N production-line slots — pure sequential.
 
-    The split is purely sequential over the trays that actually contain valid
-    data (broken or empty trays must be filtered out by the caller before
-    invoking this helper).  This removes any dependency on fixed tray
-    positions so operators can freely move a battery to a spare tray when
-    the originally-assigned one is damaged.
+    The DMP machine has up to ``MAX_BATTERY_NUMBER`` (= 9) physical tray
+    positions.  Operators may freely move a battery to any spare tray when
+    one is damaged, so the physical tray index a production line lands on is
+    not knowable in advance.  The only invariant the report can rely on is:
 
-    Rules (matches the operator-facing requirement):
+        scan tray 1 → tray ``MAX_BATTERY_NUMBER``,
+        keep only trays that actually contain valid measurement data,
+        then assign those valid trays to production lines in order.
 
-      • 1 group  → all active trays (single-line testing accepts any count).
-      • 2 groups → first 4 active trays for line 1, next 4 active trays for
-        line 2.  Any extra trays beyond the 8th are ignored automatically
-        (e.g. when all 9 trays are populated, tray 9 is dropped so each line
-        still gets exactly 4 trays).
-      • 3 groups → 3 + 3 + 3 over the active trays.
+    Caller contract
+    ---------------
+    ``active_trays`` MUST already contain only the trays whose measurement
+    data is valid (this module gets that list from
+    :func:`_get_dmp_active_trays`, which checks each ``para_singl`` row for a
+    non-empty ``cdmc`` value).  Anything else — fixed tray ranges, the old
+    ``1-4`` / ``5-8`` / ``6-9`` fallbacks, "always skip tray 5", "always skip
+    tray 9" — is forbidden and has been removed from this module.
+
+    Slot rules (driven by ``n_groups``, the number of production lines parsed
+    from the bz remark):
+
+      * 1 group  → all valid trays go to that single line.
+      * 2 groups → first 4 valid trays to line 1, next 4 valid trays to
+        line 2.  Any 9th valid tray is dropped automatically because each
+        line only has room for 4 batteries.
+      * 3 groups → first 3, next 3, next 3 over the valid trays.
+      * N > 3 groups → ``len(active) // N`` valid trays per line in order.
+
+    When fewer valid trays exist than a line needs the trailing line(s)
+    receive a shorter list (or an empty list).  Returning empty rather than
+    falling back to a hardcoded tray range is intentional: the caller skips
+    rendering with ``if not trays: continue`` instead of fabricating data on
+    an unmeasured tray.
 
     Examples (n_groups == 2):
 
-      • active = [1, 2, 4, 5, 6, 7, 8, 9]   (tray 3 broken, battery moved)
-        → [[1, 2, 4, 5], [6, 7, 8, 9]]
-      • active = [1, 2, 3, 4, 5, 6, 8, 9]   (tray 7 broken, battery moved)
+      * active = [1, 2, 3, 4, 5, 6, 7, 8, 9]    (all 9 valid)
+        → [[1, 2, 3, 4], [5, 6, 7, 8]]          (tray 9 ignored)
+      * active = [2, 3, 4, 5, 6, 7, 8, 9]       (tray 1 damaged)
+        → [[2, 3, 4, 5], [6, 7, 8, 9]]
+      * active = [1, 3, 4, 5, 6, 7, 8, 9]       (tray 2 damaged)
+        → [[1, 3, 4, 5], [6, 7, 8, 9]]
+      * active = [1, 2, 3, 4, 6, 7, 8, 9]       (tray 5 damaged)
+        → [[1, 2, 3, 4], [6, 7, 8, 9]]
+      * active = [1, 2, 3, 4, 5, 6, 8, 9]       (tray 7 damaged)
         → [[1, 2, 3, 4], [5, 6, 8, 9]]
-      • active = [1, 2, 3, 4, 5, 6, 7, 8, 9] (all 9 valid)
-        → [[1, 2, 3, 4], [5, 6, 7, 8]]      (tray 9 ignored)
     """
+    if n_groups <= 0:
+        return []
+
     active = sorted(
         {
             t
@@ -5896,15 +5920,27 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
             if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
         }
     )
-    if not active:
-        return _DMP_TRAY_ASSIGNMENT.get(n_groups, [list(range(1, 10))])
+
     if n_groups == 1:
+        # Single-line mode: deliver whatever valid trays exist (no per-line
+        # cap — operators choose how many batteries to load).
         return [active]
+
+    # Multi-line mode: caller has parsed the bz remark and knows there are
+    # ``n_groups`` production lines.  Each line gets ``per_line`` consecutive
+    # valid trays, in scanning order.
     if n_groups == 2:
-        return [active[:4], active[4:8]]
-    if n_groups == 3:
-        return [active[:3], active[3:6], active[6:9]]
-    return _DMP_TRAY_ASSIGNMENT.get(n_groups, [active])
+        per_line = 4
+    elif n_groups == 3:
+        per_line = 3
+    else:
+        # Generic N-line case: distribute valid trays evenly.  Guarantee at
+        # least 1 tray per line so a degenerate ``len(active) < n_groups``
+        # configuration still produces ``n_groups`` slots (possibly empty
+        # for the trailing lines).
+        per_line = max(1, len(active) // n_groups)
+
+    return [active[i * per_line : (i + 1) * per_line] for i in range(n_groups)]
 
 
 def _get_dmp_active_trays(batch_id: str) -> list[int]:
@@ -7385,8 +7421,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
             for i, grp in enumerate(entry.groups)
         ]
         n_groups = len(_dmp_eff_groups)
+        # Active trays MUST come from para_singl rows that actually contain
+        # valid measurement data.  When the batch lookup returned nothing
+        # there is no measurement to report, so the active list stays empty
+        # and downstream slot assignment yields empty groups (the loop below
+        # then skips rendering via ``if not trays: continue``).  Falling back
+        # to "all 9 trays" here would resurrect the legacy fixed-tray
+        # behaviour that the rewrite is meant to eliminate.
         _dmp_active_trays = (
-            _get_dmp_active_trays(actual_batch_id) if batch_rows else list(range(1, 10))
+            _get_dmp_active_trays(actual_batch_id) if batch_rows else []
         )
         # Canonical positional split: the matched batch's bz is the master
         # record and dictates the multi-line structure.  Remark (bz) order
@@ -7482,7 +7525,12 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _dmp_eff_groups = [{"loai": _synth_loai, "chuyen": "", "trays": [], "_orig_idx": None}]
             n_groups = 1
             _remark_chuyen_to_pos = {}
-            auto_trays = [list(range(1, 10))]
+            # Single-line synth group: use ONLY the trays that actually
+            # contain valid measurement data — never default to "all 9
+            # trays".  When the batch has no measured trays the group falls
+            # through ``if not trays: continue`` below and the entry is
+            # skipped cleanly.
+            auto_trays = _split_active_trays_for_group_count(1, _dmp_active_trays)
 
         for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
             _orig_idx = _dmp_grp.get("_orig_idx")
@@ -7492,8 +7540,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
                 )
             else:
-                # Synthetic group for no-chuyen model with no configured groups
-                trays = auto_trays[g_idx] if g_idx < len(auto_trays) else list(range(1, 10))
+                # Synthetic group for no-chuyen model with no configured
+                # groups: trays come exclusively from the active-tray slot
+                # built above.  No hardcoded fallback.
+                trays = auto_trays[g_idx] if g_idx < len(auto_trays) else []
             if not trays:
                 continue
 
@@ -7539,11 +7589,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
             # Re-use pre-fetched trays when in per-batch mode (avoids a redundant
             # DB call; trays were already fetched during _pb_all_active setup above).
+            # Active trays come straight from the active-tray filter for
+            # this extra batch.  When the batch has no measured trays the
+            # downstream split returns empty slots and the per-group loop
+            # below skips rendering — never fall back to "all 9 trays".
             _xb_active_trays = (
                 _pb_all_active.get(_xb_id)
                 if _per_batch_mode and _xb_id in _pb_all_active
                 else None
-            ) or _get_dmp_active_trays(_xb_id) or list(range(1, 10))
+            ) or _get_dmp_active_trays(_xb_id) or []
             _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
             # Tray-slot-based per-batch assignment: find which canonical slot
             # this batch's active trays exclusively belong to.  Uses the same
@@ -7623,7 +7677,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                         orig_grp, _dmp_grp, g_idx, _xb_auto_trays, _xb_chuyen_to_pos
                     )
                 else:
-                    _xb_trays = _xb_auto_trays[g_idx] if g_idx < len(_xb_auto_trays) else list(range(1, 10))
+                    _xb_trays = _xb_auto_trays[g_idx] if g_idx < len(_xb_auto_trays) else []
                 if not _xb_trays:
                     continue
                 _xb_perf = _dmp_compute_group_perf(_xb_id, _xb_trays, _xb_ep_v)

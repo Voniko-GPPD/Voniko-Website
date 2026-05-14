@@ -536,6 +536,7 @@ def _dm_refresh_ls_cache(cfg: DmModule, force: bool = False) -> None:
         cfg.ls_cache_path = cache_final
         cfg.ls_source_mtime = current_mtime
         logger.info("%s_cache: refreshed local copy from %s (mtime=%s)", cfg.name, ls_path, current_mtime)
+        cfg.ls_cache_ready.set()
 
         # Invalidate all in-memory caches for this module
         cfg.clear_all_caches()

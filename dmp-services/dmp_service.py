@@ -3753,7 +3753,6 @@ def get_dm2000_archives(request: Request,
 @app.get("/dm3000/dis-condition-options")
 @app.get("/dm2000/dis-condition-options")
 def get_dm2000_dis_condition_options(request: Request):
-    cfg = _resolve_dm_module(request)
     """Return unique Dis-condition display strings derived from the archive cache.
 
     The strings are computed with the same formula used by the frontend renderer

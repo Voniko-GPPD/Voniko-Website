@@ -47,7 +47,11 @@ function _loadFromDisk() {
         // Entries without a type (old format) are skipped so they don't
         // pollute the wrong station list — they will re-register on next heartbeat.
         if (!s.type) continue;
-        registry.set(s.id, s);
+        // Reset lastSeen to 0 so restored entries start as "offline" and only
+        // become "online" once a fresh heartbeat is received from the Python
+        // service.  Without this, a backend restart while the DMP service is
+        // down would show a stale "online" badge for up to 90 seconds.
+        registry.set(s.id, { ...s, lastSeen: 0 });
       }
     }
     logger.info('Station registry loaded from disk', { count: registry.size });

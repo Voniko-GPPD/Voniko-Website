@@ -29,7 +29,7 @@ export default function DM2000FilterPanel({ stationId, selectedArchname, onSelec
     let active = true;
     api.fetchDisConditionOptions(stationId)
       .then((opts) => { if (active) setDisConditionOptions(opts); })
-      .catch(() => {});
+      .catch((err) => { console.warn('fetchDisConditionOptions failed:', err?.message || err); });
     return () => { active = false; };
   }, [stationId]);
 

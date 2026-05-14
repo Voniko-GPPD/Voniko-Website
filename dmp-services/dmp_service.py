@@ -61,11 +61,11 @@ DM3000_DATA_DIR: str = os.environ.get("DM3000_DATA_DIR", r"D:\DM3000\dmdatabase"
 DM3000_TEMPLATES_DIR: str = os.environ.get("DM3000_TEMPLATES_DIR", "./dm3000_templates")
 DM3000_PERF_TEMPLATES_DIR: str = os.environ.get(
     "DM3000_PERF_TEMPLATES_DIR",
-    # By default DM3000 reuses the DM2000 perf-report templates because the
-    # report layout is identical apart from the unit label.  Set
-    # DM3000_PERF_TEMPLATES_DIR explicitly to point at a separate directory
-    # if/when DM3000-specific templates are introduced.
-    os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates"),
+    # Default per the task spec: ``./dm3000_perf_templates``.  The resolver
+    # _resolve_dm_perf_template_path falls back to the DM2000 perf-templates
+    # directory when a requested workbook is missing here, so DM3000 can
+    # reuse DM2000 templates until module-specific layouts are introduced.
+    "./dm3000_perf_templates",
 )
 
 # Local cache directories: persistent copies of dmdata_ls.mdb / DMPDATA.mdb
@@ -252,6 +252,7 @@ DM3000_MOD = DmModule(
     company_name=DM3000_COMPANY_NAME,
     unit_suffix="mA",
     unit_label="mA",
+    main_filename="DM3000.mdb",
 )
 DM_MODULES: dict[str, DmModule] = {"dm2000": DM2000_MOD, "dm3000": DM3000_MOD}
 
@@ -3697,7 +3698,7 @@ def get_dm2000_archives(request: Request,
         }
         # Build database file path from archname and data directory
         archname_val = item.get("archname") or ""
-        item["database"] = str(Path(DM2000_DATA_DIR) / f"{archname_val}.mdb") if archname_val else None
+        item["database"] = str(Path(cfg.data_dir) / f"{archname_val}.mdb") if archname_val else None
         # Pre-compute the human-readable Dis-condition display string (same formula
         # as the frontend renderer) so keyword and dis_condition_filter can match it.
         item["_dis_condition_display"] = _build_dis_condition_display(cfg, item)
@@ -4419,7 +4420,7 @@ def get_dm2000_templates():
 @app.get("/dm2000/perf-templates")
 def get_dm2000_perf_templates(request: Request):
     cfg = _resolve_dm_module(request)
-    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
     if not templates_dir.exists():
         return {"templates": []}
     templates = sorted([
@@ -4445,7 +4446,7 @@ async def upload_dm2000_perf_template(request: Request, file: UploadFile = File(
     if not sanitized_stem:
         sanitized_stem = "template"
     safe_name = sanitized_stem + ".xlsx"
-    templates_dir = Path(DM2000_PERF_TEMPLATES_DIR).resolve()
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
     templates_dir.mkdir(parents=True, exist_ok=True)
     # Re-join using only the validated basename to prevent any path traversal
     dest = templates_dir / safe_name

@@ -6520,6 +6520,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
         return _parse_access_date(v) or ""
 
     groups: dict[str, dict] = {}
+    # All DM2000-archive reads in this function (both the dm2000_archname direct
+    # path and the DMP→DM2000 fallback path) always target the DM2000 module.
+    cfg = DM2000_MOD
 
     for entry in payload.entries:
         if (

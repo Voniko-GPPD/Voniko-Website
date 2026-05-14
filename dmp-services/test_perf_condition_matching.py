@@ -917,15 +917,32 @@ def _install_dmp_batch_fakes(
     exact_batches: list[dict] | None = None,
     like_batches: list[dict] | None = None,
     active_trays: list[int] | None = None,
+    active_trays_by_batch: dict[str, list[int]] | None = None,
+    scdw_by_batch: dict[str, str] | None = None,
 ) -> dict:
     """Install fake _read_dmpdata + _dmp_compute_group_perf for batch tests.
 
     Returns a captured dict that records every (batch_id, trays) call to
     _dmp_compute_group_perf so the test can assert which trays each
     production-line group was actually computed over.
+
+    *active_trays_by_batch* lets a test give each batch its own active-tray
+    list (required when one bz LIKE match returns several batches whose
+    physical tray populations differ — e.g. one batch with trays 1-4
+    populated and a sibling batch with trays 6-9 populated).  Falls back to
+    *active_trays* (default 1..9) for batch ids not present in the map.
+
+    *scdw_by_batch* attaches a per-batch ``para_singl.scdw`` value (the
+    production-line tag, e.g. ``"VN501"``).  Used by the perf-report writer
+    to route data from single-line batches to the correct line group when
+    they share a multi-line ``bz`` remark with a sibling batch.
     """
     if active_trays is None:
         active_trays = list(range(1, 10))
+    if active_trays_by_batch is None:
+        active_trays_by_batch = {}
+    if scdw_by_batch is None:
+        scdw_by_batch = {}
     captured: dict[tuple[str, str], list[int]] = {}
 
     def fake_read_dmpdata(sql, params=()):
@@ -935,9 +952,14 @@ def _install_dmp_batch_fakes(
             return list(like_batches or [])
         if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
             sid = str(params[0]) if params else ""
+            trays = active_trays_by_batch.get(sid, active_trays)
             return [
-                {"baty": i, "cdmc": f"sub_{sid}.mdb"} for i in active_trays
+                {"baty": i, "cdmc": f"sub_{sid}.mdb"} for i in trays
             ]
+        if "SELECT scdw FROM para_singl" in sql:
+            sid = str(params[0]) if params else ""
+            scdw = scdw_by_batch.get(sid, "")
+            return [{"scdw": scdw}] if scdw else []
         if "SELECT scrq FROM para_singl" in sql:
             return []
         return []
@@ -1252,4 +1274,276 @@ def test_dmp_canonical_split_explicit_trays_bypass_canonical_logic(
     trays = [v for (bid, _), v in captured.items() if bid == "BEXP"]
     assert trays == [[2, 4, 6]], (
         f"Explicit trays must be preserved verbatim; got {trays}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Per-batch scdw routing
+# --------------------------------------------------------------------------- #
+# When a single bz LIKE search returns multiple para_pub batches and each
+# carries data for only ONE of the lines listed in bz (e.g. the DMP machine
+# creates one batch per physical production line, both tagged with the
+# composite remark "LR6 UD501 UD502 15"), the per-batch positional split
+# must NOT route the batch's data sequentially to both lines based on bz
+# token order — the actual production line is encoded in para_singl.scdw
+# ("VN501", "VN502", …).  Without this routing, swapping the bz token order
+# (e.g. "UD501 UD502" → "UD502 UD501") visibly swapped the resulting
+# values, making the assignment dependent on remark order rather than the
+# real production-line mapping.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "scdw,expected",
+    [
+        ("VN501", ["501"]),
+        ("VN 502", ["502"]),
+        ("VN501-502", ["501", "502"]),
+        ("VN 502-501", ["502", "501"]),
+        ("VN501-502-503", ["501", "502", "503"]),
+        ("503-504", ["503", "504"]),
+        ("VN", []),
+        ("", []),
+        (None, []),
+        # Strip false-positive shorter numerics like a "15" suffix that
+        # might accidentally appear in scdw — only ≥3-digit tokens count.
+        ("VN501 15", ["501"]),
+    ],
+)
+def test_parse_scdw_chuyens(scdw, expected) -> None:
+    assert m._parse_scdw_chuyens(scdw) == expected
+
+
+def test_dmp_scdw_routes_two_single_line_batches_to_correct_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-reported bug.
+
+    Two para_pub batches share bz="LR6 UD501 UD502 15" — one tagged
+    scdw="VN501" (data for line 501 only), the other scdw="VN502"
+    (data for line 502 only).  Each batch's active trays must be routed
+    entirely to ITS production line (not split positionally across both
+    lines as the previous logic did, which mis-labelled half of every
+    batch and made the result depend on bz token order).
+    """
+    batch_a = _make_dmp_batch(batch_id="BA", bz="LR6 UD501 UD502 15")
+    batch_b = _make_dmp_batch(batch_id="BB", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b],
+        like_batches=[],
+        active_trays_by_batch={
+            "BA": [1, 2, 3, 4],   # only physical trays 1-4 populated
+            "BB": [6, 7, 8, 9],   # only physical trays 6-9 populated
+        },
+        scdw_by_batch={
+            "BA": "VN501",        # batch A is line 501 only
+            "BB": "VN502",        # batch B is line 502 only
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # Batch A (scdw=VN501): all of its active trays must go to chuyen 501,
+    # nothing for chuyen 502 (otherwise 501 data would be mis-labelled 502).
+    a_trays = sorted(v for (bid, _), v in captured.items() if bid == "BA")
+    assert a_trays == [[1, 2, 3, 4]], (
+        f"batch A (scdw=VN501) must route all 4 active trays to chuyen 501 "
+        f"and nothing to chuyen 502; got {a_trays}"
+    )
+
+    # Batch B (scdw=VN502): symmetric.
+    b_trays = sorted(v for (bid, _), v in captured.items() if bid == "BB")
+    assert b_trays == [[6, 7, 8, 9]], (
+        f"batch B (scdw=VN502) must route all 4 active trays to chuyen 502 "
+        f"and nothing to chuyen 501; got {b_trays}"
+    )
+
+
+def test_dmp_scdw_routing_independent_of_bz_token_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing the bz token order from "UD501 UD502" to "UD502 UD501"
+    must NOT swap the resulting line-to-data mapping.  With per-batch
+    scdw routing, each batch's data is determined by its scdw tag, not by
+    where its line happens to appear in the (operator-edited) bz string.
+    """
+    batch_a = _make_dmp_batch(batch_id="BA", bz="LR6 UD502 UD501 15")
+    batch_b = _make_dmp_batch(batch_id="BB", bz="LR6 UD502 UD501 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b],
+        like_batches=[],
+        active_trays_by_batch={
+            "BA": [1, 2, 3, 4],
+            "BB": [6, 7, 8, 9],
+        },
+        scdw_by_batch={"BA": "VN501", "BB": "VN502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                ],
+                # raw_remark mirrors the reversed bz (frontend parses
+                # groups in remark order).
+                raw_remark="LR6 UD502 UD501 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # Same expectation as the non-reversed case: line 501 owns batch A's
+    # trays, line 502 owns batch B's trays.
+    a_trays = sorted(v for (bid, _), v in captured.items() if bid == "BA")
+    b_trays = sorted(v for (bid, _), v in captured.items() if bid == "BB")
+    assert a_trays == [[1, 2, 3, 4]], (
+        f"reversed bz must NOT swap routing — batch A (scdw=VN501) still "
+        f"owns trays 1-4 for chuyen 501; got {a_trays}"
+    )
+    assert b_trays == [[6, 7, 8, 9]], (
+        f"reversed bz must NOT swap routing — batch B (scdw=VN502) still "
+        f"owns trays 6-9 for chuyen 502; got {b_trays}"
+    )
+
+
+def test_dmp_scdw_single_line_batch_partial_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the entry has only one group (e.g. just chuyen=502) and the
+    batch is tagged scdw="VN502", the batch's active trays must all go to
+    the entry's group regardless of the bz containing extra lines.
+    Conversely, a batch tagged scdw="VN501" must contribute nothing to a
+    chuyen-502 entry (sentinel routing → empty trays → skipped).
+    """
+    batch_other = _make_dmp_batch(batch_id="BOTHER", bz="LR6 UD501 UD502 15")
+    batch_target = _make_dmp_batch(batch_id="BTARGET", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_other, batch_target],
+        like_batches=[],
+        active_trays_by_batch={
+            "BOTHER": [1, 2, 3, 4],
+            "BTARGET": [6, 7, 8, 9],
+        },
+        scdw_by_batch={"BOTHER": "VN501", "BTARGET": "VN502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="502", trays=[])],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # The "wrong-line" batch (scdw=VN501) must not contribute trays for the
+    # chuyen-502 entry.  No captured call for BOTHER means the routing
+    # correctly returned [] and the per-batch loop short-circuited via
+    # ``if not trays: continue``.
+    assert all(bid != "BOTHER" for (bid, _) in captured), (
+        f"chuyen-502 entry must receive NO trays from batch BOTHER "
+        f"(scdw=VN501); got captured calls {list(captured)}"
+    )
+    # The matching batch (scdw=VN502) must contribute all its active trays.
+    target_trays = [v for (bid, _), v in captured.items() if bid == "BTARGET"]
+    assert target_trays == [[6, 7, 8, 9]], (
+        f"chuyen-502 entry must use ALL of batch BTARGET's active trays "
+        f"(scdw=VN502 narrows the routing); got {target_trays}"
+    )
+
+
+def test_dmp_scdw_equal_to_bz_keeps_positional_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When scdw covers exactly the same lines as the bz canonical chuyens
+    (e.g. scdw="VN501-502" with bz="LR6 UD501 UD502"), the batch genuinely
+    contains data for both lines — the existing positional 4+4 split must
+    be used unchanged so this fix does not regress the well-behaved case.
+    """
+    batch = _make_dmp_batch(batch_id="BFULL", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],
+        like_batches=[batch],
+        scdw_by_batch={"BFULL": "VN501-502"},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="501", trays=[])],
+                raw_remark="LR6 UD501",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays = [v for (bid, _), v in captured.items() if bid == "BFULL"]
+    # scdw equals the canonical chuyens → no narrowing → preserve existing
+    # behaviour: chuyen 501 still gets slot 0 of the 2-line positional
+    # split (trays 1-4) just as before this fix.
+    assert trays == [[1, 2, 3, 4]], (
+        f"scdw equal to bz must preserve positional split; got {trays}"
+    )
+
+
+def test_dmp_scdw_unparseable_keeps_positional_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When scdw cannot be parsed (empty/garbage), fall back to the
+    existing canonical positional split — the fix is strictly additive.
+    """
+    batch = _make_dmp_batch(batch_id="BNOSCDW", bz="LR6 UD501 UD502")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],
+        like_batches=[batch],
+        # No scdw entry → fake returns no rows → _parse_scdw_chuyens([]) → []
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[m.DmpPerfGroup(loai="UD", chuyen="502", trays=[])],
+                raw_remark="LR6 UD502",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+    trays = [v for (bid, _), v in captured.items() if bid == "BNOSCDW"]
+    # Without scdw narrowing, chuyen 502 takes slot 1 (trays 5-8) of the
+    # 2-line positional split derived from bz — same as Request #246.
+    assert trays == [[5, 6, 7, 8]], (
+        f"missing scdw must fall back to positional split; got {trays}"
     )

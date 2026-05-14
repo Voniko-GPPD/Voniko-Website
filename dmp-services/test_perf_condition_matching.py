@@ -1582,3 +1582,79 @@ def test_dmp_single_full_batch_ascending_bz_unaffected(
         f"ascending bz: 502 must keep slot 1 (3 trays → avg_count=3); "
         f"got avg_count={c502}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Entry-order g_idx fallback (Request #251 audit)
+# --------------------------------------------------------------------------- #
+# When the bz cannot be parsed (or canonical is empty), _resolve_dmp_tray_list
+# falls back to auto_trays[g_idx].  The DMP path must NOT sort eff_groups by
+# chuyen number before this fallback runs, because "lower chuyen → lower tray
+# slot" is the wrong assumption.  The entry's group order (which mirrors the bz
+# remark order since the frontend parses left-to-right) is the correct fallback.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_entry_order_used_as_gidx_fallback_when_bz_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the batch bz contains no parseable UD/HP group tokens and the
+    entry remark also parses to nothing, ``chuyen_to_pos`` is empty and
+    _resolve_dmp_tray_list falls back to ``auto_trays[g_idx]``.  The DMP
+    path must preserve the entry's group order (bz order) so g_idx=0 maps
+    to the first group in the entry — NOT to the lowest-numbered chuyen.
+
+    Here the entry lists 502 before 501 (matching the physical bz order).
+    With 7 active trays (4+3 split), group 0 (chuyen 502) must get slot 0
+    (4 trays → avg_count=4) and group 1 (chuyen 501) must get slot 1
+    (3 trays → avg_count=3).  If the DMP path were still sorting by chuyen
+    number, 501 would end up in slot 0 and get 4 trays — the wrong result.
+    """
+    # bz is a number-only string that _parse_bz_groups cannot parse into groups
+    # (no UD/UDP/HP prefix), forcing chuyen_to_pos to be empty.
+    batch = _make_dmp_batch(batch_id="BUNPARSEABLE", bz="LR6 502 501")
+    _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch],
+        like_batches=[],
+        active_trays_by_batch={"BUNPARSEABLE": [1, 2, 3, 4, 6, 7, 8]},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    # Entry order: 502 first, then 501 — mirrors bz physical order
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                ],
+                raw_remark="LR6 502 501",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    def _avg_count(sheet: str) -> int:
+        for row_data in groups.get(sheet, {}).values():
+            for perf in row_data.values():
+                if isinstance(perf, dict) and "avg_count" in perf:
+                    return perf["avg_count"]
+        return -1
+
+    # Entry group 0 = chuyen 502 → auto_trays[0] = [1,2,3,4] (4 trays)
+    # Entry group 1 = chuyen 501 → auto_trays[1] = [6,7,8]   (3 trays)
+    assert "LR6 502" in groups, "LR6 502 sheet must be present"
+    assert "LR6 501" in groups, "LR6 501 sheet must be present"
+    c502 = _avg_count("LR6 502")
+    c501 = _avg_count("LR6 501")
+    assert c502 == 4, (
+        f"entry-order fallback: 502 (g_idx=0) must get slot 0 (4 trays); "
+        f"got avg_count={c502}"
+    )
+    assert c501 == 3, (
+        f"entry-order fallback: 501 (g_idx=1) must get slot 1 (3 trays); "
+        f"got avg_count={c501}"
+    )

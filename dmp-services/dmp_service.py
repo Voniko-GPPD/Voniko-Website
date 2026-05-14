@@ -5696,10 +5696,11 @@ def _get_dmp_batch_scdw(batch_id: str) -> str:
     against the production database: zero sids have mixed scdw values).  It
     encodes which production line(s) the batch's batteries actually came
     from — e.g. ``"VN501"`` (line 501 only), ``"VN501-502"`` (a pair),
-    ``"503-504"``.  This per-batch tag is the authoritative source of which
-    chuyen a batch's data belongs to, used by the perf-report writer to
-    avoid mis-routing single-line batches that happen to share a multi-line
-    ``bz`` remark with a sibling batch from a different line.
+    ``"503-504"``.
+
+    Note: this function is retained as a utility but is no longer called by the
+    performance-report writer.  The ``bz`` remark field is the sole source of
+    truth for tray slot assignment; ``scdw`` is not used for routing.
     """
     if not batch_id:
         return ""
@@ -5738,14 +5739,6 @@ def _parse_scdw_chuyens(scdw: Optional[str]) -> list[str]:
         return []
     return re.findall(r"\d{3,}", str(scdw))
 
-
-# Sentinel used in the ``chuyen_to_pos`` mapping to indicate that the current
-# batch does not contain data for a given canonical chuyen (i.e. the entry's
-# group asks for line N but the batch's ``scdw`` does not include N).
-# ``_resolve_dmp_tray_list`` returns an empty tray list when it sees this
-# sentinel so the caller's ``if not trays: continue`` skip kicks in and no
-# data is incorrectly attributed across lines.
-_DMP_CHUYEN_SLOT_ABSENT = -1
 
 
 def _resolve_dmp_canonical_split(
@@ -5880,27 +5873,21 @@ def _resolve_dmp_tray_list(
 
     Priority:
     1. explicit ``orig_group.trays`` (user-configured in the UI)
-    2. positional slot derived from ``remark_chuyen_to_pos`` — active when the
-       batch remark has more production-line groups than ``entry.groups`` (Bug 1
-       fix: composite remark filtered to a single chuyen uses the full remark's
-       group count so the chuyen maps to the correct slot, e.g. 501 → trays 1-4),
-       or when the per-batch ``scdw`` tag differs from the canonical chuyens
-       (narrows the batch to the ``scdw ∩ canonical`` lines, or — when the
-       intersection is empty — excludes the batch entirely).  A slot value of
-       ``_DMP_CHUYEN_SLOT_ABSENT`` (sentinel set by
-       :func:`_resolve_dmp_canonical_split` when the batch's scdw does not
-       include this group's chuyen) returns ``[]`` so the caller's
-       ``if not trays: continue`` correctly skips this batch for this line,
-       preventing cross-line data mis-routing.
-    3. plain ``auto_trays[g_idx]`` fallback
+    2. positional slot derived from ``remark_chuyen_to_pos`` — maps each
+       chuyen to its physical tray slot based on the bz remark's left-to-right
+       order (the sole source of truth for slot assignment per requirement).
+       For example, bz="LR6 UD502 UD501" → chuyen_to_pos={"502":0,"501":1} so
+       chuyen 502 gets slot 0 (trays 1-4) and chuyen 501 gets slot 1 (trays 5-8).
+    3. plain ``auto_trays[g_idx]`` fallback (used when ``remark_chuyen_to_pos``
+       is empty, e.g. when the bz cannot be parsed; ``g_idx`` reflects the
+       entry's group order which mirrors the bz order since the frontend parses
+       the remark left-to-right)
     """
     if getattr(orig_group, "trays", None):
         return orig_group.trays
     if remark_chuyen_to_pos:
         dg_chuyen = str(dmp_grp.get("chuyen") or "").strip()
         dg_pos = remark_chuyen_to_pos.get(dg_chuyen, g_idx)
-        if dg_pos == _DMP_CHUYEN_SLOT_ABSENT:
-            return []
         return auto_trays[dg_pos] if dg_pos < len(auto_trays) else []
     return auto_trays[g_idx] if g_idx < len(auto_trays) else []
 
@@ -7357,10 +7344,15 @@ def _compute_dmp_perf_groups(  # noqa: C901
             _matched_bz, _clean_remark
         )
 
-        # Build a sortable eff_groups list for the DMP path and sort by
-        # production-line (chuyen) number so that the positional tray
-        # assignment always maps the lower-numbered line to the lower physical
-        # tray slots — regardless of battery grade or entry order.
+        # Build eff_groups in entry order (which mirrors the bz remark order, since
+        # the frontend parses the remark left-to-right to create groups).  The bz
+        # remark order is the sole source of truth for physical tray slot assignment.
+        # Do NOT sort by chuyen number here: the old assumption "lower chuyen →
+        # lower slot" is incorrect — the operator controls which line goes into which
+        # physical slot by writing the remark in the desired order.
+        # _resolve_dmp_canonical_split builds chuyen_to_pos from the bz remark and
+        # _resolve_dmp_tray_list uses that map to look up the correct slot for every
+        # chuyen regardless of their numeric values.
         _dmp_eff_groups = [
             {
                 "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
@@ -7370,7 +7362,6 @@ def _compute_dmp_perf_groups(  # noqa: C901
             }
             for i, grp in enumerate(entry.groups)
         ]
-        _dmp_eff_groups = _sort_eff_groups_for_tray_assignment(_dmp_eff_groups)
         n_groups = len(_dmp_eff_groups)
         _dmp_active_trays = (
             _get_dmp_active_trays(actual_batch_id) if batch_rows else list(range(1, 10))

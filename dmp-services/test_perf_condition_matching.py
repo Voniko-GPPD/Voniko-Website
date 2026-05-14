@@ -1936,3 +1936,6 @@ def test_dmp_per_batch_mode_db_reverse_order_still_assigns_correctly(
     )
     assert "LR6 501" in groups, "sheet 'LR6 501' must be present"
     assert "LR6 502" in groups, "sheet 'LR6 502' must be present"
+    # Both sheets must contain performance data (non-empty row dict).
+    assert groups["LR6 501"], "sheet 'LR6 501' must contain performance rows"
+    assert groups["LR6 502"], "sheet 'LR6 502' must contain performance rows"

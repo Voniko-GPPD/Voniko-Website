@@ -1658,3 +1658,222 @@ def test_dmp_entry_order_used_as_gidx_fallback_when_bz_unparseable(
         f"entry-order fallback: 501 (g_idx=1) must get slot 1 (3 trays); "
         f"got avg_count={c501}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Per-batch positional routing (Request #251 follow-up)
+# --------------------------------------------------------------------------- #
+# When the DMP machine stores one para_pub record PER production line (each
+# sharing the same composite bz such as "LR6 UD501 UD502 15"), each batch
+# returned by the exact-match query covers only one line's batteries.  The
+# system must assign each batch to the corresponding canonical line by
+# position: batch_rows[0] → first line in bz, batch_rows[1] → second line.
+# This is determined purely from bz order — scdw is never consulted.
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_two_per_line_batches_ud501_ud502_15_both_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the specific failing case reported in the problem
+    statement: remark 'LR6 UD501 UD502 15' with two separate per-line
+    para_pub records (each carrying only one line's batteries).
+
+    Expected behaviour:
+      - batch_rows[0] (trays 1-4) → assigned to line 501 (first in bz).
+      - batch_rows[1] (trays 5-8) → assigned to line 502 (second in bz).
+
+    Before the fix both batches were split positionally with
+    _split_active_trays_for_group_count(2, [4 trays]) which always gave
+    slot 0 = [4 trays] and slot 1 = [], so line 502 never received any data.
+    """
+    batch_a = _make_dmp_batch(batch_id="BA", bz="LR6 UD501 UD502 15")
+    batch_b = _make_dmp_batch(batch_id="BB", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b],
+        like_batches=[],
+        active_trays_by_batch={
+            "BA": [1, 2, 3, 4],
+            "BB": [5, 6, 7, 8],
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # batch_rows[0] (BA) → line 501: all 4 trays go to 501.
+    a_trays = [v for (bid, _), v in captured.items() if bid == "BA"]
+    assert a_trays == [[1, 2, 3, 4]], (
+        f"per-batch mode: batch_rows[0] must route to line 501 (trays 1-4); got {a_trays}"
+    )
+    # batch_rows[1] (BB) → line 502: all 4 trays go to 502.
+    b_trays = [v for (bid, _), v in captured.items() if bid == "BB"]
+    assert b_trays == [[5, 6, 7, 8]], (
+        f"per-batch mode: batch_rows[1] must route to line 502 (trays 5-8); got {b_trays}"
+    )
+    # Both sheets must contain data.
+    assert "LR6 501" in groups, "sheet 'LR6 501' must be present"
+    assert "LR6 502" in groups, "sheet 'LR6 502' must be present"
+
+
+def test_dmp_two_per_line_batches_reversed_bz_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same per-batch scenario with reversed bz ('LR6 UD502 UD501 15').
+
+    The remark defines: line 502 first, line 501 second.  Regardless of scdw
+    or any other field, the assignment must follow bz order:
+      - batch_rows[0] (trays 1-4) → line 502 (first in bz).
+      - batch_rows[1] (trays 5-8) → line 501 (second in bz).
+    """
+    batch_a = _make_dmp_batch(batch_id="BA_REV", bz="LR6 UD502 UD501 15")
+    batch_b = _make_dmp_batch(batch_id="BB_REV", bz="LR6 UD502 UD501 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b],
+        like_batches=[],
+        active_trays_by_batch={
+            "BA_REV": [1, 2, 3, 4],
+            "BB_REV": [5, 6, 7, 8],
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                ],
+                raw_remark="LR6 UD502 UD501 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # batch_rows[0] (BA_REV, trays 1-4) → line 502 (first in bz).
+    a_trays = [v for (bid, _), v in captured.items() if bid == "BA_REV"]
+    assert a_trays == [[1, 2, 3, 4]], (
+        f"reversed bz: batch_rows[0] must go to line 502 (trays 1-4); got {a_trays}"
+    )
+    # batch_rows[1] (BB_REV, trays 5-8) → line 501 (second in bz).
+    b_trays = [v for (bid, _), v in captured.items() if bid == "BB_REV"]
+    assert b_trays == [[5, 6, 7, 8]], (
+        f"reversed bz: batch_rows[1] must go to line 501 (trays 5-8); got {b_trays}"
+    )
+    assert "LR6 502" in groups, "sheet 'LR6 502' must be present"
+    assert "LR6 501" in groups, "sheet 'LR6 501' must be present"
+
+
+def test_dmp_single_combined_batch_unaffected_by_per_batch_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When there is only ONE batch for a two-line bz (not one per line),
+    per-batch mode must NOT activate and the normal positional tray split
+    must apply so that both production lines receive their correct trays.
+    """
+    # Single batch with all 8 batteries.
+    batch = _make_dmp_batch(batch_id="BSINGLE", bz="LR6 UD501 UD502 15")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch],
+        like_batches=[],
+        active_trays_by_batch={"BSINGLE": [1, 2, 3, 4, 5, 6, 7, 8]},
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # Normal 2-line split: [[1,2,3,4], [5,6,7,8]]
+    # 501 → slot 0 → [1,2,3,4],  502 → slot 1 → [5,6,7,8]
+    all_trays = [v for (bid, _), v in captured.items() if bid == "BSINGLE"]
+    assert [1, 2, 3, 4] in all_trays, (
+        f"single combined batch: chuyen 501 must take trays [1-4]; got {all_trays}"
+    )
+    assert [5, 6, 7, 8] in all_trays, (
+        f"single combined batch: chuyen 502 must take trays [5-8]; got {all_trays}"
+    )
+
+
+def test_dmp_per_batch_mode_extra_batches_beyond_canonical_use_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When there are more batches than canonical lines, the first N batches
+    use per-batch mode (batch[i] → canonical_line[i]) and the remaining
+    batches fall back to the normal positional tray split.
+
+    Setup: 2-line bz, 3 batches.  batch[2] has all 8 batteries and should
+    produce data for both lines via the regular split.
+    """
+    batch_a = _make_dmp_batch(batch_id="B0", bz="LR6 UD501 UD502 15", fdrq="2026-05-01")
+    batch_b = _make_dmp_batch(batch_id="B1", bz="LR6 UD501 UD502 15", fdrq="2026-05-01")
+    batch_c = _make_dmp_batch(batch_id="B2", bz="LR6 UD501 UD502 15", fdrq="2026-04-01")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b, batch_c],
+        like_batches=[],
+        active_trays_by_batch={
+            "B0": [1, 2, 3, 4],
+            "B1": [5, 6, 7, 8],
+            "B2": [1, 2, 3, 4, 5, 6, 7, 8],
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # B0 (batch_line_idx=0): all trays → line 501 only.
+    b0_trays = [v for (bid, _), v in captured.items() if bid == "B0"]
+    assert b0_trays == [[1, 2, 3, 4]], f"B0 must route to 501 only; got {b0_trays}"
+
+    # B1 (batch_line_idx=1): all trays → line 502 only.
+    b1_trays = [v for (bid, _), v in captured.items() if bid == "B1"]
+    assert b1_trays == [[5, 6, 7, 8]], f"B1 must route to 502 only; got {b1_trays}"
+
+    # B2 (index 2 >= _n_canonical=2): normal positional split → both lines.
+    b2_trays = sorted([v for (bid, _), v in captured.items() if bid == "B2"])
+    assert [1, 2, 3, 4] in b2_trays, f"B2 (normal split): 501 must take [1-4]; got {b2_trays}"
+    assert [5, 6, 7, 8] in b2_trays, f"B2 (normal split): 502 must take [5-8]; got {b2_trays}"

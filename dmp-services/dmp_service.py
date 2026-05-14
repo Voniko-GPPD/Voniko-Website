@@ -5933,7 +5933,7 @@ def _resolve_dmp_tray_list(
     if remark_chuyen_to_pos:
         dg_chuyen = str(dmp_grp.get("chuyen") or "").strip()
         dg_pos = remark_chuyen_to_pos.get(dg_chuyen, g_idx)
-        if dg_pos == _DMP_CHUYEN_SLOT_ABSENT or dg_pos < 0:
+        if dg_pos == _DMP_CHUYEN_SLOT_ABSENT:
             return []
         return auto_trays[dg_pos] if dg_pos < len(auto_trays) else []
     return auto_trays[g_idx] if g_idx < len(auto_trays) else []

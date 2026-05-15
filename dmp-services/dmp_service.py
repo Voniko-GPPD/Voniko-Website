@@ -84,6 +84,14 @@ WATCH_INTERVAL_SECONDS: int = 5
 MAX_BATTERY_NUMBER: int = 99
 _EXCEL_MAX_SHEET_NAME: int = 31  # Excel sheet names are capped at 31 characters
 
+# DMP phantom-tray threshold: para_singl rows whose recordnum is at or below
+# this value are placeholder rows written by the DMP machine for tray slots
+# that had no battery loaded.  Real measurements always produce at least 5
+# records (typically hundreds to thousands).  Observed phantom values: 0, 1,
+# 2, 4.  The threshold is intentionally conservative so that partial but
+# genuine measurements (recordnum ≥ 5) are never excluded.
+_DMP_PHANTOM_RECORDNUM_MAX: int = 4
+
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
 _ACCESS_QUERY_TIMEOUT: float = 20.0  # seconds to wait for a DB slot before returning 503
@@ -3811,16 +3819,8 @@ def _derive_dm2000_batteries_from_vtime(cfg, archname: str) -> list[dict]:
     active: set[int] = set()
     for row in rows:
         for i in range(1, 10):
-            value = row.get(f"time{i}")
-            if value in (None, "", "--"):
-                continue
-            try:
-                num = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(num):
-                continue
-            active.add(i)
+            if _is_valid_battery_time(row.get(f"time{i}")):
+                active.add(i)
     return [{"baty": i} for i in sorted(active)]
 
 
@@ -5204,6 +5204,46 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
 
 # ─── Performance Monitoring Report ──────────────────────────────────────────
 
+# ── Unified battery-time validation ──────────────────────────────────────────
+# Both DM2000 and DM3000 machines record per-channel discharge time in the
+# wide-format ``ls_vtime``/``ls_timev`` tables (one column per battery slot).
+# Like the DMP machine's ``para_singl.recordnum`` for phantom tray slots, the
+# DM2000/DM3000 machine writes NULL, an empty string, ``"--"``, or (in rare
+# firmware variants) ``0.0`` for slots that had no battery loaded.
+#
+# _is_valid_battery_time is the DM2000/DM3000 analogue of the DMP check
+# ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.  It must be used wherever a raw
+# time-at-voltage value is tested to decide whether a battery slot is active.
+# This guarantees the exact same "validate first, then split" algorithm is
+# applied consistently across DMP, DM2000, and DM3000.
+
+
+def _is_valid_battery_time(val: Any) -> bool:
+    """Return True iff a raw battery time-at-voltage value represents real data.
+
+    A valid time value is a finite float that is strictly positive.  Any of the
+    following are treated as phantom/placeholder (no battery loaded):
+
+    * ``None`` / empty string / ``"--"`` / ``"None"`` → no value written
+    * non-numeric text → unparseable, treated as absent
+    * ``NaN`` or ``0.0`` → physically impossible discharge time / not started
+    * negative values → measurement artefact, not real discharge
+
+    This is the DM2000/DM3000 equivalent of the DMP phantom check
+    ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.
+    """
+    if val is None:
+        return False
+    s = str(val).strip()
+    if s in ("", "--", "None"):
+        return False
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return False
+    return not math.isnan(f) and f > 0.0
+
+
 def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
     """Load ALL time-at-voltage data for an archive in a single ODBC query.
 
@@ -5242,15 +5282,9 @@ def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
                 tav: list[dict] = []
                 for row in rows:
                     val = row.get(f"time{i}")
-                    if val is None or str(val).strip() in ("", "--", "None"):
+                    if not _is_valid_battery_time(val):
                         continue
-                    try:
-                        f_val = float(val)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isnan(f_val):
-                        continue
-                    tav.append({"sj": row.get("dy"), "minutes": f_val})
+                    tav.append({"sj": row.get("dy"), "minutes": float(val)})
                 if tav:
                     full_data[i] = tav
     except (pyodbc.Error, HTTPException):
@@ -5269,15 +5303,9 @@ def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
                     tav = []
                     for row in rows:
                         val = row.get(f"tim_vot{i}")
-                        if val is None or str(val).strip() in ("", "--", "None"):
+                        if not _is_valid_battery_time(val):
                             continue
-                        try:
-                            f_val = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isnan(f_val):
-                            continue
-                        tav.append({"sj": row.get("sj"), "minutes": f_val})
+                        tav.append({"sj": row.get("sj"), "minutes": float(val)})
                     if tav:
                         full_data[i] = tav
         except (pyodbc.Error, HTTPException):
@@ -5963,10 +5991,26 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
 
 
 def _get_dmp_active_trays(batch_id: str) -> list[int]:
-    """Return DMP tray numbers that have a para_singl archive for a batch."""
+    """Return DMP tray numbers that have real measurement data for a batch.
+
+    The DMP machine always creates a ``para_singl`` row for every tray slot
+    (1–9) at the start of a session, filling ``cdmc`` with the session
+    archive filename even for trays that had no battery loaded.  Those
+    phantom rows carry a tiny ``recordnum`` value (≤ ``_DMP_PHANTOM_RECORDNUM_MAX``)
+    — the machine's default placeholder written before any real discharge
+    starts.  Genuine measurements always accumulate at least 5 records.
+
+    Two-stage validation:
+
+    1. ``cdmc`` must be non-empty (the archive file exists).
+    2. ``recordnum`` must be > ``_DMP_PHANTOM_RECORDNUM_MAX`` when the column
+       is present.  If the column is absent (older schema) the check is
+       skipped and the tray is treated as active (safe fallback).
+    """
     try:
         rows = _read_dmpdata(
-            "SELECT baty, cdmc FROM para_singl WHERE sid = ?", (batch_id,)
+            "SELECT baty, cdmc, recordnum FROM para_singl WHERE sid = ?",
+            (batch_id,),
         )
     except pyodbc.Error:
         rows = []
@@ -5975,6 +6019,19 @@ def _get_dmp_active_trays(batch_id: str) -> list[int]:
         cdmc = _dm2000_get_value(row, "cdmc")
         if _dmp_is_empty(cdmc):
             continue
+        # Exclude phantom tray slots: para_singl rows whose recordnum is at or
+        # below the placeholder threshold have no real discharge data.  When
+        # recordnum is missing from the result (older schema or column lookup
+        # failure) we fall back to the cdmc-only check so existing deployments
+        # are not broken.
+        raw_recordnum = _dm2000_get_value(row, "recordnum")
+        if raw_recordnum is not None:
+            try:
+                rnum = int(str(raw_recordnum).split(".")[0])
+                if rnum <= _DMP_PHANTOM_RECORDNUM_MAX:
+                    continue
+            except (TypeError, ValueError):
+                pass  # unparseable recordnum → fall through and include the tray
         raw_baty = _dm2000_get_value(row, "baty")
         try:
             baty = int(raw_baty)

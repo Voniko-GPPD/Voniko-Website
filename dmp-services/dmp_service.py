@@ -7080,13 +7080,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # up the matching para_singl rows (which use sid = para_pub.id).
             actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
-            # Prefer para_singl.scrq (made/sample date) over para_pub.fdrq (start date).
-            # Many DMP installations use a sequential integer for para_singl.sid that
-            # does NOT match para_pub.id; in those schemas para_singl.cdmc holds the
-            # archive name which equals para_pub.id, so a cdmc-keyed lookup resolves
-            # the made date when the sid lookup yields nothing.  This mirrors the
-            # multi-key fallback that get_batches (Load Data tab) already performs.
-            fdrq = ""
+            # para_singl.scrq (made/production date) is the sole source of truth
+            # for report row dates.  para_singl.sid is a TEXT column; always pass
+            # the string value so the Access ODBC driver does a proper text
+            # comparison (an int() cast sends BIGINT and always returns 0 rows).
+            scrq = ""
 
             def _pick_first_scrq(rows: list) -> str:
                 for _r in rows or []:
@@ -7097,39 +7095,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             return _d
                 return ""
 
-            # para_singl.sid is a TEXT column; always query with the string value so
-            # that the Access ODBC driver does a proper text comparison.  An earlier
-            # int() cast caused the 16-digit string IDs (e.g. '2024073110512202') to be
-            # sent as BIGINT parameters, which Access cannot match against a TEXT column
-            # and always returned 0 rows, forcing the fallback to para_pub.fdrq.
             try:
                 _singl_scrq_rows = _read_dmpdata(
                     "SELECT scrq FROM para_singl WHERE sid = ?", (actual_batch_id,)
                 )
-                fdrq = _pick_first_scrq(_singl_scrq_rows)
+                scrq = _pick_first_scrq(_singl_scrq_rows)
             except pyodbc.Error as exc:
                 logger.debug(
                     "_compute_dmp_perf_groups: could not fetch para_singl.scrq for sid=%s: %s",
                     actual_batch_id, exc,
                 )
-
-            # Fallback: keyed by para_singl.cdmc (archive filename).  Some schemas
-            # store the para_pub.id-equivalent in cdmc rather than sid.
-            if not fdrq:
-                try:
-                    _singl_scrq_rows_cdmc = _read_dmpdata(
-                        "SELECT scrq FROM para_singl WHERE cdmc = ?",
-                        (str(actual_batch_id),),
-                    )
-                    fdrq = _pick_first_scrq(_singl_scrq_rows_cdmc)
-                except pyodbc.Error as exc:
-                    logger.debug(
-                        "_compute_dmp_perf_groups: could not fetch para_singl.scrq for cdmc=%s: %s",
-                        actual_batch_id, exc,
-                    )
-
-            if not fdrq:
-                fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
             fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
             # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
             # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
@@ -7461,18 +7436,18 @@ def _compute_dmp_perf_groups(  # noqa: C901
             hfsj_unit = "hour"
             ep_v = None
 
-            # Derive a proper YYYY-MM-DD row label from entry.report_date when
-            # available; otherwise fall back to the raw batch_id.
+            # In the not-found path there is no para_singl data, so use
+            # entry.report_date (operator-entered) as the row label when set.
             if entry.report_date:
-                fdrq = _to_date(entry.report_date) or entry.batch_id
+                scrq = _to_date(entry.report_date) or entry.batch_id
             else:
-                fdrq = entry.batch_id
+                scrq = entry.batch_id
 
         # Determine row label (date or special)
         if entry.special_type in _SPECIAL_TYPE_LABEL:
             row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
         else:
-            row_label = fdrq or entry.batch_id
+            row_label = scrq or entry.batch_id
 
         # Re-derive authoritative loai by chuyen so that stored entries with
         # an incorrect or partial loai in groups_json still display the
@@ -7728,8 +7703,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             )
 
             # Resolve made date (para_singl.scrq) for the extra batch.
-            _xb_fdrq = ""
-            # Same as above: use string id for the ACCESS TEXT sid column.
+            # scrq is the sole source of truth for report row dates — no fdrq fallback.
+            _xb_scrq = ""
+            # Use string id for the ACCESS TEXT sid column.
             try:
                 _xb_scrq_rows = _read_dmpdata(
                     "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_id,)
@@ -7739,26 +7715,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     if _xv is not None and not _dmp_is_empty(str(_xv)):
                         _d = _to_date(_xv)
                         if _d:
-                            _xb_fdrq = _d
+                            _xb_scrq = _d
                             break
             except pyodbc.Error:
                 pass
-            if not _xb_fdrq:
-                try:
-                    _xb_scrq_cdmc = _read_dmpdata(
-                        "SELECT scrq FROM para_singl WHERE cdmc = ?", (str(_xb_id),)
-                    )
-                    for _xb_r in _xb_scrq_cdmc or []:
-                        _xv = _dm2000_get_value(_xb_r, "scrq")
-                        if _xv is not None and not _dmp_is_empty(str(_xv)):
-                            _d = _to_date(_xv)
-                            if _d:
-                                _xb_fdrq = _d
-                                break
-                except pyodbc.Error:
-                    pass
-            if not _xb_fdrq:
-                _xb_fdrq = _to_date(_dm2000_get_value(_xb, "fdrq"))
 
             _xb_fdfs = str(_dm2000_get_value(_xb, "fdfs") or "").strip()
             if not _xb_fdfs:
@@ -7783,7 +7743,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             if entry.special_type in _SPECIAL_TYPE_LABEL:
                 _xb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
             else:
-                _xb_row_label = _xb_fdrq or entry.batch_id
+                _xb_row_label = _xb_scrq or entry.batch_id
 
             for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
                 _orig_idx = _dmp_grp.get("_orig_idx")

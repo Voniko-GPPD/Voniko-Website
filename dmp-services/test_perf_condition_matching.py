@@ -676,12 +676,17 @@ def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.Mon
     """If exact bz matching misses because para_pub.bz lacks the 15 suffix, the
     LIKE fallback may return several LR6 501 batches.  All matched batches must
     become report rows; previously only the first row was processed.
+
+    Row labels come from para_singl.scrq (made date).  para_pub.fdrq is NOT
+    used as a fallback — each batch must carry a valid scrq in para_singl.
     """
+    # Each batch has a distinct id and fdrq; para_singl supplies the scrq
+    # (made/manufacture date) which is what ends up as the report row label.
     matched_batches = [
         {
             "id": f"B{i}",
             "dcxh": "LR6",
-            "fdrq": f"2026-04-{i:02d}",
+            "fdrq": f"2026-04-{i:02d}",        # session start — NOT used as row label
             "fdfs": "",
             "jstj": "(1500mW2s,650mW28s)10T/h,24h/d",
             "hfsj": "times",
@@ -690,6 +695,12 @@ def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.Mon
         }
         for i in range(1, 4)
     ]
+    # scrq (made date) supplied for each batch id via para_singl.sid lookup.
+    scrq_by_sid = {
+        "B1": "2026-03-01",
+        "B2": "2026-03-02",
+        "B3": "2026-03-03",
+    }
 
     def fake_read_dmpdata(sql, params=()):
         if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
@@ -699,7 +710,9 @@ def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.Mon
         if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
             return [{"baty": i, "cdmc": f"tray{i}.mdb"} for i in range(1, 10)]
         if "SELECT scrq FROM para_singl" in sql:
-            return []
+            sid = str(params[0]) if params else ""
+            scrq = scrq_by_sid.get(sid, "")
+            return [{"scrq": scrq}] if scrq else []
         return []
 
     monkeypatch.setattr(m, "_read_dmpdata", fake_read_dmpdata)
@@ -728,12 +741,14 @@ def test_dmp_like_fallback_processes_all_matched_batches(monkeypatch: pytest.Mon
 
     groups = m._compute_dmp_perf_groups(payload)
     rows = groups["LR6 501"]
+    # Row labels must use scrq (made date), NOT fdrq (discharge start date).
     assert set(rows) == {
-        ("2026-04-01", "UD"),
-        ("2026-04-02", "UD"),
-        ("2026-04-03", "UD"),
+        ("2026-03-01", "UD"),
+        ("2026-03-02", "UD"),
+        ("2026-03-03", "UD"),
     }
-    assert rows[("2026-04-03", "UD")][m._LR6_1500MW_15D_LABEL]["avg_count"] == 3
+    assert rows[("2026-03-03", "UD")][m._LR6_1500MW_15D_LABEL]["avg_count"] == 3
+
 
 
 def test_dmp_row_label_uses_scrq_over_fdrq(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2010,6 +2025,105 @@ def test_dmp_cross_token_search_finds_ud502_when_exact_only_has_ud501(
     assert ud502_calls, "UD502_A must be called for _dmp_compute_group_perf"
     assert [6, 7, 8, 9] in ud502_calls, (
         f"UD502_A must be computed with trays [6,7,8,9]; got {ud502_calls}"
+    )
+
+
+def test_dmp_cross_token_search_finds_reversed_bz_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary production regression: exact match finds only the UD501 per-line
+    batch (bz='LR6 UD501 UD502 15', matches entry's raw_remark exactly) while
+    the UD502 per-line batch was stored with bz='LR6 UD502 UD501 15' (tokens
+    reversed).  The LIKE search with pattern '%LR6 UD501 UD502%' also misses
+    it.  Without the cross-token sibling search the report drops the LR6 502
+    sheet entirely.
+
+    The cross-token search queries para_pub once per canonical chuyen token
+    ('%UD501%', '%UD502%').  Python-side it keeps only batches that:
+      (1) contain ALL canonical tokens in their bz (so single-line archives
+          from unrelated sessions are excluded), AND
+      (2) share the same para_pub.fdrq as the main batch (same DMP session).
+    This picks up UD502 despite the reversed token order.
+    """
+    # UD501 batch: bz in canonical order, found by exact-bz query.
+    ud501 = _make_dmp_batch(
+        batch_id="UD501",
+        bz="LR6 UD501 UD502 15",
+        fdrq="2026-04-18",
+    )
+    # UD502 batch: bz in reversed order — exact query and LIKE '%LR6 UD501 UD502%'
+    # both MISS this batch.  Only the per-token LIKE '%UD502%' finds it.
+    ud502 = _make_dmp_batch(
+        batch_id="UD502",
+        bz="LR6 UD502 UD501 15",   # reversed!
+        fdrq="2026-04-18",         # same session (same fdrq) → passes fdrq filter
+    )
+    # Unrelated single-line batch from a different session — must NOT be added.
+    unrelated = _make_dmp_batch(
+        batch_id="UNRELATED",
+        bz="LR6 UD501",            # only one canonical token
+        fdrq="2026-04-18",
+    )
+
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        # Exact match with raw_remark='LR6 UD501 UD502 15' finds only ud501.
+        exact_batches_by_bz={"LR6 UD501 UD502 15": [ud501]},
+        exact_batches=[ud501],
+        # Per-token LIKE '%UD501%' and '%UD502%' both return the full candidate set.
+        # Python filter keeps ud502 (both tokens present, same fdrq) and drops
+        # unrelated (only "UD501" in bz, missing "UD502").
+        like_batches=[ud501, ud502, unrelated],
+        active_trays_by_batch={
+            "UD501": [1, 2, 3, 4],
+            "UD502": [6, 7, 8, 9],
+            "UNRELATED": [1, 2, 3, 4],
+        },
+        scrq_by_batch={
+            "UD501": "2026-04-02",
+            "UD502": "2026-04-02",
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # Both lines must be present — the reversed-bz UD502 must not be dropped.
+    assert "LR6 501" in groups, "LR6 501 sheet must be present"
+    assert "LR6 502" in groups, (
+        "LR6 502 sheet must be present: cross-token search must find reversed-bz UD502"
+    )
+
+    # Per-batch mode: UD501 batch (trays 1-4) → slot 0 in canonical bz → LR6 501.
+    # UD502 batch (trays 6-9) → slot 1 in bz (reversed: slot 0=UD502, slot 1=UD501)
+    # — the bz of the found UD502 batch is 'LR6 UD502 UD501 15' so chuyen_to_pos
+    # maps 502→slot0, 501→slot1.  The canonical split follows the ENTRY's bz order
+    # ('LR6 UD501 UD502 15'), so UD501=slot0, UD502=slot1.
+    # UD501 batch trays [1,2,3,4] → _pb_canonical_slot in combined [1..4,6..9]
+    # → split [[1,2,3,4],[6,7,8,9]] → subset of slot0 → LR6 501.
+    # UD502 batch trays [6,7,8,9] → subset of slot1 → LR6 502.
+    ud501_trays = [v for (bid, _), v in captured.items() if bid == "UD501"]
+    ud502_trays = [v for (bid, _), v in captured.items() if bid == "UD502"]
+    assert ud501_trays, "UD501 batch must be computed"
+    assert ud502_trays, "UD502 batch must be computed (cross-token sibling search)"
+
+    # The UNRELATED batch must not appear anywhere.
+    unrel_trays = [v for (bid, _), v in captured.items() if bid == "UNRELATED"]
+    assert not unrel_trays, (
+        "UNRELATED single-line batch must be excluded by the all-tokens filter"
     )
 
 

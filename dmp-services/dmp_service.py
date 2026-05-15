@@ -4580,12 +4580,15 @@ def _compute_uniform_rate_from_tav(
             except (TypeError, ValueError):
                 pass
 
-    if len(times) < 2:
+    if not times:
         return None
 
     max_t = max(times)
     min_t = min(times)
-    avg_t = sum(times) / len(times)
+    # Use the full tray count as the denominator so that batteries with
+    # missing/failed measurements at the endpoint level still count toward
+    # the average and do not artificially inflate it.
+    avg_t = sum(times) / len(batys)
     if avg_t <= 0:
         return None
 
@@ -4681,10 +4684,13 @@ def _build_preview_workbook(  # noqa: C901
 
     def _agg(vals):
         vs = [_safe_float(v) for v in vals]
-        vs = [x for x in vs if x is not None]
-        if not vs:
+        numeric = [x for x in vs if x is not None]
+        if not numeric:
             return "-", "-", "-"
-        return round(max(vs), 3), round(min(vs), 3), round(sum(vs) / len(vs), 3)
+        # Denominator is the total tray count (len(vs) == len(vals)) so that
+        # trays with missing/failed measurements at this level still count
+        # toward the average and do not artificially inflate it.
+        return round(max(numeric), 3), round(min(numeric), 3), round(sum(numeric) / len(vs), 3)
 
     def _set(row, col, value, bold=False, fill=None, align="center", merge_to=None, italic=False, size=10):
         c = ws.cell(row=row, column=col, value=value)
@@ -4869,7 +4875,10 @@ def _build_preview_workbook(  # noqa: C901
             if numeric:
                 mx = max(numeric)
                 mn = min(numeric)
-                av = int(round(sum(numeric) / len(numeric)))
+                # Use the full tray count (len(cell_vals)) as the denominator
+                # so that trays with missing data at this level are not silently
+                # excluded, which would inflate the average.
+                av = int(round(sum(numeric) / len(cell_vals)))
             else:
                 mx, mn, av = "-", "-", "-"
             _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
@@ -6475,28 +6484,34 @@ def _dmp_compute_group_perf(
 
     avg_h: Optional[float] = None
     avg_m: Optional[float] = None
+    # Use the full tray count as denominator so that trays whose discharge
+    # curve never crossed the endpoint voltage (missing/failed) still count
+    # toward the average and do not artificially inflate it.
+    n_trays = len(trays)
     if hours_list:
-        avg_h = sum(hours_list) / len(hours_list)
+        avg_h = sum(hours_list) / n_trays
         avg_m = avg_h * 60.0
 
     avg_count: Optional[int] = None
     if count_list:
         # Round to the nearest integer to match the frontend display
         # (``Math.round`` of the mean cycle count).
-        avg_count = int(round(sum(count_list) / len(count_list)))
+        avg_count = int(round(sum(count_list) / n_trays))
 
     # Uniform rate for DMP is computed from the cycle counts so the figure
     # printed in the report stays consistent with the displayed cycle
     # averages ("số lần phóng điện").  Fall back to the time-based formula
     # when cycle counts are unavailable.
+    # The average used in the uniformity formula also uses n_trays so the
+    # denominator is consistent with avg_count above.
     uniform_rate: Optional[float] = None
-    if len(count_list) >= 2:
-        avg_c = sum(count_list) / len(count_list)
+    if count_list:
+        avg_c = sum(count_list) / n_trays
         if avg_c > 0:
             uniform_rate = round(
                 (1.0 - (max(count_list) - min(count_list)) / avg_c) * 100.0, 2
             )
-    elif len(hours_list) >= 2 and avg_h and avg_h > 0:
+    elif hours_list and avg_h and avg_h > 0:
         uniform_rate = round(
             (1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2
         )

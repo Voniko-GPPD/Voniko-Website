@@ -84,6 +84,14 @@ WATCH_INTERVAL_SECONDS: int = 5
 MAX_BATTERY_NUMBER: int = 99
 _EXCEL_MAX_SHEET_NAME: int = 31  # Excel sheet names are capped at 31 characters
 
+# DMP phantom-tray threshold: para_singl rows whose recordnum is at or below
+# this value are placeholder rows written by the DMP machine for tray slots
+# that had no battery loaded.  Real measurements always produce at least 5
+# records (typically hundreds to thousands).  Observed phantom values: 0, 1,
+# 2, 4.  The threshold is intentionally conservative so that partial but
+# genuine measurements (recordnum ≥ 5) are never excluded.
+_DMP_PHANTOM_RECORDNUM_MAX: int = 4
+
 _WATCH_LOCK = threading.Lock()
 _ACCESS_QUERY_LOCK = threading.Semaphore(3)
 _ACCESS_QUERY_TIMEOUT: float = 20.0  # seconds to wait for a DB slot before returning 503
@@ -5968,22 +5976,17 @@ def _get_dmp_active_trays(batch_id: str) -> list[int]:
     The DMP machine always creates a ``para_singl`` row for every tray slot
     (1–9) at the start of a session, filling ``cdmc`` with the session
     archive filename even for trays that had no battery loaded.  Those
-    phantom rows carry a tiny ``recordnum`` value (0, 1, 2, or 4) — the
-    machine's default placeholder written before any real discharge starts.
-    Genuine measurements always accumulate at least 5 records.
+    phantom rows carry a tiny ``recordnum`` value (≤ ``_DMP_PHANTOM_RECORDNUM_MAX``)
+    — the machine's default placeholder written before any real discharge
+    starts.  Genuine measurements always accumulate at least 5 records.
 
     Two-stage validation:
 
     1. ``cdmc`` must be non-empty (the archive file exists).
-    2. ``recordnum`` must be > ``_DMP_PHANTOM_RECORDNUM_MAX`` (= 4) when the
-       column is present.  If the column is absent (older schema) the check
-       is skipped and the tray is treated as active (safe fallback).
+    2. ``recordnum`` must be > ``_DMP_PHANTOM_RECORDNUM_MAX`` when the column
+       is present.  If the column is absent (older schema) the check is
+       skipped and the tray is treated as active (safe fallback).
     """
-    # Threshold: phantom placeholder rows written by the DMP machine always
-    # have recordnum ≤ 4 (observed values: 0, 1, 2, 4).  Real measurements
-    # produce at least 5 records (typically hundreds to thousands).
-    _DMP_PHANTOM_RECORDNUM_MAX = 4
-
     try:
         rows = _read_dmpdata(
             "SELECT baty, cdmc, recordnum FROM para_singl WHERE sid = ?",

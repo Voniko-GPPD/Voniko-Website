@@ -776,8 +776,6 @@ def test_is_valid_battery_time_rejects_phantom_values() -> None:
     assert m._is_valid_battery_time(-1.0) is False
     assert m._is_valid_battery_time("-5") is False
     # NaN
-    import math
-    assert m._is_valid_battery_time(math.nan) is False
     assert m._is_valid_battery_time(float("nan")) is False
     # Unparseable text
     assert m._is_valid_battery_time("abc") is False

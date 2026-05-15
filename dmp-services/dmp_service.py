@@ -5218,7 +5218,7 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
 # applied consistently across DMP, DM2000, and DM3000.
 
 
-def _is_valid_battery_time(val) -> bool:
+def _is_valid_battery_time(val: Any) -> bool:
     """Return True iff a raw battery time-at-voltage value represents real data.
 
     A valid time value is a finite float that is strictly positive.  Any of the

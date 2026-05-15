@@ -1024,6 +1024,18 @@ def _install_dmp_batch_fakes(
     active_trays: list[int] | None = None,
     active_trays_by_batch: dict[str, list[int]] | None = None,
     scdw_by_batch: dict[str, str] | None = None,
+    # Per-bz exact-match results: maps bz string → list[dict].
+    # When set, a "WHERE bz = ?" call whose param matches a key returns the
+    # associated list instead of the default *exact_batches*.  This lets tests
+    # simulate the sibling-batch discovery path where the lookup bz differs
+    # from the entry's raw_remark (e.g. "LR6 UD502 UD501 15" vs the entry's
+    # "LR6 UD501 UD502 15").
+    exact_batches_by_bz: dict[str, list[dict]] | None = None,
+    # Per-id results: maps para_pub.id string → list[dict].
+    # Used to simulate the direct "WHERE id = ?" batch-id lookup path.
+    id_batches: dict[str, list[dict]] | None = None,
+    # Per-batch scrq: maps batch_id → scrq date string for para_singl lookups.
+    scrq_by_batch: dict[str, str] | None = None,
 ) -> dict:
     """Install fake _read_dmpdata + _dmp_compute_group_perf for batch tests.
 
@@ -1047,13 +1059,25 @@ def _install_dmp_batch_fakes(
         active_trays_by_batch = {}
     if scdw_by_batch is None:
         scdw_by_batch = {}
+    if exact_batches_by_bz is None:
+        exact_batches_by_bz = {}
+    if id_batches is None:
+        id_batches = {}
+    if scrq_by_batch is None:
+        scrq_by_batch = {}
     captured: dict[tuple[str, str], list[int]] = {}
 
     def fake_read_dmpdata(sql, params=()):
         if "FROM para_pub" in sql and "WHERE bz = ?" in sql:
+            param_bz = str(params[0]) if params else ""
+            if param_bz in exact_batches_by_bz:
+                return list(exact_batches_by_bz[param_bz])
             return list(exact_batches or [])
         if "FROM para_pub" in sql and "WHERE bz LIKE ?" in sql:
             return list(like_batches or [])
+        if "FROM para_pub" in sql and "WHERE id = ?" in sql:
+            param_id = str(params[0]) if params else ""
+            return list(id_batches.get(param_id, []))
         if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
             sid = str(params[0]) if params else ""
             trays = active_trays_by_batch.get(sid, active_trays)
@@ -1065,7 +1089,9 @@ def _install_dmp_batch_fakes(
             scdw = scdw_by_batch.get(sid, "")
             return [{"scdw": scdw}] if scdw else []
         if "SELECT scrq FROM para_singl" in sql:
-            return []
+            sid = str(params[0]) if params else ""
+            scrq = scrq_by_batch.get(sid, "")
+            return [{"scrq": scrq}] if scrq else []
         return []
 
     def fake_compute(batch_id, trays, endpoint_voltage):
@@ -2021,6 +2047,208 @@ def test_per_batch_mode_assigns_by_tray_slot_not_db_order(
     # Both sheets must contain performance data (non-empty row dict).
     assert groups["LR6 501"], "sheet 'LR6 501' must contain performance rows"
     assert groups["LR6 502"], "sheet 'LR6 502' must contain performance rows"
+
+
+# --------------------------------------------------------------------------- #
+# Sibling-batch discovery and _all_same_bz normalisation (Request #263 fixes)
+# --------------------------------------------------------------------------- #
+
+
+def test_dmp_sibling_lookup_activates_per_batch_when_batch_id_only_finds_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-cause regression: operator typed 'LR6 UD502 UD501 15' (reversed)
+    in the DMP machine for both per-line batches, but the web UI entry stores
+    raw_remark='LR6 UD501 UD502 15' (correct order).
+
+    Exact-match lookup with the entry's raw_remark finds nothing (wrong word
+    order in DB), LIKE lookup also fails (substring not found), and the direct
+    batch_id lookup finds only ONE of the two batches.
+
+    The sibling-batch discovery path must then query para_pub again using the
+    ONE found batch's own bz field ('LR6 UD502 UD501 15') and return BOTH
+    per-line batches, enabling per-batch mode and loading both lines.
+    """
+    # DB has two per-line batches with reversed bz.
+    batch_a = _make_dmp_batch(
+        batch_id="BA_SIBLING",
+        bz="LR6 UD502 UD501 15",   # reversed (as operator typed in DMP machine)
+        fdrq="2026-04-20",
+    )
+    batch_b = _make_dmp_batch(
+        batch_id="BB_SIBLING",
+        bz="LR6 UD502 UD501 15",   # same reversed bz
+        fdrq="2026-04-02",
+    )
+
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        # Exact match with raw_remark='LR6 UD501 UD502 15' → nothing (wrong order).
+        exact_batches=[],
+        # LIKE '%LR6 UD501 UD502%' → nothing (different word order).
+        like_batches=[],
+        # Direct batch_id lookup for 'BA_SIBLING' → finds batch_a only.
+        id_batches={"BA_SIBLING": [batch_a]},
+        # Sibling lookup with batch_a.bz='LR6 UD502 UD501 15' → both batches.
+        exact_batches_by_bz={"LR6 UD502 UD501 15": [batch_a, batch_b]},
+        active_trays_by_batch={
+            "BA_SIBLING": [1, 2, 3, 4],   # UD502's physical batteries (bz slot 0)
+            "BB_SIBLING": [5, 6, 7, 8],   # UD501's physical batteries (bz slot 1)
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="BA_SIBLING",   # points to only one batch
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # Both sheets must be present and contain data.
+    # (Datasets are swapped relative to entry order because bz has reversed
+    # chuyen order — that is expected and documented behaviour.)
+    assert "LR6 501" in groups, "sibling lookup: sheet 'LR6 501' must be present"
+    assert "LR6 502" in groups, "sibling lookup: sheet 'LR6 502' must be present"
+    assert groups["LR6 501"], "sibling lookup: 'LR6 501' must contain performance rows"
+    assert groups["LR6 502"], "sibling lookup: 'LR6 502' must contain performance rows"
+
+    # In per-batch mode each batch must be routed to exactly one line.
+    # With reversed bz ('LR6 UD502 UD501 15'), slot 0 = UD502, slot 1 = UD501.
+    # BA_SIBLING (trays 1-4) → _pb_canonical_slot → slot 0 (UD502) → "LR6 502".
+    # BB_SIBLING (trays 5-8) → _pb_canonical_slot → slot 1 (UD501) → "LR6 501".
+    all_ba = [v for (bid, _), v in captured.items() if bid == "BA_SIBLING"]
+    all_bb = [v for (bid, _), v in captured.items() if bid == "BB_SIBLING"]
+    assert all_ba, "BA_SIBLING must be computed (not silently dropped)"
+    assert all_bb, "BB_SIBLING must be computed (not silently dropped)"
+
+
+def test_dmp_all_same_bz_normalised_ignores_15_suffix_difference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_all_same_bz must be True when LIKE returns two batches with the same
+    canonical production-line chuyens but different Q/15 suffixes
+    (e.g. 'LR6 UD501 UD502 15' and 'LR6 UD501 UD502' — same lines, different
+    test-flag).  Before the fix the exact-string check made _all_same_bz=False,
+    disabled per-batch mode, and caused UD502 to disappear.
+    """
+    # LIKE returns two batches: one with '15' suffix, one without.
+    batch_a = _make_dmp_batch(
+        batch_id="B15", bz="LR6 UD501 UD502 15", fdrq="2026-04-18"
+    )
+    batch_b = _make_dmp_batch(
+        batch_id="BNORMAL", bz="LR6 UD501 UD502", fdrq="2026-03-10"
+    )
+
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[],   # no exact match (e.g. batch_id-only path used first)
+        like_batches=[batch_a, batch_b],
+        active_trays_by_batch={
+            "B15":     [1, 2, 3, 4],
+            "BNORMAL": [5, 6, 7, 8],
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # Per-batch mode must activate (same chuyen set regardless of '15' suffix).
+    assert "LR6 501" in groups, "normalised _all_same_bz: 'LR6 501' must be present"
+    assert "LR6 502" in groups, "normalised _all_same_bz: 'LR6 502' must be present"
+    assert groups["LR6 501"], "'LR6 501' must have data"
+    assert groups["LR6 502"], "'LR6 502' must have data"
+
+    # With per-batch mode: B15 (trays 1-4) → slot 0 (UD501), BNORMAL (5-8) → slot 1 (UD502).
+    b15_trays = [v for (bid, _), v in captured.items() if bid == "B15"]
+    bnormal_trays = [v for (bid, _), v in captured.items() if bid == "BNORMAL"]
+    assert b15_trays == [[1, 2, 3, 4]], (
+        f"B15 must route to UD501 (slot 0, trays 1-4); got {b15_trays}"
+    )
+    assert bnormal_trays == [[5, 6, 7, 8]], (
+        f"BNORMAL must route to UD502 (slot 1, trays 5-8); got {bnormal_trays}"
+    )
+
+
+def test_dmp_null_id_extra_batch_uses_index_key_not_main_batch_trays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an extra batch has a null/falsy id (para_pub.id returns None after
+    _dm2000_get_value filtering), its _pb_all_active key must be an index-based
+    synthetic key rather than falling back to entry.batch_id.
+
+    Without the fix, the extra batch's _xb_id falls back to entry.batch_id
+    which equals actual_batch_id, causing the extra batch to pick up the MAIN
+    batch's active trays from _pb_all_active.  Both batches then route to the
+    same slot (UD501) and UD502 never receives any data.
+
+    With the fix, the null-id extra batch gets its own synthetic key and its
+    tray lookup returns [] (no para_singl rows for empty id), so it produces
+    no data for any line — but crucially it does NOT contaminate UD501 with a
+    duplicate write or block per-batch-mode from assigning trays correctly.
+    """
+    # batch_a: valid id "MAIN_ID"
+    batch_a = _make_dmp_batch(batch_id="MAIN_ID", bz="LR6 UD501 UD502 15")
+    # batch_b: None id — _dm2000_get_value will filter this out as a null-like
+    # value and return None; simulated here by using "None" as the id string
+    # (which _dm2000_get_value treats as null).
+    batch_b = dict(_make_dmp_batch(batch_id="UNUSED", bz="LR6 UD501 UD502 15"))
+    batch_b["id"] = "None"   # _dm2000_get_value treats "None" as null-like
+
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[batch_a, batch_b],
+        like_batches=[],
+        active_trays_by_batch={
+            "MAIN_ID": [1, 2, 3, 4],
+            # "" (empty id) → falls back to default active_trays or []
+        },
+        active_trays=[],   # default to no trays so null-id batch gets nothing
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="MAIN_ID",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    m._compute_dmp_perf_groups(payload)
+
+    # MAIN_ID must route to UD501 (slot 0, trays 1-4) exactly once.
+    main_trays = [v for (bid, _), v in captured.items() if bid == "MAIN_ID"]
+    assert main_trays == [[1, 2, 3, 4]], (
+        f"null-id guard: MAIN_ID must route to UD501 (trays 1-4) exactly once; "
+        f"got {main_trays}"
+    )
 
 
 # --------------------------------------------------------------------------- #

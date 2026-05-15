@@ -1933,6 +1933,68 @@ def test_dmp_single_combined_batch_unaffected_by_per_batch_mode(
     )
 
 
+def test_dmp_like_augmentation_finds_ud502_when_exact_only_has_ud501(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the production failure where the exact-bz query
+    returns only UD501 per-line batches (bz="LR6 UD501 UD502 15") while the
+    UD502 per-line batch was stored with bz="LR6 UD501 UD502" (no "15" suffix).
+
+    The LIKE augmentation path must find the UD502 sibling batch and add it to
+    batch_rows so per-batch mode correctly assigns trays to both lines.
+
+    Before the fix the LIKE fallback was skipped because batch_rows was already
+    non-empty (two UD501 batches), leaving the combined active-trays pool as
+    trays 1-4 only.  _pb_split[[1,2,3,4],[]] meant slot 1 was always empty
+    and "LR6 502" received no data.
+    """
+    # Two UD501 per-line batches found by exact match (bz has "15" suffix).
+    ud501_a = _make_dmp_batch(batch_id="UD501_A", bz="LR6 UD501 UD502 15", fdrq="2026-04-18")
+    ud501_b = _make_dmp_batch(batch_id="UD501_B", bz="LR6 UD501 UD502 15", fdrq="2026-01-06")
+    # UD502 per-line batch found ONLY by LIKE (bz lacks "15" suffix).
+    ud502_a = _make_dmp_batch(batch_id="UD502_A", bz="LR6 UD501 UD502", fdrq="2026-04-18")
+    captured = _install_dmp_batch_fakes(
+        monkeypatch,
+        exact_batches=[ud501_a, ud501_b],
+        like_batches=[ud501_a, ud501_b, ud502_a],  # LIKE finds all three
+        active_trays_by_batch={
+            "UD501_A": [1, 2, 3, 4],
+            "UD501_B": [1, 2, 3, 4],
+            "UD502_A": [6, 7, 8, 9],
+        },
+    )
+
+    payload = m.DmpPerfReportRequest(
+        entries=[
+            m.DmpPerfEntry(
+                batch_id="unused",
+                model="LR6",
+                groups=[
+                    m.DmpPerfGroup(loai="UD", chuyen="501", trays=[]),
+                    m.DmpPerfGroup(loai="UD", chuyen="502", trays=[]),
+                ],
+                raw_remark="LR6 UD501 UD502 15",
+            )
+        ]
+    )
+
+    groups = m._compute_dmp_perf_groups(payload)
+
+    # Both sheets must be present.
+    assert "LR6 501" in groups, (
+        "sheet 'LR6 501' must be present after LIKE augmentation"
+    )
+    assert "LR6 502" in groups, (
+        "sheet 'LR6 502' must be present after LIKE augmentation finds UD502_A"
+    )
+    # UD502's trays (6-9) must have been used for LR6 502.
+    ud502_calls = [v for (bid, _), v in captured.items() if bid == "UD502_A"]
+    assert ud502_calls, "UD502_A must be called for _dmp_compute_group_perf"
+    assert [6, 7, 8, 9] in ud502_calls, (
+        f"UD502_A must be computed with trays [6,7,8,9]; got {ud502_calls}"
+    )
+
+
 def test_dmp_per_batch_mode_extra_batches_beyond_canonical_use_split(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

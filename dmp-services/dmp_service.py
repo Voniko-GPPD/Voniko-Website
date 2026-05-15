@@ -6958,7 +6958,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _raw_remark_trimmed = (entry.raw_remark or "").strip()
         if _raw_remark_trimmed:
             _exact_bz_sql = (
-                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
                 " WHERE bz = ? ORDER BY fdrq DESC"
             )
             try:
@@ -6979,7 +6979,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # still match.
             _bz_pattern = f"%{_remark_search}%"
             _bz_sql = (
-                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
                 " WHERE bz LIKE ? ORDER BY fdrq DESC"
             )
             try:
@@ -7026,7 +7026,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 if _sib_n >= 2:
                     try:
                         _sib_rows = _read_dmpdata(
-                            "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                            "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
                             " WHERE bz = ? ORDER BY fdrq DESC",
                             (_sib_bz,),
                         )
@@ -7034,6 +7034,45 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             batch_rows = _sib_rows
                     except pyodbc.Error:
                         pass
+
+        # LIKE AUGMENTATION FOR MULTI-LINE ENTRIES:
+        # When the entry has multiple production-line groups (e.g. UD501+UD502)
+        # and the exact-bz query found results, some per-line sibling batches may
+        # still be missing.  The most common scenario: the operator stored one
+        # line's batch with bz="LR6 UD501 UD502 15" (has the "15" suffix) while
+        # the other line's batch was stored as bz="LR6 UD501 UD502" (no suffix).
+        # The exact match finds the "15"-suffix batches but misses the no-suffix
+        # siblings.  Per-batch mode then only sees one line's trays, leaving the
+        # second production line empty.
+        #
+        # Fix: for multi-line entries (len(entry.groups) >= 2), always run the
+        # LIKE search and merge any newly-discovered batches (deduped by id) into
+        # batch_rows so per-batch mode has the complete set of per-line batches.
+        # Single-line entries are excluded to avoid pulling in unrelated batches
+        # for other production lines (e.g. "LR6 UD501 UD502" matching "LR6 UD501").
+        _n_entry_groups = len(entry.groups) if entry.groups else 0
+        if _n_entry_groups >= 2 and batch_rows and _clean_remark:
+            try:
+                _aug_pattern = f"%{_clean_remark}%"
+                _aug_sql = (
+                    "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                    " WHERE bz LIKE ? ORDER BY fdrq DESC"
+                )
+                _aug_rows = _read_dmpdata(_aug_sql, (_aug_pattern,))
+                if _aug_rows:
+                    _existing_ids: set[str] = {
+                        str(_dm2000_get_value(r, "id") or "") for r in batch_rows
+                    }
+                    for _ar in _aug_rows:
+                        _ar_id = str(_dm2000_get_value(_ar, "id") or "")
+                        if _ar_id and _ar_id not in _existing_ids:
+                            batch_rows = list(batch_rows) + [_ar]
+                            _existing_ids.add(_ar_id)
+            except pyodbc.Error as exc:
+                logger.debug(
+                    "_compute_dmp_perf_groups: LIKE augmentation failed '%s': %s",
+                    _clean_remark, exc,
+                )
 
         # Save the entry-level routing flags before the per-batch merge so that
         # each additional batch in the multi-batch loop can start from a clean

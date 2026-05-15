@@ -4625,6 +4625,7 @@ def _build_preview_workbook(  # noqa: C901
     from ``telemetry_by_baty``.
     """
     is_dmp = report_kind == "dmp"
+    is_dm3000 = report_kind == "dm3000"
     from openpyxl import Workbook as _Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter as _get_col_letter
@@ -4737,7 +4738,7 @@ def _build_preview_workbook(  # noqa: C901
         _unifrate_display = f"{_unifrate_val:.2f} %" if _unifrate_val is not None else str(_unifrate_raw)
 
     _voltage_type_val = archive_fields.get("voltage_type") or "-"
-    _load_resistance_val = _append_unit(archive_fields.get("load_resistance") or "", "ohm")
+    _load_resistance_val = _append_unit(archive_fields.get("load_resistance") or "", "mA" if is_dm3000 else "ohm")
     _endpoint_voltage_val = _append_unit(archive_fields.get("endpoint_voltage") or "", "V")
 
     if is_dmp:
@@ -4771,6 +4772,9 @@ def _build_preview_workbook(  # noqa: C901
     # Instrument row (full width, italic)
     if is_dmp:
         _set(r, 1, "Testing equipment: Type DMP-1 Power Discharge Analyzer (V7.00)",
+             italic=True, align="left", merge_to=total_cols)
+    elif is_dm3000:
+        _set(r, 1, "Measure Instrument: Type DM3000 Automatic Discharge Test System (V2.49)",
              italic=True, align="left", merge_to=total_cols)
     else:
         _set(r, 1, "Measure Instrument: Type DM2000 Automatic Discharge Test System (V6.22)",
@@ -4824,7 +4828,7 @@ def _build_preview_workbook(  # noqa: C901
         r += 1
 
     # Duration section header
-    _duration_unit_label = "times" if is_dmp else "hour"
+    _duration_unit_label = "times" if is_dmp else ("minute" if is_dm3000 else "hour")
     _set(r, 1, f"The Duration of Series Designated Voltage (Unit: {_duration_unit_label})",
          fill=fill_section, merge_to=total_cols, italic=True, align="left")
     r += 1
@@ -4838,7 +4842,10 @@ def _build_preview_workbook(  # noqa: C901
                     mins = row.get("minutes") or row.get("MINUTES")
                     if mins is not None:
                         f = float(mins)
-                        return None if math.isnan(f) else f / 60.0
+                        if math.isnan(f):
+                            return None
+                        # DM3000 reports duration in minutes; DM2000 converts to hours.
+                        return f if is_dm3000 else f / 60.0
             except (TypeError, ValueError):
                 pass
         return None
@@ -5176,10 +5183,24 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
         for b in batys:
             row = battery_params.setdefault(b, {"baty": b})
             if row.get("sot_mah") is None:
-                fcv = row.get("fcv")
-                sot = _compute_sot_mah_from_tav(time_at_volt_map.get(b, []), load_r, fcv)
-                if sot is not None:
-                    row["sot_mah"] = sot
+                if cfg.name == "dm3000":
+                    # DM3000: constant-current discharge; load_r is current in mA.
+                    # SOt(mAh) = I(mA) × total_time(min) / 60
+                    tav_rows = time_at_volt_map.get(b, [])
+                    valid_mins = [
+                        float(tr.get("minutes") or tr.get("MINUTES"))
+                        for tr in tav_rows
+                        if (tr.get("minutes") or tr.get("MINUTES")) is not None
+                    ]
+                    if valid_mins:
+                        max_min = max(valid_mins)
+                        if max_min > 0:
+                            row["sot_mah"] = round(load_r * max_min / 60.0, 3)
+                else:
+                    fcv = row.get("fcv")
+                    sot = _compute_sot_mah_from_tav(time_at_volt_map.get(b, []), load_r, fcv)
+                    if sot is not None:
+                        row["sot_mah"] = sot
 
     try:
         workbook_bytes = _build_preview_workbook(
@@ -5190,6 +5211,7 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
             time_at_volt_map=time_at_volt_map,
             battery_params=battery_params,
             endpoint_cutoff=payload.endpoint_cutoff,
+            report_kind=cfg.name,
         )
     except Exception as exc:
         logger.exception("Error building preview workbook for archname=%s: %s", payload.archname, exc)

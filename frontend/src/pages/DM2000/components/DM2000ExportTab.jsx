@@ -408,6 +408,7 @@ export default function DM2000ExportTab({ stationId, selection, module = 'dm2000
               previewBatys={previewBatys}
               reportEndpoint={reportEndpoint}
               t={t}
+              module={module}
             />
           </Space>
         )}
@@ -427,7 +428,7 @@ export default function DM2000ExportTab({ stationId, selection, module = 'dm2000
   );
 }
 
-function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, batteryParams, previewBatys, reportEndpoint, t }) {
+function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, batteryParams, previewBatys, reportEndpoint, t, module = 'dm2000' }) {
   const cellStyle = {
     border: '1px solid #d9d9d9',
     padding: '3px 6px',
@@ -476,10 +477,10 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
       return sj != null && Math.abs(sj - threshold) < 0.001;
     });
     if (!row) return '-';
-    // The time-at-voltage endpoint returns values in minutes; the report
-    // preview and DM2000 Excel export both display them in hours.
+    // DM3000 stores and reports duration in minutes; DM2000 converts minutes to hours.
     const val = safeNum(row.minutes ?? row.MINUTES);
-    return val != null ? (val / 60).toFixed(3) : '-';
+    if (val == null) return '-';
+    return module === 'dm3000' ? val.toFixed(3) : (val / 60).toFixed(3);
   };
 
   const fmtStat = (baty, key) => {
@@ -514,6 +515,15 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
     if (!tav || tav.length === 0) return '-';
     const r = safeNum(archiveFields.load_resistance);
     if (!r || r <= 0) return '-';
+    if (module === 'dm3000') {
+      // DM3000: constant-current discharge; load_resistance stores current in mA.
+      // SOt(mAh) = I(mA) × total_time(min) / 60
+      const maxMins = Math.max(
+        ...tav.map((e) => safeNum(e.minutes ?? e.MINUTES)).filter((v) => v != null),
+      );
+      return maxMins > 0 ? fmt(r * maxMins / 60, 3) : '-';
+    }
+    // DM2000: variable-current discharge via load resistance (Ohm's law).
     const fcvRaw = statsMap[baty]?.FCV ?? getBatteryField(row, 'fcv', 'FCV');
     const fcv = safeNum(fcvRaw);
     const points = tav
@@ -640,7 +650,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
             <td style={labelStyle}>{t('dm2000VoltageType')}</td>
             <td colSpan={Math.floor((numCols - 1) / 2)} style={cellStyle}>{archiveFields.voltage_type || '-'}</td>
             <td style={labelStyle}>{t('dm2000LoadResistance')}</td>
-            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{appendUnit(archiveFields.load_resistance, 'ohm')}</td>
+            <td colSpan={numCols - Math.floor((numCols - 1) / 2) - 2} style={cellStyle}>{appendUnit(archiveFields.load_resistance, module === 'dm3000' ? 'mA' : 'ohm')}</td>
           </tr>
           <tr>
             <td style={labelStyle}>{t('dm2000Trademark')}</td>
@@ -675,7 +685,9 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
           {/* Measure Instrument row */}
           <tr>
             <td colSpan={numCols} style={{ ...cellStyle, fontStyle: 'italic' }}>
-              {`${t('dm2000MeasureInstrument')}: Type DM2000 Automatic Discharge Test System (V6.22)`}
+              {module === 'dm3000'
+                ? `${t('dm2000MeasureInstrument')}: Type DM3000 Automatic Discharge Test System (V2.49)`
+                : `${t('dm2000MeasureInstrument')}: Type DM2000 Automatic Discharge Test System (V6.22)`}
             </td>
           </tr>
           {/* Battery column headers */}
@@ -713,7 +725,7 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
           {/* Duration of Series Designated Voltage */}
           <tr>
             <td colSpan={numCols} style={{ ...cellStyle, fontStyle: 'italic', background: '#f0f5ff' }}>
-              The Duration of Series Designated Voltage (Unit: hour)
+              {`The Duration of Series Designated Voltage (Unit: ${module === 'dm3000' ? 'minute' : 'hour'})`}
             </td>
           </tr>
           {visibleThresholds.map((threshold) => {

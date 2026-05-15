@@ -7005,74 +7005,69 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except pyodbc.Error as exc:
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
-        # SIBLING BATCH DISCOVERY: When only one batch was found (e.g. via the
-        # batch_id fallback) and its bz indicates multiple production lines,
-        # search for other per-line batches that share the same bz.  This
-        # handles the common case where the DMP operator typed the remark in a
-        # different word order in the DMP machine than the web UI entry
-        # (e.g. "LR6 UD502 UD501 15" in the machine vs "LR6 UD501 UD502 15"
-        # in the UI), so both the exact-match and LIKE lookups failed while
-        # the batch_id lookup found only one of the two per-line batches.
-        # Without this step per-batch mode cannot activate (len(batch_rows)<2)
-        # and the positional split assigns everything to slot 0, leaving
-        # the second production line (e.g. UD502) without any data.
-        if len(batch_rows) == 1:
-            _sib_bz = str(_dm2000_get_value(batch_rows[0], "bz") or "").strip()
-            if _sib_bz:
-                _sib_n = len([
-                    g for g in _parse_bz_groups(_strip_remark_suffixes(_sib_bz)[0])
-                    if g.get("chuyen")
-                ])
-                if _sib_n >= 2:
-                    try:
-                        _sib_rows = _read_dmpdata(
-                            "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
-                            " WHERE bz = ? ORDER BY fdrq DESC",
-                            (_sib_bz,),
-                        )
-                        if _sib_rows and len(_sib_rows) > 1:
-                            batch_rows = _sib_rows
-                    except pyodbc.Error:
-                        pass
-
-        # LIKE AUGMENTATION FOR MULTI-LINE ENTRIES:
-        # When the entry has multiple production-line groups (e.g. UD501+UD502)
-        # and the exact-bz query found results, some per-line sibling batches may
-        # still be missing.  The most common scenario: the operator stored one
-        # line's batch with bz="LR6 UD501 UD502 15" (has the "15" suffix) while
-        # the other line's batch was stored as bz="LR6 UD501 UD502" (no suffix).
-        # The exact match finds the "15"-suffix batches but misses the no-suffix
-        # siblings.  Per-batch mode then only sees one line's trays, leaving the
-        # second production line empty.
+        # CROSS-TOKEN SIBLING SEARCH: For multi-line entries (n_entry_groups >= 2),
+        # search for per-line sibling batches that may have been stored with the
+        # chuyen tokens in a different bz word order than the entry's raw_remark.
         #
-        # Fix: for multi-line entries (len(entry.groups) >= 2), always run the
-        # LIKE search and merge any newly-discovered batches (deduped by id) into
-        # batch_rows so per-batch mode has the complete set of per-line batches.
-        # Single-line entries are excluded to avoid pulling in unrelated batches
-        # for other production lines (e.g. "LR6 UD501 UD502" matching "LR6 UD501").
+        # Failure mode: entry raw_remark = "LR6 UD501 UD502 15" but the UD502
+        # per-line batch was stored with bz = "LR6 UD502 UD501 15" (reversed).
+        # The exact-bz query misses it (wrong order), the LIKE search with
+        # pattern "%LR6 UD501 UD502%" also misses it (reversed substring), and
+        # the old sibling search with batch.bz = "LR6 UD501 UD502 15" only finds
+        # the already-known batches.  Result: per-batch mode has no UD502 batch,
+        # the positional split assigns everything to slot 0, and the LR6 502 row
+        # disappears from the report.
+        #
+        # Fix: search para_pub once per canonical chuyen token (e.g. "%UD501%",
+        # "%UD502%").  Python-side, keep only batches whose bz contains ALL
+        # canonical tokens (so single-line archives don't sneak in) AND whose
+        # fdrq matches the main batch (same DMP session, not a historical daily
+        # batch from a different date that already has its own SQLite entry).
         _n_entry_groups = len(entry.groups) if entry.groups else 0
-        if _n_entry_groups >= 2 and batch_rows and _clean_remark:
-            try:
-                _aug_pattern = f"%{_clean_remark}%"
-                _aug_sql = (
-                    "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
-                    " WHERE bz LIKE ? ORDER BY fdrq DESC"
-                )
-                _aug_rows = _read_dmpdata(_aug_sql, (_aug_pattern,))
-                if _aug_rows:
-                    _existing_ids: set[str] = {
-                        str(_dm2000_get_value(r, "id") or "") for r in batch_rows
-                    }
-                    for _ar in _aug_rows:
-                        _ar_id = str(_dm2000_get_value(_ar, "id") or "")
-                        if _ar_id and _ar_id not in _existing_ids:
-                            batch_rows = list(batch_rows) + [_ar]
-                            _existing_ids.add(_ar_id)
-            except pyodbc.Error as exc:
-                logger.debug(
-                    "_compute_dmp_perf_groups: LIKE augmentation failed '%s': %s",
-                    _clean_remark, exc,
-                )
+        if batch_rows and _n_entry_groups >= 2 and _clean_remark:
+            _main_fdrq_sib = str(_dm2000_get_value(batch_rows[0], "fdrq") or "").strip()
+            _canon_gs_sib = [g for g in _parse_bz_groups(_clean_remark) if g.get("chuyen")]
+            _canon_tokens_sib = [
+                t for t in (
+                    _group_to_bz_token(g["loai"], g["chuyen"]) for g in _canon_gs_sib
+                ) if t
+            ]
+            if _main_fdrq_sib and len(_canon_tokens_sib) >= 2:
+                _existing_ids_sib: set[str] = {
+                    str(_dm2000_get_value(r, "id") or "") for r in batch_rows
+                }
+                for _sib_tok in _canon_tokens_sib:
+                    try:
+                        _sib_tok_rows = _read_dmpdata(
+                            "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                            " WHERE bz LIKE ? ORDER BY fdrq DESC",
+                            (f"%{_sib_tok}%",),
+                        )
+                    except pyodbc.Error as exc:
+                        logger.debug(
+                            "_compute_dmp_perf_groups: sibling token search '%s' failed: %s",
+                            _sib_tok, exc,
+                        )
+                        continue
+                    for _sib_ar in _sib_tok_rows or []:
+                        _sib_ar_id = str(_dm2000_get_value(_sib_ar, "id") or "")
+                        if not _sib_ar_id or _sib_ar_id in _existing_ids_sib:
+                            continue
+                        _sib_ar_bz = str(_dm2000_get_value(_sib_ar, "bz") or "")
+                        _sib_ar_fdrq = str(_dm2000_get_value(_sib_ar, "fdrq") or "").strip()
+                        _sib_ar_bz_lower = _sib_ar_bz.lower()
+                        # Only add if same session (fdrq match) and bz contains
+                        # ALL canonical tokens (prevents unrelated single-line
+                        # batches from different sessions being included).
+                        if (
+                            _sib_ar_fdrq == _main_fdrq_sib
+                            and all(
+                                t.lower() in _sib_ar_bz_lower
+                                for t in _canon_tokens_sib
+                            )
+                        ):
+                            batch_rows = list(batch_rows) + [_sib_ar]
+                            _existing_ids_sib.add(_sib_ar_id)
 
         # Save the entry-level routing flags before the per-batch merge so that
         # each additional batch in the multi-batch loop can start from a clean

@@ -1036,6 +1036,13 @@ def _install_dmp_batch_fakes(
     id_batches: dict[str, list[dict]] | None = None,
     # Per-batch scrq: maps batch_id → scrq date string for para_singl lookups.
     scrq_by_batch: dict[str, str] | None = None,
+    # Per-pattern LIKE results: maps LIKE pattern string (as passed to SQL, e.g.
+    # "%UD501%") → list[dict].  When set, a "WHERE bz LIKE ?" call whose
+    # parameter matches a key in this dict returns the associated list.  Falls
+    # back to *like_batches* for patterns not present in the map.  This lets
+    # tests simulate the cross-token sibling search where different LIKE
+    # patterns return different per-line batch sets.
+    like_batches_by_pattern: dict[str, list[dict]] | None = None,
 ) -> dict:
     """Install fake _read_dmpdata + _dmp_compute_group_perf for batch tests.
 
@@ -1065,6 +1072,8 @@ def _install_dmp_batch_fakes(
         id_batches = {}
     if scrq_by_batch is None:
         scrq_by_batch = {}
+    if like_batches_by_pattern is None:
+        like_batches_by_pattern = {}
     captured: dict[tuple[str, str], list[int]] = {}
 
     def fake_read_dmpdata(sql, params=()):
@@ -1074,6 +1083,9 @@ def _install_dmp_batch_fakes(
                 return list(exact_batches_by_bz[param_bz])
             return list(exact_batches or [])
         if "FROM para_pub" in sql and "WHERE bz LIKE ?" in sql:
+            param_pattern = str(params[0]) if params else ""
+            if param_pattern in like_batches_by_pattern:
+                return list(like_batches_by_pattern[param_pattern])
             return list(like_batches or [])
         if "FROM para_pub" in sql and "WHERE id = ?" in sql:
             param_id = str(params[0]) if params else ""
@@ -1933,15 +1945,17 @@ def test_dmp_single_combined_batch_unaffected_by_per_batch_mode(
     )
 
 
-def test_dmp_like_augmentation_finds_ud502_when_exact_only_has_ud501(
+def test_dmp_cross_token_search_finds_ud502_when_exact_only_has_ud501(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression test for the production failure where the exact-bz query
     returns only UD501 per-line batches (bz="LR6 UD501 UD502 15") while the
-    UD502 per-line batch was stored with bz="LR6 UD501 UD502" (no "15" suffix).
+    UD502 per-line batch was stored with bz="LR6 UD501 UD502" (no "15" suffix)
+    but with the same fdrq (same session date).
 
-    The LIKE augmentation path must find the UD502 sibling batch and add it to
-    batch_rows so per-batch mode correctly assigns trays to both lines.
+    The cross-token sibling search path must find the UD502 sibling batch via
+    a per-chuyen LIKE query ("%UD502%") and add it to batch_rows so per-batch
+    mode correctly assigns trays to both lines.
 
     Before the fix the LIKE fallback was skipped because batch_rows was already
     non-empty (two UD501 batches), leaving the combined active-trays pool as
@@ -1951,12 +1965,16 @@ def test_dmp_like_augmentation_finds_ud502_when_exact_only_has_ud501(
     # Two UD501 per-line batches found by exact match (bz has "15" suffix).
     ud501_a = _make_dmp_batch(batch_id="UD501_A", bz="LR6 UD501 UD502 15", fdrq="2026-04-18")
     ud501_b = _make_dmp_batch(batch_id="UD501_B", bz="LR6 UD501 UD502 15", fdrq="2026-01-06")
-    # UD502 per-line batch found ONLY by LIKE (bz lacks "15" suffix).
+    # UD502 per-line batch found ONLY by cross-token search (bz lacks "15" suffix,
+    # but same fdrq as ud501_a so the fdrq-restricted sibling search picks it up).
     ud502_a = _make_dmp_batch(batch_id="UD502_A", bz="LR6 UD501 UD502", fdrq="2026-04-18")
     captured = _install_dmp_batch_fakes(
         monkeypatch,
         exact_batches=[ud501_a, ud501_b],
-        like_batches=[ud501_a, ud501_b, ud502_a],  # LIKE finds all three
+        # Cross-token LIKE searches return all three; Python filter keeps ud502_a
+        # because it has same fdrq="2026-04-18" as main batch (ud501_a) and
+        # its bz contains both "UD501" and "UD502".
+        like_batches=[ud501_a, ud501_b, ud502_a],
         active_trays_by_batch={
             "UD501_A": [1, 2, 3, 4],
             "UD501_B": [1, 2, 3, 4],
@@ -1982,10 +2000,10 @@ def test_dmp_like_augmentation_finds_ud502_when_exact_only_has_ud501(
 
     # Both sheets must be present.
     assert "LR6 501" in groups, (
-        "sheet 'LR6 501' must be present after LIKE augmentation"
+        "sheet 'LR6 501' must be present"
     )
     assert "LR6 502" in groups, (
-        "sheet 'LR6 502' must be present after LIKE augmentation finds UD502_A"
+        "sheet 'LR6 502' must be present after cross-token sibling search finds UD502_A"
     )
     # UD502's trays (6-9) must have been used for LR6 502.
     ud502_calls = [v for (bid, _), v in captured.items() if bid == "UD502_A"]
@@ -2127,11 +2145,11 @@ def test_dmp_sibling_lookup_activates_per_batch_when_batch_id_only_finds_one(
     order in DB), LIKE lookup also fails (substring not found), and the direct
     batch_id lookup finds only ONE of the two batches.
 
-    The sibling-batch discovery path must then query para_pub again using the
-    ONE found batch's own bz field ('LR6 UD502 UD501 15') and return BOTH
-    per-line batches, enabling per-batch mode and loading both lines.
+    The cross-token sibling search must find the second per-line batch via a
+    per-chuyen LIKE query ("%UD501%" / "%UD502%") restricted to the same fdrq,
+    enabling per-batch mode and loading both lines.
     """
-    # DB has two per-line batches with reversed bz.
+    # DB has two per-line batches with reversed bz — same fdrq (same session).
     batch_a = _make_dmp_batch(
         batch_id="BA_SIBLING",
         bz="LR6 UD502 UD501 15",   # reversed (as operator typed in DMP machine)
@@ -2139,20 +2157,19 @@ def test_dmp_sibling_lookup_activates_per_batch_when_batch_id_only_finds_one(
     )
     batch_b = _make_dmp_batch(
         batch_id="BB_SIBLING",
-        bz="LR6 UD502 UD501 15",   # same reversed bz
-        fdrq="2026-04-02",
+        bz="LR6 UD502 UD501 15",   # same reversed bz, same session date
+        fdrq="2026-04-20",         # same fdrq — both batches from the same session
     )
 
     captured = _install_dmp_batch_fakes(
         monkeypatch,
         # Exact match with raw_remark='LR6 UD501 UD502 15' → nothing (wrong order).
         exact_batches=[],
-        # LIKE '%LR6 UD501 UD502%' → nothing (different word order).
-        like_batches=[],
         # Direct batch_id lookup for 'BA_SIBLING' → finds batch_a only.
         id_batches={"BA_SIBLING": [batch_a]},
-        # Sibling lookup with batch_a.bz='LR6 UD502 UD501 15' → both batches.
-        exact_batches_by_bz={"LR6 UD502 UD501 15": [batch_a, batch_b]},
+        # Per-chuyen LIKE searches (cross-token sibling search): both batches
+        # contain "UD501" and "UD502" in their bz, same fdrq → both found.
+        like_batches=[batch_a, batch_b],
         active_trays_by_batch={
             "BA_SIBLING": [1, 2, 3, 4],   # UD502's physical batteries (bz slot 0)
             "BB_SIBLING": [5, 6, 7, 8],   # UD501's physical batteries (bz slot 1)

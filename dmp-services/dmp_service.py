@@ -4580,7 +4580,7 @@ def _compute_uniform_rate_from_tav(
             except (TypeError, ValueError):
                 pass
 
-    if not times:
+    if len(times) < 2:
         return None
 
     max_t = max(times)
@@ -6505,13 +6505,13 @@ def _dmp_compute_group_perf(
     # The average used in the uniformity formula also uses n_trays so the
     # denominator is consistent with avg_count above.
     uniform_rate: Optional[float] = None
-    if count_list:
+    if len(count_list) >= 2:
         avg_c = sum(count_list) / n_trays
         if avg_c > 0:
             uniform_rate = round(
                 (1.0 - (max(count_list) - min(count_list)) / avg_c) * 100.0, 2
             )
-    elif hours_list and avg_h and avg_h > 0:
+    elif len(hours_list) >= 2 and avg_h and avg_h > 0:
         uniform_rate = round(
             (1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2
         )

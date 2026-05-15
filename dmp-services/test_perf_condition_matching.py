@@ -629,6 +629,114 @@ def test_dmp_tray_assignment_explicit_trays_bypassed() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# _get_dmp_active_trays — phantom recordnum filtering
+#
+# The DMP machine creates para_singl rows for ALL 9 tray slots at the start of
+# every session, writing a non-empty cdmc (archive filename) even for trays
+# that had no battery loaded.  Those phantom rows carry a very small recordnum
+# (0, 1, 2, or 4) — the machine's placeholder written before real discharge
+# starts.  Real measurements accumulate at least 5 records (typically
+# hundreds or thousands).
+#
+# _get_dmp_active_trays must exclude phantom rows so _split_active_trays_for_
+# group_count receives only the truly occupied trays and correctly places
+# production-line groups.
+# --------------------------------------------------------------------------- #
+
+
+def test_get_dmp_active_trays_excludes_phantom_recordnum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Para_singl rows with recordnum ≤ 4 (DMP phantom placeholders) must be
+    excluded from the active-tray list even when cdmc is non-empty.
+
+    Mirrors the real-world failure: batch 2026040313572712 with remark
+    "LR6 UD501 UD502" had all 9 trays' cdmc set to '20260403135922' but
+    tray 5 had recordnum=1 (phantom). The system was incorrectly assigning
+    line 502 to trays [5,6,7,8] instead of the correct [6,7,8,9].
+    """
+    # Simulate para_singl rows for batch with cdmc set for all 9 trays but
+    # tray 5 is phantom (recordnum=1).
+    fake_rows = [
+        {"baty": 1, "cdmc": "20260403135922", "recordnum": "1332"},
+        {"baty": 2, "cdmc": "20260403135922", "recordnum": "1227"},
+        {"baty": 3, "cdmc": "20260403135922", "recordnum": "1317"},
+        {"baty": 4, "cdmc": "20260403135922", "recordnum": "1294"},
+        {"baty": 5, "cdmc": "20260403135922", "recordnum": "1"},   # phantom
+        {"baty": 6, "cdmc": "20260403135922", "recordnum": "1315"},
+        {"baty": 7, "cdmc": "20260403135922", "recordnum": "1364"},
+        {"baty": 8, "cdmc": "20260403135922", "recordnum": "1369"},
+        {"baty": 9, "cdmc": "20260403135922", "recordnum": "1360"},
+    ]
+
+    def fake_read(sql, params=()):
+        return list(fake_rows)
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read)
+
+    result = m._get_dmp_active_trays("2026040313572712")
+    assert result == [1, 2, 3, 4, 6, 7, 8, 9], (
+        f"tray 5 (recordnum=1) must be excluded from active trays; got {result}"
+    )
+    # Verify the two-line split then assigns correctly:
+    # line 501 → [1,2,3,4], line 502 → [6,7,8,9]
+    split = m._split_active_trays_for_group_count(2, result)
+    assert split == [[1, 2, 3, 4], [6, 7, 8, 9]], (
+        f"two-line split of active trays {result} must be [[1,2,3,4],[6,7,8,9]]; got {split}"
+    )
+
+
+def test_get_dmp_active_trays_excludes_all_phantom_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All DMP phantom recordnum values (0, 1, 2, 4) must be excluded.
+    Recordnum=5 or higher is treated as real data (safe fallback boundary).
+    """
+    phantom_values = [0, 1, 2, 4]
+    min_real = 5
+
+    for phantom in phantom_values:
+        fake_rows = [
+            {"baty": 3, "cdmc": "archive.mdb", "recordnum": str(phantom)},
+            {"baty": 7, "cdmc": "archive.mdb", "recordnum": str(min_real)},
+        ]
+
+        def fake_read(sql, params=(), _rows=fake_rows):
+            return list(_rows)
+
+        monkeypatch.setattr(m, "_read_dmpdata", fake_read)
+        result = m._get_dmp_active_trays("test")
+        assert 3 not in result, (
+            f"baty=3 with recordnum={phantom} (phantom) must be excluded; got {result}"
+        )
+        assert 7 in result, (
+            f"baty=7 with recordnum={min_real} (real) must be included; got {result}"
+        )
+
+
+def test_get_dmp_active_trays_falls_back_when_recordnum_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When recordnum is absent from the result row (older schema), the tray
+    must still be included as long as cdmc is non-empty (backward-compatible
+    fallback).
+    """
+    fake_rows = [
+        {"baty": 4, "cdmc": "archive.mdb"},   # no recordnum column
+        {"baty": 5, "cdmc": "-"},              # empty cdmc → excluded
+    ]
+
+    def fake_read(sql, params=()):
+        return list(fake_rows)
+
+    monkeypatch.setattr(m, "_read_dmpdata", fake_read)
+    result = m._get_dmp_active_trays("test")
+    assert result == [4], (
+        f"tray 4 (no recordnum) must be included; tray 5 (empty cdmc) excluded; got {result}"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # DMP exact-match batch search — Bug 2 fix (Request #241 follow-up)
 #
 # The broad ``bz LIKE %clean_remark%`` search picks the most-recent matching
@@ -1108,8 +1216,11 @@ def _install_dmp_batch_fakes(
         if "FROM para_singl" in sql and "SELECT baty, cdmc" in sql:
             sid = str(params[0]) if params else ""
             trays = active_trays_by_batch.get(sid, active_trays)
+            # Include a high recordnum so _get_dmp_active_trays does not
+            # mistake these synthetic rows for phantom placeholder entries.
             return [
-                {"baty": i, "cdmc": f"sub_{sid}.mdb"} for i in trays
+                {"baty": i, "cdmc": f"sub_{sid}.mdb", "recordnum": 1000}
+                for i in trays
             ]
         if "SELECT scdw FROM para_singl" in sql:
             sid = str(params[0]) if params else ""

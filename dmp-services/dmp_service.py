@@ -5963,10 +5963,31 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
 
 
 def _get_dmp_active_trays(batch_id: str) -> list[int]:
-    """Return DMP tray numbers that have a para_singl archive for a batch."""
+    """Return DMP tray numbers that have real measurement data for a batch.
+
+    The DMP machine always creates a ``para_singl`` row for every tray slot
+    (1–9) at the start of a session, filling ``cdmc`` with the session
+    archive filename even for trays that had no battery loaded.  Those
+    phantom rows carry a tiny ``recordnum`` value (0, 1, 2, or 4) — the
+    machine's default placeholder written before any real discharge starts.
+    Genuine measurements always accumulate at least 5 records.
+
+    Two-stage validation:
+
+    1. ``cdmc`` must be non-empty (the archive file exists).
+    2. ``recordnum`` must be > ``_DMP_PHANTOM_RECORDNUM_MAX`` (= 4) when the
+       column is present.  If the column is absent (older schema) the check
+       is skipped and the tray is treated as active (safe fallback).
+    """
+    # Threshold: phantom placeholder rows written by the DMP machine always
+    # have recordnum ≤ 4 (observed values: 0, 1, 2, 4).  Real measurements
+    # produce at least 5 records (typically hundreds to thousands).
+    _DMP_PHANTOM_RECORDNUM_MAX = 4
+
     try:
         rows = _read_dmpdata(
-            "SELECT baty, cdmc FROM para_singl WHERE sid = ?", (batch_id,)
+            "SELECT baty, cdmc, recordnum FROM para_singl WHERE sid = ?",
+            (batch_id,),
         )
     except pyodbc.Error:
         rows = []
@@ -5975,6 +5996,19 @@ def _get_dmp_active_trays(batch_id: str) -> list[int]:
         cdmc = _dm2000_get_value(row, "cdmc")
         if _dmp_is_empty(cdmc):
             continue
+        # Exclude phantom tray slots: para_singl rows whose recordnum is at or
+        # below the placeholder threshold have no real discharge data.  When
+        # recordnum is missing from the result (older schema or column lookup
+        # failure) we fall back to the cdmc-only check so existing deployments
+        # are not broken.
+        raw_recordnum = _dm2000_get_value(row, "recordnum")
+        if raw_recordnum is not None:
+            try:
+                rnum = int(str(raw_recordnum).split(".")[0])
+                if rnum <= _DMP_PHANTOM_RECORDNUM_MAX:
+                    continue
+            except (TypeError, ValueError):
+                pass  # unparseable recordnum → fall through and include the tray
         raw_baty = _dm2000_get_value(row, "baty")
         try:
             baty = int(raw_baty)

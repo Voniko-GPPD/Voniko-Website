@@ -737,7 +737,71 @@ def test_get_dmp_active_trays_falls_back_when_recordnum_absent(
 
 
 # --------------------------------------------------------------------------- #
-# DMP exact-match batch search — Bug 2 fix (Request #241 follow-up)
+# _is_valid_battery_time — unified DM2000/DM3000 phantom-battery check
+#
+# _is_valid_battery_time is the DM2000/DM3000 analogue of the DMP check
+# ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.  It is used in
+# _load_vtime_for_archive and _derive_dm2000_batteries_from_vtime to exclude
+# time-at-voltage column values that represent phantom (no-battery-loaded) slots.
+# The same "validate first, then split" algorithm applies to all three machines.
+# --------------------------------------------------------------------------- #
+
+
+def test_is_valid_battery_time_accepts_positive_floats() -> None:
+    """Real discharge times (positive floats) must be accepted."""
+    assert m._is_valid_battery_time("1.67") is True
+    assert m._is_valid_battery_time("42.5") is True
+    assert m._is_valid_battery_time(15.0) is True
+    assert m._is_valid_battery_time("0.001") is True   # minimal but positive
+
+
+def test_is_valid_battery_time_rejects_phantom_values() -> None:
+    """Phantom / no-data values must be rejected.
+
+    Mirrors the DMP ``recordnum ≤ 4`` check: values that the DM2000/DM3000
+    machine writes for unloaded battery slots must all return False.
+    """
+    # Machine writes nothing / placeholder text
+    assert m._is_valid_battery_time(None) is False
+    assert m._is_valid_battery_time("") is False
+    assert m._is_valid_battery_time("  ") is False
+    assert m._is_valid_battery_time("--") is False
+    assert m._is_valid_battery_time("None") is False
+    # Zero: physically impossible (no discharge took place)
+    assert m._is_valid_battery_time(0) is False
+    assert m._is_valid_battery_time("0") is False
+    assert m._is_valid_battery_time("0.00") is False
+    assert m._is_valid_battery_time(0.0) is False
+    # Negative: measurement artefact
+    assert m._is_valid_battery_time(-1.0) is False
+    assert m._is_valid_battery_time("-5") is False
+    # NaN
+    import math
+    assert m._is_valid_battery_time(math.nan) is False
+    assert m._is_valid_battery_time(float("nan")) is False
+    # Unparseable text
+    assert m._is_valid_battery_time("abc") is False
+    assert m._is_valid_battery_time("N/A") is False
+
+
+def test_is_valid_battery_time_consistent_with_dmp_phantom_logic() -> None:
+    """The DM2000 check and the DMP check must be logically equivalent for the
+    common case: both must reject a zero/empty slot and accept a real reading.
+
+    DMP uses ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX`` (int threshold).
+    DM2000 uses ``_is_valid_battery_time(val)`` (float + sign check).
+    Both reject placeholder values; both accept real measurements.
+    """
+    # DMP: recordnum=1 is phantom; recordnum=1000 is real.
+    assert 1 <= m._DMP_PHANTOM_RECORDNUM_MAX   # 1 is phantom (≤ 4)
+    assert 1000 > m._DMP_PHANTOM_RECORDNUM_MAX  # 1000 is real
+
+    # DM2000 analogue: 0.0 is phantom; 1.67 is real.
+    assert m._is_valid_battery_time("0.0") is False   # phantom
+    assert m._is_valid_battery_time("1.67") is True   # real
+
+
+
 #
 # The broad ``bz LIKE %clean_remark%`` search picks the most-recent matching
 # batch, which is often the wrong one (e.g. "LR6 UD501 UD502" with a later

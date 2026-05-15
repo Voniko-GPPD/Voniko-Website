@@ -3819,16 +3819,8 @@ def _derive_dm2000_batteries_from_vtime(cfg, archname: str) -> list[dict]:
     active: set[int] = set()
     for row in rows:
         for i in range(1, 10):
-            value = row.get(f"time{i}")
-            if value in (None, "", "--"):
-                continue
-            try:
-                num = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(num):
-                continue
-            active.add(i)
+            if _is_valid_battery_time(row.get(f"time{i}")):
+                active.add(i)
     return [{"baty": i} for i in sorted(active)]
 
 
@@ -5212,6 +5204,46 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
 
 # ─── Performance Monitoring Report ──────────────────────────────────────────
 
+# ── Unified battery-time validation ──────────────────────────────────────────
+# Both DM2000 and DM3000 machines record per-channel discharge time in the
+# wide-format ``ls_vtime``/``ls_timev`` tables (one column per battery slot).
+# Like the DMP machine's ``para_singl.recordnum`` for phantom tray slots, the
+# DM2000/DM3000 machine writes NULL, an empty string, ``"--"``, or (in rare
+# firmware variants) ``0.0`` for slots that had no battery loaded.
+#
+# _is_valid_battery_time is the DM2000/DM3000 analogue of the DMP check
+# ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.  It must be used wherever a raw
+# time-at-voltage value is tested to decide whether a battery slot is active.
+# This guarantees the exact same "validate first, then split" algorithm is
+# applied consistently across DMP, DM2000, and DM3000.
+
+
+def _is_valid_battery_time(val) -> bool:
+    """Return True iff a raw battery time-at-voltage value represents real data.
+
+    A valid time value is a finite float that is strictly positive.  Any of the
+    following are treated as phantom/placeholder (no battery loaded):
+
+    * ``None`` / empty string / ``"--"`` / ``"None"`` → no value written
+    * non-numeric text → unparseable, treated as absent
+    * ``NaN`` or ``0.0`` → physically impossible discharge time / not started
+    * negative values → measurement artefact, not real discharge
+
+    This is the DM2000/DM3000 equivalent of the DMP phantom check
+    ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.
+    """
+    if val is None:
+        return False
+    s = str(val).strip()
+    if s in ("", "--", "None"):
+        return False
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return False
+    return not math.isnan(f) and f > 0.0
+
+
 def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
     """Load ALL time-at-voltage data for an archive in a single ODBC query.
 
@@ -5250,15 +5282,9 @@ def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
                 tav: list[dict] = []
                 for row in rows:
                     val = row.get(f"time{i}")
-                    if val is None or str(val).strip() in ("", "--", "None"):
+                    if not _is_valid_battery_time(val):
                         continue
-                    try:
-                        f_val = float(val)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isnan(f_val):
-                        continue
-                    tav.append({"sj": row.get("dy"), "minutes": f_val})
+                    tav.append({"sj": row.get("dy"), "minutes": float(val)})
                 if tav:
                     full_data[i] = tav
     except (pyodbc.Error, HTTPException):
@@ -5277,15 +5303,9 @@ def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
                     tav = []
                     for row in rows:
                         val = row.get(f"tim_vot{i}")
-                        if val is None or str(val).strip() in ("", "--", "None"):
+                        if not _is_valid_battery_time(val):
                             continue
-                        try:
-                            f_val = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isnan(f_val):
-                            continue
-                        tav.append({"sj": row.get("sj"), "minutes": f_val})
+                        tav.append({"sj": row.get("sj"), "minutes": float(val)})
                     if tav:
                         full_data[i] = tav
         except (pyodbc.Error, HTTPException):

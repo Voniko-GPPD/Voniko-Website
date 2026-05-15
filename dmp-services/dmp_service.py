@@ -5187,11 +5187,17 @@ def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportR
                     # DM3000: constant-current discharge; load_r is current in mA.
                     # SOt(mAh) = I(mA) × total_time(min) / 60
                     tav_rows = time_at_volt_map.get(b, [])
-                    valid_mins = [
-                        float(tr.get("minutes") or tr.get("MINUTES"))
-                        for tr in tav_rows
-                        if (tr.get("minutes") or tr.get("MINUTES")) is not None
-                    ]
+                    valid_mins = []
+                    for tr in tav_rows:
+                        raw = tr.get("minutes") or tr.get("MINUTES")
+                        if raw is None:
+                            continue
+                        try:
+                            val = float(raw)
+                            if not math.isnan(val):
+                                valid_mins.append(val)
+                        except (TypeError, ValueError):
+                            pass
                     if valid_mins:
                         max_min = max(valid_mins)
                         if max_min > 0:

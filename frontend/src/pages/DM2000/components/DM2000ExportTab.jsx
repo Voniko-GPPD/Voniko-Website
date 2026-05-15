@@ -518,10 +518,10 @@ function ReportPreview({ archiveFields, companyName, statsMap, timeAtVoltMap, ba
     if (module === 'dm3000') {
       // DM3000: constant-current discharge; load_resistance stores current in mA.
       // SOt(mAh) = I(mA) × total_time(min) / 60
-      const maxMins = Math.max(
-        ...tav.map((e) => safeNum(e.minutes ?? e.MINUTES)).filter((v) => v != null),
-      );
-      return maxMins > 0 ? fmt(r * maxMins / 60, 3) : '-';
+      const validMins = tav.map((e) => safeNum(e.minutes ?? e.MINUTES)).filter((v) => v != null);
+      if (validMins.length === 0) return '-';
+      const maxMins = Math.max(...validMins);
+      return Number.isFinite(maxMins) && maxMins > 0 ? fmt(r * maxMins / 60, 3) : '-';
     }
     // DM2000: variable-current discharge via load resistance (Ohm's law).
     const fcvRaw = statsMap[baty]?.FCV ?? getBatteryField(row, 'fcv', 'FCV');

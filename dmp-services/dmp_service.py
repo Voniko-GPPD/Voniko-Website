@@ -7005,6 +7005,36 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except pyodbc.Error as exc:
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
+        # SIBLING BATCH DISCOVERY: When only one batch was found (e.g. via the
+        # batch_id fallback) and its bz indicates multiple production lines,
+        # search for other per-line batches that share the same bz.  This
+        # handles the common case where the DMP operator typed the remark in a
+        # different word order in the DMP machine than the web UI entry
+        # (e.g. "LR6 UD502 UD501 15" in the machine vs "LR6 UD501 UD502 15"
+        # in the UI), so both the exact-match and LIKE lookups failed while
+        # the batch_id lookup found only one of the two per-line batches.
+        # Without this step per-batch mode cannot activate (len(batch_rows)<2)
+        # and the positional split assigns everything to slot 0, leaving
+        # the second production line (e.g. UD502) without any data.
+        if len(batch_rows) == 1:
+            _sib_bz = str(_dm2000_get_value(batch_rows[0], "bz") or "").strip()
+            if _sib_bz:
+                _sib_n = len([
+                    g for g in _parse_bz_groups(_strip_remark_suffixes(_sib_bz)[0])
+                    if g.get("chuyen")
+                ])
+                if _sib_n >= 2:
+                    try:
+                        _sib_rows = _read_dmpdata(
+                            "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                            " WHERE bz = ? ORDER BY fdrq DESC",
+                            (_sib_bz,),
+                        )
+                        if _sib_rows and len(_sib_rows) > 1:
+                            batch_rows = _sib_rows
+                    except pyodbc.Error:
+                        pass
+
         # Save the entry-level routing flags before the per-batch merge so that
         # each additional batch in the multi-batch loop can start from a clean
         # baseline rather than accumulating flags across batches.
@@ -7471,9 +7501,26 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _n_canonical = len(
             [g for g in _parse_bz_groups(_bz_for_n_stripped) if g.get("chuyen")]
         )
-        _all_same_bz = len(batch_rows) < 2 or all(
-            str(_dm2000_get_value(_b, "bz") or "").strip() == _matched_bz
-            for _b in batch_rows[1:]
+        # _all_same_bz: True when all extra batches share the same canonical
+        # production-line set as the main batch (ignoring Q/15 suffix differences
+        # and any leading date prefixes that older bz values may carry).  Using
+        # chuyen-set equality instead of exact string match prevents LIKE-fallback
+        # batches that differ only in a Q/15 suffix (e.g. "LR6 UD501 UD502" vs
+        # "LR6 UD501 UD502 15") from disabling per-batch mode and causing the
+        # second production line to silently lose all its data.
+        def _bz_chuyen_key(bz_val: str) -> frozenset:
+            _c, _, _ = _strip_remark_suffixes(str(bz_val or "").strip())
+            return frozenset(
+                str(g.get("chuyen", ""))
+                for g in _parse_bz_groups(_c)
+                if g.get("chuyen")
+            )
+        _matched_bz_chuyens = _bz_chuyen_key(_matched_bz)
+        _all_same_bz = len(batch_rows) < 2 or (
+            bool(_matched_bz_chuyens) and all(
+                _bz_chuyen_key(str(_dm2000_get_value(_b, "bz") or "")) == _matched_bz_chuyens
+                for _b in batch_rows[1:]
+            )
         )
         _per_batch_mode = (
             _n_canonical > 1
@@ -7500,10 +7547,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # batch and receives the normal positional split (batch_line_idx=None).
         if _per_batch_mode:
             _pb_all_active = {actual_batch_id: _dmp_active_trays}
-            for _pb in batch_rows[1:]:
+            for _pb_idx, _pb in enumerate(batch_rows[1:], start=1):
                 _pb_id = str(_dm2000_get_value(_pb, "id") or "")
-                if _pb_id and _pb_id not in _pb_all_active:
-                    _pb_all_active[_pb_id] = _get_dmp_active_trays(_pb_id) or []
+                # Use an index-based synthetic key when the batch has no usable
+                # id so it gets its own entry and never borrows trays from a
+                # different batch through an accidental id collision (e.g. when
+                # both batches have null id and would otherwise both resolve to
+                # entry.batch_id as the fallback key).
+                _pb_key = _pb_id if _pb_id else f"__pb_idx_{_pb_idx}__"
+                if _pb_key not in _pb_all_active:
+                    _pb_all_active[_pb_key] = _get_dmp_active_trays(_pb_id) or []
             _pb_combined = sorted({
                 t for ts in _pb_all_active.values()
                 for t in ts if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
@@ -7605,7 +7658,17 @@ def _compute_dmp_perf_groups(  # noqa: C901
         # suffix) each produce their own report row.
         for _xb_abs_idx, _xb in enumerate(batch_rows[1:], start=1):
             _is_quarter, _is_15d = _iq_entry, _i15d_entry
-            _xb_id = str(_dm2000_get_value(_xb, "id") or entry.batch_id)
+            _xb_raw_id = str(_dm2000_get_value(_xb, "id") or "")
+            # Unique key matching the one used in _pb_all_active setup: use the
+            # actual id when available, otherwise an index-based synthetic key.
+            # This prevents a null-id extra batch from accidentally resolving to
+            # entry.batch_id (= actual_batch_id) and borrowing the MAIN batch's
+            # tray list from _pb_all_active, which would cause both batches to
+            # route to slot 0 and leave the second production line empty.
+            _xb_pb_key = _xb_raw_id if _xb_raw_id else f"__pb_idx_{_xb_abs_idx}__"
+            # For para_singl scrq/scdw lookups use the actual id when set,
+            # otherwise fall back to entry.batch_id as a best-effort last resort.
+            _xb_id = _xb_raw_id or str(entry.batch_id or "")
             # Re-use pre-fetched trays when in per-batch mode (avoids a redundant
             # DB call; trays were already fetched during _pb_all_active setup above).
             # Active trays come straight from the active-tray filter for
@@ -7613,10 +7676,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # downstream split returns empty slots and the per-group loop
             # below skips rendering — never fall back to "all 9 trays".
             _xb_active_trays = (
-                _pb_all_active.get(_xb_id)
-                if _per_batch_mode and _xb_id in _pb_all_active
+                _pb_all_active.get(_xb_pb_key)
+                if _per_batch_mode and _xb_pb_key in _pb_all_active
                 else None
-            ) or _get_dmp_active_trays(_xb_id) or []
+            ) or _get_dmp_active_trays(_xb_raw_id) or []
             _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
             # Tray-slot-based per-batch assignment: find which canonical slot
             # this batch's active trays exclusively belong to.  Uses the same

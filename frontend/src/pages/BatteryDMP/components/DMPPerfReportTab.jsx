@@ -911,6 +911,22 @@ function PerfViewTab({ stationId }) {
       for (const data of batchResults) {
         mergedSheets = mergeSheetsData(mergedSheets, data.sheets || {});
       }
+      // Re-sort every sheet's rows chronologically after merging multiple
+      // API batch responses.  Each response is individually sorted by the
+      // backend, but when more than PERF_DATA_BATCH_SIZE entries exist the
+      // payload is split and sent as separate requests.  Merging those
+      // responses in insertion order can leave rows out of date order
+      // (e.g. rows from request 2 appended after all rows from request 1).
+      // YYYY-MM-DD strings sort correctly with plain lexicographic comparison.
+      for (const sheet of Object.values(mergedSheets)) {
+        if (sheet.rows && sheet.rows.length > 1) {
+          sheet.rows.sort((a, b) => {
+            if (a.date < b.date) return -1;
+            if (a.date > b.date) return 1;
+            return 0;
+          });
+        }
+      }
       setSheetsData(mergedSheets);
       const sheetKeys = Object.keys(mergedSheets);
       setActiveSheet(sheetKeys[0] || null);

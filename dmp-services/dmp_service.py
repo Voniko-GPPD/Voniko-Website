@@ -6958,7 +6958,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
         _raw_remark_trimmed = (entry.raw_remark or "").strip()
         if _raw_remark_trimmed:
             _exact_bz_sql = (
-                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
                 " WHERE bz = ? ORDER BY fdrq DESC"
             )
             try:
@@ -6979,7 +6979,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # still match.
             _bz_pattern = f"%{_remark_search}%"
             _bz_sql = (
-                "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
                 " WHERE bz LIKE ? ORDER BY fdrq DESC"
             )
             try:
@@ -7005,35 +7005,69 @@ def _compute_dmp_perf_groups(  # noqa: C901
                 except pyodbc.Error as exc:
                     logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
 
-        # SIBLING BATCH DISCOVERY: When only one batch was found (e.g. via the
-        # batch_id fallback) and its bz indicates multiple production lines,
-        # search for other per-line batches that share the same bz.  This
-        # handles the common case where the DMP operator typed the remark in a
-        # different word order in the DMP machine than the web UI entry
-        # (e.g. "LR6 UD502 UD501 15" in the machine vs "LR6 UD501 UD502 15"
-        # in the UI), so both the exact-match and LIKE lookups failed while
-        # the batch_id lookup found only one of the two per-line batches.
-        # Without this step per-batch mode cannot activate (len(batch_rows)<2)
-        # and the positional split assigns everything to slot 0, leaving
-        # the second production line (e.g. UD502) without any data.
-        if len(batch_rows) == 1:
-            _sib_bz = str(_dm2000_get_value(batch_rows[0], "bz") or "").strip()
-            if _sib_bz:
-                _sib_n = len([
-                    g for g in _parse_bz_groups(_strip_remark_suffixes(_sib_bz)[0])
-                    if g.get("chuyen")
-                ])
-                if _sib_n >= 2:
+        # CROSS-TOKEN SIBLING SEARCH: For multi-line entries (n_entry_groups >= 2),
+        # search for per-line sibling batches that may have been stored with the
+        # chuyen tokens in a different bz word order than the entry's raw_remark.
+        #
+        # Failure mode: entry raw_remark = "LR6 UD501 UD502 15" but the UD502
+        # per-line batch was stored with bz = "LR6 UD502 UD501 15" (reversed).
+        # The exact-bz query misses it (wrong order), the LIKE search with
+        # pattern "%LR6 UD501 UD502%" also misses it (reversed substring), and
+        # the old sibling search with batch.bz = "LR6 UD501 UD502 15" only finds
+        # the already-known batches.  Result: per-batch mode has no UD502 batch,
+        # the positional split assigns everything to slot 0, and the LR6 502 row
+        # disappears from the report.
+        #
+        # Fix: search para_pub once per canonical chuyen token (e.g. "%UD501%",
+        # "%UD502%").  Python-side, keep only batches whose bz contains ALL
+        # canonical tokens (so single-line archives don't sneak in) AND whose
+        # fdrq matches the main batch (same DMP session, not a historical daily
+        # batch from a different date that already has its own SQLite entry).
+        _n_entry_groups = len(entry.groups) if entry.groups else 0
+        if batch_rows and _n_entry_groups >= 2 and _clean_remark:
+            _main_fdrq_sib = str(_dm2000_get_value(batch_rows[0], "fdrq") or "").strip()
+            _canon_gs_sib = [g for g in _parse_bz_groups(_clean_remark) if g.get("chuyen")]
+            _canon_tokens_sib = [
+                t for t in (
+                    _group_to_bz_token(g["loai"], g["chuyen"]) for g in _canon_gs_sib
+                ) if t
+            ]
+            if _main_fdrq_sib and len(_canon_tokens_sib) >= 2:
+                _existing_ids_sib: set[str] = {
+                    str(_dm2000_get_value(r, "id") or "") for r in batch_rows
+                }
+                for _sib_tok in _canon_tokens_sib:
                     try:
-                        _sib_rows = _read_dmpdata(
-                            "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub"
-                            " WHERE bz = ? ORDER BY fdrq DESC",
-                            (_sib_bz,),
+                        _sib_tok_rows = _read_dmpdata(
+                            "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                            " WHERE bz LIKE ? ORDER BY fdrq DESC",
+                            (f"%{_sib_tok}%",),
                         )
-                        if _sib_rows and len(_sib_rows) > 1:
-                            batch_rows = _sib_rows
-                    except pyodbc.Error:
-                        pass
+                    except pyodbc.Error as exc:
+                        logger.debug(
+                            "_compute_dmp_perf_groups: sibling token search '%s' failed: %s",
+                            _sib_tok, exc,
+                        )
+                        continue
+                    for _sib_ar in _sib_tok_rows or []:
+                        _sib_ar_id = str(_dm2000_get_value(_sib_ar, "id") or "")
+                        if not _sib_ar_id or _sib_ar_id in _existing_ids_sib:
+                            continue
+                        _sib_ar_bz = str(_dm2000_get_value(_sib_ar, "bz") or "")
+                        _sib_ar_fdrq = str(_dm2000_get_value(_sib_ar, "fdrq") or "").strip()
+                        _sib_ar_bz_lower = _sib_ar_bz.lower()
+                        # Only add if same session (fdrq match) and bz contains
+                        # ALL canonical tokens (prevents unrelated single-line
+                        # batches from different sessions being included).
+                        if (
+                            _sib_ar_fdrq == _main_fdrq_sib
+                            and all(
+                                t.lower() in _sib_ar_bz_lower
+                                for t in _canon_tokens_sib
+                            )
+                        ):
+                            batch_rows = list(batch_rows) + [_sib_ar]
+                            _existing_ids_sib.add(_sib_ar_id)
 
         # Save the entry-level routing flags before the per-batch merge so that
         # each additional batch in the multi-batch loop can start from a clean
@@ -7046,13 +7080,11 @@ def _compute_dmp_perf_groups(  # noqa: C901
             # up the matching para_singl rows (which use sid = para_pub.id).
             actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
 
-            # Prefer para_singl.scrq (made/sample date) over para_pub.fdrq (start date).
-            # Many DMP installations use a sequential integer for para_singl.sid that
-            # does NOT match para_pub.id; in those schemas para_singl.cdmc holds the
-            # archive name which equals para_pub.id, so a cdmc-keyed lookup resolves
-            # the made date when the sid lookup yields nothing.  This mirrors the
-            # multi-key fallback that get_batches (Load Data tab) already performs.
-            fdrq = ""
+            # para_singl.scrq (made/production date) is the sole source of truth
+            # for report row dates.  para_singl.sid is a TEXT column; always pass
+            # the string value so the Access ODBC driver does a proper text
+            # comparison (an int() cast sends BIGINT and always returns 0 rows).
+            scrq = ""
 
             def _pick_first_scrq(rows: list) -> str:
                 for _r in rows or []:
@@ -7063,39 +7095,16 @@ def _compute_dmp_perf_groups(  # noqa: C901
                             return _d
                 return ""
 
-            # para_singl.sid is a TEXT column; always query with the string value so
-            # that the Access ODBC driver does a proper text comparison.  An earlier
-            # int() cast caused the 16-digit string IDs (e.g. '2024073110512202') to be
-            # sent as BIGINT parameters, which Access cannot match against a TEXT column
-            # and always returned 0 rows, forcing the fallback to para_pub.fdrq.
             try:
                 _singl_scrq_rows = _read_dmpdata(
                     "SELECT scrq FROM para_singl WHERE sid = ?", (actual_batch_id,)
                 )
-                fdrq = _pick_first_scrq(_singl_scrq_rows)
+                scrq = _pick_first_scrq(_singl_scrq_rows)
             except pyodbc.Error as exc:
                 logger.debug(
                     "_compute_dmp_perf_groups: could not fetch para_singl.scrq for sid=%s: %s",
                     actual_batch_id, exc,
                 )
-
-            # Fallback: keyed by para_singl.cdmc (archive filename).  Some schemas
-            # store the para_pub.id-equivalent in cdmc rather than sid.
-            if not fdrq:
-                try:
-                    _singl_scrq_rows_cdmc = _read_dmpdata(
-                        "SELECT scrq FROM para_singl WHERE cdmc = ?",
-                        (str(actual_batch_id),),
-                    )
-                    fdrq = _pick_first_scrq(_singl_scrq_rows_cdmc)
-                except pyodbc.Error as exc:
-                    logger.debug(
-                        "_compute_dmp_perf_groups: could not fetch para_singl.scrq for cdmc=%s: %s",
-                        actual_batch_id, exc,
-                    )
-
-            if not fdrq:
-                fdrq = _to_date(_dm2000_get_value(batch, "fdrq"))
             fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
             # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
             # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
@@ -7427,18 +7436,18 @@ def _compute_dmp_perf_groups(  # noqa: C901
             hfsj_unit = "hour"
             ep_v = None
 
-            # Derive a proper YYYY-MM-DD row label from entry.report_date when
-            # available; otherwise fall back to the raw batch_id.
+            # In the not-found path there is no para_singl data, so use
+            # entry.report_date (operator-entered) as the row label when set.
             if entry.report_date:
-                fdrq = _to_date(entry.report_date) or entry.batch_id
+                scrq = _to_date(entry.report_date) or entry.batch_id
             else:
-                fdrq = entry.batch_id
+                scrq = entry.batch_id
 
         # Determine row label (date or special)
         if entry.special_type in _SPECIAL_TYPE_LABEL:
             row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
         else:
-            row_label = fdrq or entry.batch_id
+            row_label = scrq or entry.batch_id
 
         # Re-derive authoritative loai by chuyen so that stored entries with
         # an incorrect or partial loai in groups_json still display the
@@ -7694,8 +7703,9 @@ def _compute_dmp_perf_groups(  # noqa: C901
             )
 
             # Resolve made date (para_singl.scrq) for the extra batch.
-            _xb_fdrq = ""
-            # Same as above: use string id for the ACCESS TEXT sid column.
+            # scrq is the sole source of truth for report row dates — no fdrq fallback.
+            _xb_scrq = ""
+            # Use string id for the ACCESS TEXT sid column.
             try:
                 _xb_scrq_rows = _read_dmpdata(
                     "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_id,)
@@ -7705,26 +7715,10 @@ def _compute_dmp_perf_groups(  # noqa: C901
                     if _xv is not None and not _dmp_is_empty(str(_xv)):
                         _d = _to_date(_xv)
                         if _d:
-                            _xb_fdrq = _d
+                            _xb_scrq = _d
                             break
             except pyodbc.Error:
                 pass
-            if not _xb_fdrq:
-                try:
-                    _xb_scrq_cdmc = _read_dmpdata(
-                        "SELECT scrq FROM para_singl WHERE cdmc = ?", (str(_xb_id),)
-                    )
-                    for _xb_r in _xb_scrq_cdmc or []:
-                        _xv = _dm2000_get_value(_xb_r, "scrq")
-                        if _xv is not None and not _dmp_is_empty(str(_xv)):
-                            _d = _to_date(_xv)
-                            if _d:
-                                _xb_fdrq = _d
-                                break
-                except pyodbc.Error:
-                    pass
-            if not _xb_fdrq:
-                _xb_fdrq = _to_date(_dm2000_get_value(_xb, "fdrq"))
 
             _xb_fdfs = str(_dm2000_get_value(_xb, "fdfs") or "").strip()
             if not _xb_fdfs:
@@ -7749,7 +7743,7 @@ def _compute_dmp_perf_groups(  # noqa: C901
             if entry.special_type in _SPECIAL_TYPE_LABEL:
                 _xb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
             else:
-                _xb_row_label = _xb_fdrq or entry.batch_id
+                _xb_row_label = _xb_scrq or entry.batch_id
 
             for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
                 _orig_idx = _dmp_grp.get("_orig_idx")

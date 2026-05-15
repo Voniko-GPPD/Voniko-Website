@@ -477,6 +477,147 @@ def test_dmp_tray_assignment_no_hardcoded_fallback_when_empty() -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# DMP two-line tray allocation — fully-dynamic coverage.
+#
+# The operator-facing requirement is that the algorithm work for ANY tray
+# failure combination, not just the few examples enumerated in the spec.
+# These parametrized tests pin the dynamic behaviour by exhaustively asserting
+# the same first-4 / next-4 / 8-tray-cap rule for every single-tray-damage
+# case (9 cases), every two-tray-damage case (9C2 = 36 cases), and every
+# possible subset of trays 1-9 (2^9 = 512 cases).  If a future change ever
+# reintroduces a hardcoded tray range or special-cases an individual tray,
+# at least one of these parametrized cases will fail.
+# --------------------------------------------------------------------------- #
+
+
+_ALL_TRAYS = list(range(1, 10))
+
+
+def _expected_two_line_split(active: list[int]) -> list[list[int]]:
+    """The single dynamic rule: scan trays in order, keep valid ones,
+    first 4 → line 1, next 4 → line 2, drop anything past tray 8.
+    """
+    sorted_active = sorted(set(active))
+    return [sorted_active[:4], sorted_active[4:8]]
+
+
+@pytest.mark.parametrize("damaged", _ALL_TRAYS)
+def test_dmp_tray_assignment_single_tray_damaged_fully_dynamic(damaged: int) -> None:
+    """For EVERY single-tray-damage scenario the two-line split is the
+    sequential first-4/next-4 of the remaining valid trays — no special
+    handling for any individual tray index.
+    """
+    valid = [t for t in _ALL_TRAYS if t != damaged]
+    expected = _expected_two_line_split(valid)
+    assert m._split_active_trays_for_group_count(2, valid) == expected, (
+        f"single-damage scenario for tray {damaged} must follow the "
+        f"first-4/next-4 rule (no hardcoded mapping for tray {damaged})"
+    )
+
+
+_TWO_DAMAGE_CASES = [
+    (d1, d2)
+    for i, d1 in enumerate(_ALL_TRAYS)
+    for d2 in _ALL_TRAYS[i + 1 :]
+]
+
+
+@pytest.mark.parametrize("d1,d2", _TWO_DAMAGE_CASES)
+def test_dmp_tray_assignment_two_trays_damaged_fully_dynamic(d1: int, d2: int) -> None:
+    """For EVERY two-tray-damage scenario the two-line split is the
+    sequential first-4/next-4 of the remaining 7 valid trays.  Covers all
+    36 combinations explicitly — including pairs the spec enumerated
+    (1&2, 1&5, 2&7, 3&4, 3&9, 4&8, 5&6, 6&9, 7&8) and every other pair.
+    Line 2 ends up with only 3 trays in every case, which downstream
+    business rules may flag as incomplete.
+    """
+    valid = [t for t in _ALL_TRAYS if t not in (d1, d2)]
+    expected = _expected_two_line_split(valid)
+    got = m._split_active_trays_for_group_count(2, valid)
+    assert got == expected, (
+        f"two-damage scenario {{{d1},{d2}}} must follow the first-4/next-4 "
+        f"rule (no hardcoded mapping for this pair)"
+    )
+    assert len(got[0]) == 4 and len(got[1]) == 3, (
+        "with 7 valid trays, line 1 must have 4 and line 2 must have 3"
+    )
+
+
+def test_dmp_tray_assignment_exhaustive_subset_invariant() -> None:
+    """Every one of the 512 possible subsets of trays 1-9 satisfies the
+    same first-4/next-4 rule with the 8-tray cap.
+
+    This is the strongest possible guarantee that the algorithm contains
+    no hardcoded scenarios: if a special case existed for any specific
+    tray combination it would break here.
+    """
+    from itertools import combinations
+
+    checked = 0
+    for size in range(len(_ALL_TRAYS) + 1):
+        for combo in combinations(_ALL_TRAYS, size):
+            valid = list(combo)
+            got = m._split_active_trays_for_group_count(2, valid)
+            assert got == _expected_two_line_split(valid), (
+                f"subset {valid} broke the first-4/next-4 invariant: {got}"
+            )
+            assert len(got) == 2, f"must always return 2 slots, got {got}"
+            assert len(got[0]) <= 4 and len(got[1]) <= 4, (
+                f"per-line cap (4 trays) violated for subset {valid}: {got}"
+            )
+            checked += 1
+    assert checked == 512, f"expected 2^9 = 512 subsets, checked {checked}"
+
+
+def test_dmp_tray_assignment_seven_valid_trays_line_two_incomplete() -> None:
+    """Spec example: ``[2,3,5,6,7,8,9]`` (7 valid) → line 1 = [2,3,5,6],
+    line 2 = [7,8,9].  Line 2 only has 3 trays — downstream code may flag
+    the dataset as incomplete, but the slot geometry is unambiguous.
+    """
+    assert m._split_active_trays_for_group_count(
+        2, [2, 3, 5, 6, 7, 8, 9]
+    ) == [[2, 3, 5, 6], [7, 8, 9]]
+
+
+def test_dmp_tray_assignment_only_four_valid_trays_line_two_empty() -> None:
+    """When only 4 valid trays exist (e.g. operator selected trays 5-8),
+    line 1 receives all 4 and line 2 is empty.  No hardcoded fallback
+    fills line 2 with a fictitious range.
+    """
+    assert m._split_active_trays_for_group_count(2, [5, 6, 7, 8]) == [
+        [5, 6, 7, 8],
+        [],
+    ]
+    assert m._split_active_trays_for_group_count(2, [1, 2, 3, 4]) == [
+        [1, 2, 3, 4],
+        [],
+    ]
+    assert m._split_active_trays_for_group_count(2, [6, 7, 8, 9]) == [
+        [6, 7, 8, 9],
+        [],
+    ]
+
+
+def test_dmp_tray_assignment_drops_only_extras_past_eight() -> None:
+    """The 8-tray cap drops only trays past position 8 in the sorted
+    valid-tray list — never specifically tray 9.  When tray 9 is the
+    one damaged, all 8 remaining trays are used.
+    """
+    # All 9 valid → tray 9 dropped (it is the 9th in sorted order)
+    assert m._split_active_trays_for_group_count(
+        2, _ALL_TRAYS
+    ) == [[1, 2, 3, 4], [5, 6, 7, 8]]
+    # Tray 9 damaged → 8 remaining trays all used (none dropped)
+    assert m._split_active_trays_for_group_count(
+        2, [1, 2, 3, 4, 5, 6, 7, 8]
+    ) == [[1, 2, 3, 4], [5, 6, 7, 8]]
+    # Tray 1 damaged → trays 2-9 are all used (tray 9 NOT skipped)
+    assert m._split_active_trays_for_group_count(
+        2, [2, 3, 4, 5, 6, 7, 8, 9]
+    ) == [[2, 3, 4, 5], [6, 7, 8, 9]]
+
+
 def test_dmp_tray_assignment_explicit_trays_bypassed() -> None:
     """_sort_eff_groups_for_tray_assignment returns the list unchanged when
     explicit trays are already set (any(g['trays']) is True).

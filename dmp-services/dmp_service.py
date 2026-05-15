@@ -5872,6 +5872,15 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
         keep only trays that actually contain valid measurement data,
         then assign those valid trays to production lines in order.
 
+    Fully dynamic — no hardcoded scenarios
+    --------------------------------------
+    The algorithm works for **every** possible tray-failure combination
+    (2^9 = 512 subsets when N = 2).  There is no table of pre-listed cases,
+    no special handling for individual tray indices, and no assumption that
+    any particular tray (1, 5, 9, …) is always present or always missing.
+    Slot ``i`` is always exactly ``active[i*per_line : (i+1)*per_line]``,
+    derived purely from ``len(active_trays)`` and ``n_groups``.
+
     Caller contract
     ---------------
     ``active_trays`` MUST already contain only the trays whose measurement
@@ -5887,7 +5896,9 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
       * 1 group  → all valid trays go to that single line.
       * 2 groups → first 4 valid trays to line 1, next 4 valid trays to
         line 2.  Any 9th valid tray is dropped automatically because each
-        line only has room for 4 batteries.
+        line only has room for 4 batteries (the 8-tray cap).  When fewer
+        than 8 trays are valid the trailing line(s) are simply shorter
+        (e.g. 7 valid trays → ``[4, 3]``; 4 valid trays → ``[4, 0]``).
       * 3 groups → first 3, next 3, next 3 over the valid trays.
       * N > 3 groups → ``len(active) // N`` valid trays per line in order.
 
@@ -5895,9 +5906,13 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
     receive a shorter list (or an empty list).  Returning empty rather than
     falling back to a hardcoded tray range is intentional: the caller skips
     rendering with ``if not trays: continue`` instead of fabricating data on
-    an unmeasured tray.
+    an unmeasured tray.  Whether a partial-line dataset is rejected,
+    flagged, or rendered as-is is a downstream business-rule decision —
+    this helper only expresses the slot geometry.
 
-    Examples (n_groups == 2):
+    Examples (n_groups == 2) — these are illustrations, not the full set of
+    supported cases.  The same first-4/next-4 rule applies to every one of
+    the 512 possible subsets:
 
       * active = [1, 2, 3, 4, 5, 6, 7, 8, 9]    (all 9 valid)
         → [[1, 2, 3, 4], [5, 6, 7, 8]]          (tray 9 ignored)
@@ -5909,6 +5924,10 @@ def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) 
         → [[1, 2, 3, 4], [6, 7, 8, 9]]
       * active = [1, 2, 3, 4, 5, 6, 8, 9]       (tray 7 damaged)
         → [[1, 2, 3, 4], [5, 6, 8, 9]]
+      * active = [1, 3, 4, 6, 7, 8, 9]          (trays 2 & 5 damaged)
+        → [[1, 3, 4, 6], [7, 8, 9]]             (line 2 incomplete: 3 trays)
+      * active = [5, 6, 7, 8]                   (only trays 5-8 valid)
+        → [[5, 6, 7, 8], []]                    (line 2 has no data)
     """
     if n_groups <= 0:
         return []

@@ -661,11 +661,10 @@ export default function BatteryPage() {
         }
         break;
 
-      case 'status':
+       case 'status':
         if (msg.text) {
           setStatusText(msg.text);
           setStatusColor(getStatusColor(msg.text));
-          // When the hardware naturally stops (e.g. after retest completes), also update running state
           if (msg.text === 'Stopped') {
             setRunning(false);
             setRetestingBatteryId(null);
@@ -674,13 +673,21 @@ export default function BatteryPage() {
           const text = msg.data.status_text || 'Waiting...';
           setStatusText(text);
           setStatusColor(getStatusColor(text));
-          if (msg.data.records) setRecords(msg.data.records);
-          // Sync running state so viewers joining a test in progress see the correct UI
+      
+          // FIX: Merge incoming records with existing frontend records by ID
+          if (msg.data.records) {
+            setRecords((prev) => {
+              const recordsMap = new Map(prev.map(r => [r.id, r]));
+              msg.data.records.forEach(r => recordsMap.set(r.id, r));
+              return Array.from(recordsMap.values()).sort((a, b) => a.id - b.id);
+            });
+          }
+      
           if (msg.data.running !== undefined) {
             setRunning(!!msg.data.running);
           }
         }
-        break;
+      break;
 
       case 'session_cleared':
         if (ignoreClearedRef.current) {

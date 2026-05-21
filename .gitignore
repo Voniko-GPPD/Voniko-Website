@@ -1,0 +1,103 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# Environment variables
+backend/.env
+.env
+backend/.env.*
+qc-system/.env
+*.env.local
+
+# Database and uploaded files
+backend/data/avatars/
+backend/data/qc-uploads/
+backend/data/logs/
+backend/data/backups/
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/data/dm2000_cache/*.mdb
+backend/data/dm3000_cache/*.mdb
+backend/data/dmpdata_cache/*.mdb
+backend/uploads/
+data/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temp
+tmp/
+temp/
+
+# Downloaded font assets (restored by `npm install` postinstall script)
+backend/src/assets/fonts/*.ttf
+backend/src/assets/fonts/*.otf
+
+# ─── Python / hardware-services ───────────────────────────────────────────────
+
+# Virtual environment
+hardware-services/venv/
+dmp-services/venv/
+count-batteries-service/venv/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+# Generated test reports (Excel/CSV output from battery tests)
+hardware-services/reports/
+/reports/
+
+# Dynamic station registry (auto-created at runtime, not source code)
+backend/station_registry.json
+
+# Python tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Count batteries retrain artifacts
+count-batteries-service/retrain/datasets/
+count-batteries-service/retrain/runs/
+count-batteries-service/retrain/exports/
+count-batteries-service/retrain/benchmarks/*.generated.csv
+
+# Count batteries data and static files
+count-batteries-service/data/*.db
+count-batteries-service/data/*.db-shm
+count-batteries-service/data/*.db-wal
+count-batteries-service/static/exports/*
+!count-batteries-service/static/exports/.gitkeep
+count-batteries-service/static/results/*
+!count-batteries-service/static/results/.gitkeep
+
+# QC System
+qc-system/venv/
+qc-system/.venv/
+qc-system/__pycache__/
+qc-system/app/__pycache__/
+qc-system/app/services/__pycache__/
+qc-system/*.pyc
+qc-system/.pytest_cache/

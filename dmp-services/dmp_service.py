@@ -1,0 +1,8160 @@
+import asyncio
+import logging
+import math
+import os
+import re
+import shutil
+import socket
+import tempfile
+import threading
+import time
+from contextlib import asynccontextmanager, contextmanager
+from datetime import date
+from io import BytesIO
+from pathlib import Path
+
+import pyodbc
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook, load_workbook
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+DMP_STATION_NAME: str = os.environ.get("DMP_STATION_NAME", "").strip()
+VONIKO_SERVER_URL: str = os.environ.get("VONIKO_SERVER_URL", "").rstrip("/")
+DMP_STATION_PORT: int = int(os.environ.get("DMP_STATION_PORT", "8766"))
+
+# ── PATHS — configured via environment, see dmp-services/start_dmp.bat ───────
+# All DMP / DM2000 / DM3000 source-data directories and template directories
+# are read from environment variables.  To change a path on a station machine
+# (e.g. DMP1 stores DMP at C:\DMP and DMP2 stores DMP at D:\DMP) edit ONLY the
+# values in start_dmp.bat (or set the corresponding env var) and restart the
+# service — no source-code changes are required.  The defaults below are used
+# when an env var is not set.
+#
+# Per-machine examples:
+#
+#   DMP1                              DMP2
+#   ────                              ────
+#   DMP_DATA_DIR     = C:\DMP\Data    DMP_DATA_DIR     = D:\DMP\Data
+#   DM2000_DATA_DIR  = D:\DM2000\…    DM2000_DATA_DIR  = D:\DM2000\…
+#   DM3000_DATA_DIR  = D:\DM3000\…    DM3000_DATA_DIR  = D:\DM3000\…
+#
+# DMP (live discharge data — battery groups + per-tray .mdb files)
+DMP_DATA_DIR: str = os.environ.get("DMP_DATA_DIR", r"C:\DMP\Data")
+DMP_TEMPLATES_DIR: str = os.environ.get("DMP_TEMPLATES_DIR", "./dmp_templates")
+DMP_PERF_TEMPLATES_DIR: str = os.environ.get("DMP_PERF_TEMPLATES_DIR", "./dmp_perf_templates")
+
+# DM2000 (historic discharge archive — Ohm-based load resistance)
+DM2000_DATA_DIR: str = os.environ.get("DM2000_DATA_DIR", r"D:\DM2000\dmdatabase")
+DM2000_TEMPLATES_DIR: str = os.environ.get("DM2000_TEMPLATES_DIR", "./dm2000_templates")
+DM2000_PERF_TEMPLATES_DIR: str = os.environ.get("DM2000_PERF_TEMPLATES_DIR", "./dm2000_perf_templates")
+
+# DM3000 (historic discharge archive — mA-based discharge current).  Same
+# schema as DM2000; only the unit on fzdz / Dis-condition differs.
+DM3000_DATA_DIR: str = os.environ.get("DM3000_DATA_DIR", r"D:\DM3000\dmdatabase")
+DM3000_TEMPLATES_DIR: str = os.environ.get("DM3000_TEMPLATES_DIR", "./dm3000_templates")
+DM3000_PERF_TEMPLATES_DIR: str = os.environ.get(
+    "DM3000_PERF_TEMPLATES_DIR",
+    # Default per the task spec: ``./dm3000_perf_templates``.  The resolver
+    # _resolve_dm_perf_template_path falls back to the DM2000 perf-templates
+    # directory when a requested workbook is missing here, so DM3000 can
+    # reuse DM2000 templates until module-specific layouts are introduced.
+    "./dm3000_perf_templates",
+)
+
+# Local cache directories: persistent copies of dmdata_ls.mdb / DMPDATA.mdb
+# are kept here so that every request reads from the cached copy instead of
+# making a new shadow copy each time.
+DM2000_CACHE_DIR: str = os.environ.get("DM2000_CACHE_DIR", "../backend/data/dm2000_cache")
+DM3000_CACHE_DIR: str = os.environ.get("DM3000_CACHE_DIR", "../backend/data/dm3000_cache")
+DMPDATA_CACHE_DIR: str = os.environ.get("DMPDATA_CACHE_DIR", "../backend/data/dmpdata_cache")
+
+# Configurable company name shown in reports (e.g. "Asia Matsushita Electric Pte Ltd").
+DM2000_COMPANY_NAME: str = os.environ.get("DM2000_COMPANY_NAME", "")
+DM3000_COMPANY_NAME: str = os.environ.get("DM3000_COMPANY_NAME", DM2000_COMPANY_NAME)
+# ── end PATHS ────────────────────────────────────────────────────────────────
+WATCH_INTERVAL_SECONDS: int = 5
+# Maximum valid DM2000 battery channel number (channels are numbered 1..MAX_BATTERY_NUMBER)
+MAX_BATTERY_NUMBER: int = 99
+_EXCEL_MAX_SHEET_NAME: int = 31  # Excel sheet names are capped at 31 characters
+
+# DMP phantom-tray threshold: para_singl rows whose recordnum is at or below
+# this value are placeholder rows written by the DMP machine for tray slots
+# that had no battery loaded.  Real measurements always produce at least 5
+# records (typically hundreds to thousands).  Observed phantom values: 0, 1,
+# 2, 4.  The threshold is intentionally conservative so that partial but
+# genuine measurements (recordnum ≥ 5) are never excluded.
+_DMP_PHANTOM_RECORDNUM_MAX: int = 4
+
+_WATCH_LOCK = threading.Lock()
+_ACCESS_QUERY_LOCK = threading.Semaphore(3)
+_ACCESS_QUERY_TIMEOUT: float = 20.0  # seconds to wait for a DB slot before returning 503
+
+# ── Persistent local cache for dmdata_ls.mdb ─────────────────────────────────
+# Instead of creating a temporary shadow copy for every request (which caused
+# resource exhaustion and 503 errors after ~90 s of load), we maintain ONE
+# persistent local copy of the file.  A background watcher checks the source
+# mtime every WATCH_INTERVAL_SECONDS and atomically replaces the cached file
+# when the source has been updated.  All read operations use the cached path
+# directly; no per-request file copy or concurrency lock is needed.
+# Seconds to wait for the initial cache build before returning 503 to callers.
+_DM_LS_CACHE_READY_TIMEOUT: float = 30.0
+# Backward-compat alias — older code paths reference the DM2000 timeout name.
+_DM2000_LS_CACHE_READY_TIMEOUT: float = _DM_LS_CACHE_READY_TIMEOUT
+
+# ── Persistent local cache for DMPDATA.mdb ───────────────────────────────────
+# DMPDATA.mdb accumulates data since 2019 and grows very large.  Maintaining a
+# single persistent local copy eliminates the per-request shadow-copy overhead
+# and lets the year-filter fast-path work entirely against the local file.
+# The background watcher refreshes the copy whenever the source mtime changes.
+_DMPDATA_CACHE_PATH: str = ""
+_DMPDATA_SOURCE_MTIME: float = -1.0
+_DMPDATA_CACHE_WRITE_LOCK = threading.Lock()
+_DMPDATA_CACHE_READY = threading.Event()
+_DMPDATA_CACHE_READY_TIMEOUT: float = 30.0
+_TELEMETRY_CACHE: dict[tuple, tuple[list, float]] = {}
+_TELEMETRY_CACHE_LOCK = threading.Lock()
+_TELEMETRY_CACHE_TTL: float = 60.0  # seconds
+# Shared TTL constants used by both DM2000 and DM3000 module instances.
+_DM_CURVE_CACHE_TTL: float = 300.0  # seconds
+_DM_ARCHIVES_CACHE_TTL: float = 60.0  # seconds
+_DM_BATTERIES_CACHE_TTL: float = 60.0  # seconds
+_DM_STATS_CACHE_TTL: float = 300.0  # seconds
+_DM_TAV_CACHE_TTL: float = 120.0  # seconds
+_DM_CACHE_MAX_ENTRIES: int = 100
+# Backward-compat aliases for the historical DM2000 names.
+_DM2000_CURVE_CACHE_TTL: float = _DM_CURVE_CACHE_TTL
+_DM2000_ARCHIVES_CACHE_TTL: float = _DM_ARCHIVES_CACHE_TTL
+_DM2000_BATTERIES_CACHE_TTL: float = _DM_BATTERIES_CACHE_TTL
+_DM2000_STATS_CACHE_TTL: float = _DM_STATS_CACHE_TTL
+_DM2000_TAV_CACHE_TTL: float = _DM_TAV_CACHE_TTL
+_DM2000_CACHE_MAX_ENTRIES: int = _DM_CACHE_MAX_ENTRIES
+_WATCHED_MDB_MTIME: dict[str, float] = {}
+_WATCHED_CHANGES: dict[str, float] = {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DmModule — bundles per-module state for the historic discharge databases.
+#
+# DM2000 and DM3000 share an identical Access schema (`ls_jb_cs`, `ls_evolt`,
+# `ls_spt_volt`, `ls_vtime`, `ls_pam2`, `ls_timev`, plus per-archive `*.mdb`
+# files); the only material difference is the unit on the discharge condition
+# field (`fzdz`).  DM2000 stores load resistance in Ohms, DM3000 stores
+# discharge current in mA.  All endpoint logic, cache management and template
+# rendering is therefore shared via this DmModule wrapper — only the unit-
+# dependent helpers branch on ``cfg.unit_suffix``.
+# ─────────────────────────────────────────────────────────────────────────────
+class DmModule:
+    """Bundle of per-module configuration, on-disk paths and in-memory caches.
+
+    Two singleton instances are created at module load (see ``DM2000_MOD`` and
+    ``DM3000_MOD``).  Endpoint implementations receive an instance via the
+    ``cfg`` parameter and read all module-specific state from it.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        data_dir: str,
+        cache_dir: str,
+        templates_dir: str,
+        perf_templates_dir: str,
+        company_name: str,
+        unit_suffix: str,
+        unit_label: str,
+        ls_filename: str = "dmdata_ls.mdb",
+        cache_filename: str = "dmdata_ls.mdb",
+        main_filename: str = "DM2000.mdb",
+    ) -> None:
+        self.name = name
+        self.data_dir = data_dir
+        self.cache_dir = cache_dir
+        self.templates_dir = templates_dir
+        self.perf_templates_dir = perf_templates_dir
+        self.company_name = company_name
+        # Unit suffix shown in the Dis-condition string ('ohm' for DM2000,
+        # 'mA' for DM3000).  ``unit_label`` is the verbose form used in
+        # report headers ('Ohm' / 'mA').
+        self.unit_suffix = unit_suffix
+        self.unit_label = unit_label
+        self.ls_filename = ls_filename
+        self.cache_filename = cache_filename
+        self.main_filename = main_filename
+
+        # ── Mutable state for the persistent dmdata_ls cache ────────────
+        # Path to the current cached copy (may be the cache_final, the live
+        # source path as a fallback, or empty until the first refresh).
+        self.ls_cache_path: str = ""
+        # mtime of the last successfully cached source file.
+        self.ls_source_mtime: float = -1.0
+        # One writer at a time when refreshing the cache.
+        self.ls_cache_write_lock = threading.Lock()
+        # Set once the first cache copy is in place; reads block on this.
+        self.ls_cache_ready = threading.Event()
+
+        # ── In-memory caches (per-module) ────────────────────────────────
+        # Curve / archives / batteries / stats / time-at-voltage caches.
+        # Each is a dict-of-(value, timestamp) protected by its own lock.
+        self.curve_cache: dict[tuple, tuple[list, float]] = {}
+        self.curve_cache_lock = threading.Lock()
+        self.archives_cache: dict[str, tuple[list, float]] = {}
+        self.archives_cache_lock = threading.Lock()
+        self.batteries_cache: dict[str, tuple[list, float]] = {}
+        self.batteries_cache_lock = threading.Lock()
+        self.stats_cache: dict[tuple, tuple[dict, float]] = {}
+        self.stats_cache_lock = threading.Lock()
+        self.tav_cache: dict[str, tuple[dict, float]] = {}
+        self.tav_cache_lock = threading.Lock()
+
+    # ── Path helpers ────────────────────────────────────────────────────
+    def get_ls_path(self) -> str:
+        return str(Path(self.data_dir).resolve() / self.ls_filename)
+
+    def get_main_path(self) -> str:
+        return str(Path(self.data_dir).resolve() / self.main_filename)
+
+    def get_cache_dir(self) -> Path:
+        return Path(self.cache_dir).resolve()
+
+    def get_cache_final_path(self) -> Path:
+        return self.get_cache_dir() / self.cache_filename
+
+    def clear_all_caches(self) -> None:
+        """Invalidate every in-memory cache for this module."""
+        with self.curve_cache_lock:
+            self.curve_cache.clear()
+        with self.archives_cache_lock:
+            self.archives_cache.clear()
+        with self.batteries_cache_lock:
+            self.batteries_cache.clear()
+        with self.stats_cache_lock:
+            self.stats_cache.clear()
+        with self.tav_cache_lock:
+            self.tav_cache.clear()
+
+
+# Singleton instances — created at module load.
+DM2000_MOD = DmModule(
+    name="dm2000",
+    data_dir=DM2000_DATA_DIR,
+    cache_dir=DM2000_CACHE_DIR,
+    templates_dir=DM2000_TEMPLATES_DIR,
+    perf_templates_dir=DM2000_PERF_TEMPLATES_DIR,
+    company_name=DM2000_COMPANY_NAME,
+    unit_suffix="ohm",
+    unit_label="Ohm",
+)
+DM3000_MOD = DmModule(
+    name="dm3000",
+    data_dir=DM3000_DATA_DIR,
+    cache_dir=DM3000_CACHE_DIR,
+    templates_dir=DM3000_TEMPLATES_DIR,
+    perf_templates_dir=DM3000_PERF_TEMPLATES_DIR,
+    company_name=DM3000_COMPANY_NAME,
+    unit_suffix="mA",
+    unit_label="mA",
+    main_filename="DM3000.mdb",
+)
+DM_MODULES: dict[str, DmModule] = {"dm2000": DM2000_MOD, "dm3000": DM3000_MOD}
+
+
+def _resolve_dm_module(request: Request) -> DmModule:
+    """Map an incoming ``/dm2000/*`` or ``/dm3000/*`` request path to its
+    :class:`DmModule` configuration object.
+
+    Routes shared between DM2000 and DM3000 are registered with two
+    decorators (one per prefix); the handler then reads ``request.url.path``
+    to dispatch to the correct module's caches and on-disk files.  Defaults
+    to DM2000 if the path doesn't contain a recognised module prefix —
+    callers should never reach this branch in practice because the routes
+    are registered with explicit prefixes.
+    """
+    path = request.url.path
+    if "/dm3000/" in path or path.endswith("/dm3000"):
+        return DM_MODULES["dm3000"]
+    return DM_MODULES["dm2000"]
+
+# Backward-compatibility aliases.  Many existing DM2000 code paths refer to
+# the historical module-level globals directly; binding them to the DM2000
+# module instance keeps that code working unchanged.  Reassigning these
+# names rebinds only the alias, NOT the cfg attribute, so writers must use
+# ``DM2000_MOD.x = ...`` to mutate the underlying state.
+_DM2000_LS_CACHE_WRITE_LOCK = DM2000_MOD.ls_cache_write_lock
+_DM2000_LS_CACHE_READY = DM2000_MOD.ls_cache_ready
+_DM2000_CURVE_CACHE = DM2000_MOD.curve_cache
+_DM2000_CURVE_CACHE_LOCK = DM2000_MOD.curve_cache_lock
+_DM2000_ARCHIVES_CACHE = DM2000_MOD.archives_cache
+_DM2000_ARCHIVES_CACHE_LOCK = DM2000_MOD.archives_cache_lock
+_DM2000_BATTERIES_CACHE = DM2000_MOD.batteries_cache
+_DM2000_BATTERIES_CACHE_LOCK = DM2000_MOD.batteries_cache_lock
+_DM2000_STATS_CACHE = DM2000_MOD.stats_cache
+_DM2000_STATS_CACHE_LOCK = DM2000_MOD.stats_cache_lock
+_DM2000_TAV_CACHE = DM2000_MOD.tav_cache
+_DM2000_TAV_CACHE_LOCK = DM2000_MOD.tav_cache_lock
+def _get_local_ip() -> str:
+    try:
+        host = VONIKO_SERVER_URL.split("://")[-1].split(":")[0].split("/")[0]
+        # When the server URL points to loopback (e.g. localhost or 127.0.0.1),
+        # routing to that address would return 127.0.0.1 rather than the real
+        # LAN IP.  Use a well-known external address so that the OS picks the
+        # correct outgoing interface, giving us the actual LAN IP.
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            host = "8.8.8.8"
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((host, 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _registration_loop() -> None:
+    """Background thread: register/heartbeat to Voniko server every 30s."""
+    import requests as _req
+    while True:
+        try:
+            ip = _get_local_ip()
+            url = f"http://{ip}:{DMP_STATION_PORT}"
+            _req.post(
+                f"{VONIKO_SERVER_URL}/api/dmp/register",
+                json={"name": DMP_STATION_NAME, "url": url},
+                timeout=5,
+            )
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+def _scan_dynamic_mdb_files() -> dict[str, float]:
+    data_dir = Path(DMP_DATA_DIR).resolve()
+    if not data_dir.exists():
+        return {}
+
+    result: dict[str, float] = {}
+    for entry in data_dir.glob("*.mdb"):
+        if not entry.is_file():
+            continue
+        if entry.name.lower() == "dmpdata.mdb":
+            continue
+        try:
+            result[entry.stem] = entry.stat().st_mtime
+        except OSError:
+            continue
+    return result
+
+
+def _watch_dmp_changes_loop() -> None:
+    with _WATCH_LOCK:
+        _WATCHED_MDB_MTIME.update(_scan_dynamic_mdb_files())
+
+    while True:
+        try:
+            current = _scan_dynamic_mdb_files()
+            now = time.time()
+            with _WATCH_LOCK:
+                deleted_stems = set(_WATCHED_MDB_MTIME.keys()) - set(current.keys())
+                for stem in deleted_stems:
+                    _WATCHED_CHANGES.pop(stem, None)
+                    _WATCHED_MDB_MTIME.pop(stem, None)
+                for stem, mtime in current.items():
+                    previous = _WATCHED_MDB_MTIME.get(stem)
+                    if previous is None or mtime > previous:
+                        _WATCHED_CHANGES[stem] = now
+                    _WATCHED_MDB_MTIME[stem] = mtime
+            # Keep dm2000, dm3000 and dmpdata local caches in sync with source files
+            _dm2000_refresh_ls_cache()
+            _dm3000_refresh_ls_cache()
+            _dmpdata_refresh_cache()
+        except (OSError, ValueError, pyodbc.Error, HTTPException) as exc:
+            # Never let the watcher thread die — log and continue.
+            logger.warning("watch_loop: unexpected error (will retry): %s", exc)
+        time.sleep(WATCH_INTERVAL_SECONDS)
+
+
+def _dm_refresh_ls_cache(cfg: DmModule, force: bool = False) -> None:
+    """Copy ``<data_dir>/<ls_filename>`` to the local cache directory if the
+    source has changed.
+
+    Parameterized over the DM module (``cfg``) so DM2000 and DM3000 share
+    the same atomic-rename / fallback / magic-byte-validation logic.
+
+    Uses an atomic rename (os.replace) so readers always see a complete file.
+    Invalidates all in-memory caches for ``cfg`` after a successful refresh.
+    If the source cannot be read but a previous cache exists, keeps using it.
+    """
+    ls_path = Path(cfg.get_ls_path())
+    if not ls_path.exists():
+        # Source not present; signal ready using live path as fallback if cache exists
+        if not cfg.ls_cache_ready.is_set():
+            cfg.ls_cache_ready.set()
+        return
+
+    try:
+        current_mtime = ls_path.stat().st_mtime
+    except OSError:
+        if not cfg.ls_cache_ready.is_set():
+            cfg.ls_cache_ready.set()
+        return
+
+    with cfg.ls_cache_write_lock:
+        if not force and current_mtime <= cfg.ls_source_mtime and cfg.ls_cache_ready.is_set():
+            return  # source unchanged
+
+        cache_dir = cfg.get_cache_dir()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("%s_cache: cannot create cache dir %s: %s", cfg.name, cache_dir, exc)
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = str(ls_path)
+                cfg.ls_cache_ready.set()
+            return
+
+        cache_final = str(cache_dir / cfg.cache_filename)
+        cache_tmp = str(cache_dir / (Path(cfg.cache_filename).stem + "_new" + Path(cfg.cache_filename).suffix))
+        try:
+            shutil.copy2(str(ls_path), cache_tmp)
+        except (OSError, PermissionError) as exc:
+            logger.warning("%s_cache: copy failed (%s), falling back to live source: %s", cfg.name, ls_path, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            # Fall back to the live source path so ODBC reads attempt to
+            # pick up the latest data.  If the source is exclusively locked,
+            # ODBC will also fail, but this is no worse than using a stale copy.
+            preferred = str(ls_path)
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
+            else:
+                # Always update the path and clear caches so the next ODBC
+                # read picks up whatever data is available in preferred.
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
+            return
+
+        # Validate magic bytes before replacing.
+        # The first 4 bytes of a valid Jet/Access .mdb file are 0x00 0x01 0x00 0x00
+        # (Jet3/Jet4 format identifier).  This prevents caching a partially-written
+        # or corrupt file.
+        try:
+            size = os.path.getsize(cache_tmp)
+            if size >= 32 * 1024:
+                with open(cache_tmp, "rb") as fh:
+                    magic = fh.read(4)
+                if magic != b"\x00\x01\x00\x00":
+                    raise ValueError(f"Not a valid Access DB (magic={magic!r})")
+        except (OSError, ValueError) as exc:
+            logger.warning("%s_cache: validation failed for %s: %s", cfg.name, cache_tmp, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            # Fall back to the live source path so ODBC reads are never
+            # blocked by a partially-written or corrupt temporary file.
+            preferred = str(ls_path)
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
+            else:
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
+            return
+
+        # Atomically replace the cached copy.  On Windows a concurrent pyodbc
+        # reader may hold cache_final open, causing os.replace to fail with
+        # PermissionError.  Retry a few times with a short sleep to let
+        # short-lived ODBC connections finish before giving up.
+        replace_exc: "OSError | None" = None
+        for attempt in range(6):
+            try:
+                os.replace(cache_tmp, cache_final)
+                replace_exc = None
+                break
+            except OSError as exc:
+                replace_exc = exc
+                if attempt < 5:
+                    time.sleep(0.4)
+        if replace_exc is not None:
+            # cache_final is held open by a process (e.g. Access).  Decide the
+            # best read target without overwriting user edits.
+            #
+            # shutil.copy2 preserves the source file's mtime, so cache_tmp.mtime
+            # equals the source's current mtime (current_mtime).  If cache_final
+            # has a *newer* mtime it means the user edited it directly in Access
+            # (e.g. adding remarks), and we must NOT replace it with the older
+            # source copy.  In that case keep cache_final as the read target.
+            #
+            # Otherwise fall back to the live source path as before.  We do NOT
+            # keep cache_tmp in this branch: the background watcher also writes
+            # to that same path, so using it as a live cache could cause
+            # concurrent-write races; the source file is a safer choice.
+            cache_final_path = Path(cache_final)
+            cache_final_mtime = 0.0
+            if cache_final_path.exists():
+                try:
+                    cache_final_mtime = cache_final_path.stat().st_mtime
+                except OSError:
+                    pass
+
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+
+            if cache_final_mtime > current_mtime:
+                # User edited the cache file; keep it as the read target.
+                logger.warning(
+                    "%s_cache: rename failed (file in use?), keeping user-edited"
+                    " cache_final (mtime %.0f > source %.0f): %s",
+                    cfg.name,
+                    cache_final_mtime,
+                    current_mtime,
+                    replace_exc,
+                )
+                preferred = cache_final
+            else:
+                # Source is newer or cache_final absent; fall back to source.
+                logger.warning(
+                    "%s_cache: rename failed (file in use?), falling back to"
+                    " source: %s",
+                    cfg.name,
+                    replace_exc,
+                )
+                preferred = str(ls_path)
+
+            if not cfg.ls_cache_ready.is_set():
+                cfg.ls_cache_path = preferred
+                cfg.ls_cache_ready.set()
+            else:
+                # Always update the path and clear caches so the next ODBC read
+                # sees fresh data, even if preferred equals the previous path.
+                cfg.ls_cache_path = preferred
+                cfg.clear_all_caches()
+            return
+        cfg.ls_cache_path = cache_final
+        cfg.ls_source_mtime = current_mtime
+        logger.info("%s_cache: refreshed local copy from %s (mtime=%s)", cfg.name, ls_path, current_mtime)
+        cfg.ls_cache_ready.set()
+
+        # Invalidate all in-memory caches for this module
+        cfg.clear_all_caches()
+
+
+def _dm2000_refresh_ls_cache(force: bool = False) -> None:
+    """Backward-compatible wrapper that refreshes the DM2000 cache."""
+    _dm_refresh_ls_cache(DM2000_MOD, force=force)
+
+
+def _dm3000_refresh_ls_cache(force: bool = False) -> None:
+    """Refresh the DM3000 cache (parallel to DM2000)."""
+    _dm_refresh_ls_cache(DM3000_MOD, force=force)
+
+
+def _dmpdata_refresh_cache(force: bool = False) -> None:
+    """Copy DMPDATA.mdb to the local cache directory if the source has changed.
+
+    Uses an atomic rename (os.replace) so readers always see a complete file.
+    Invalidates the DMPDATA in-memory caches after a successful refresh.
+    If the source cannot be read but a previous cache exists, keeps using it.
+    """
+    global _DMPDATA_CACHE_PATH, _DMPDATA_SOURCE_MTIME  # noqa: PLW0603
+
+    dmpdata_path = Path(get_dmpdata_path())
+    if not dmpdata_path.exists():
+        if not _DMPDATA_CACHE_READY.is_set():
+            _DMPDATA_CACHE_READY.set()
+        return
+
+    try:
+        current_mtime = dmpdata_path.stat().st_mtime
+    except OSError:
+        if not _DMPDATA_CACHE_READY.is_set():
+            _DMPDATA_CACHE_READY.set()
+        return
+
+    with _DMPDATA_CACHE_WRITE_LOCK:
+        if not force and current_mtime <= _DMPDATA_SOURCE_MTIME and _DMPDATA_CACHE_READY.is_set():
+            return  # source unchanged
+
+        cache_dir = Path(DMPDATA_CACHE_DIR).resolve()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("dmpdata_cache: cannot create cache dir %s: %s", cache_dir, exc)
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = str(dmpdata_path)
+                _DMPDATA_CACHE_READY.set()
+            return
+
+        cache_final = str(cache_dir / "DMPDATA.mdb")
+        cache_tmp = str(cache_dir / "DMPDATA_new.mdb")
+        try:
+            shutil.copy2(str(dmpdata_path), cache_tmp)
+        except (OSError, PermissionError) as exc:
+            logger.warning("dmpdata_cache: copy failed (%s), continuing with existing cache: %s", dmpdata_path, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            source_str = str(dmpdata_path)
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = source_str
+                _DMPDATA_CACHE_READY.set()
+            elif _DMPDATA_CACHE_PATH != source_str:
+                _DMPDATA_CACHE_PATH = source_str
+            return
+
+        # Validate magic bytes before replacing.
+        try:
+            size = os.path.getsize(cache_tmp)
+            if size >= 32 * 1024:
+                with open(cache_tmp, "rb") as fh:
+                    magic = fh.read(4)
+                if magic != b"\x00\x01\x00\x00":
+                    raise ValueError(f"Not a valid Access DB (magic={magic!r})")
+        except (OSError, ValueError) as exc:
+            logger.warning("dmpdata_cache: validation failed for %s: %s", cache_tmp, exc)
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            source_str = str(dmpdata_path)
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = source_str
+                _DMPDATA_CACHE_READY.set()
+            elif _DMPDATA_CACHE_PATH != source_str:
+                _DMPDATA_CACHE_PATH = source_str
+            return
+
+        # Atomically replace the cached copy.  Retry on transient ODBC locks.
+        replace_exc: "OSError | None" = None
+        for attempt in range(6):
+            try:
+                os.replace(cache_tmp, cache_final)
+                replace_exc = None
+                break
+            except OSError as exc:
+                replace_exc = exc
+                if attempt < 5:
+                    time.sleep(0.4)
+        if replace_exc is not None:
+            # All retries failed — fall back to reading directly from source.
+            logger.warning(
+                "dmpdata_cache: rename failed after retries (file in use?), falling back to source: %s",
+                replace_exc,
+            )
+            try:
+                os.unlink(cache_tmp)
+            except OSError:
+                pass
+            source_str = str(dmpdata_path)
+            if not _DMPDATA_CACHE_READY.is_set():
+                _DMPDATA_CACHE_PATH = source_str
+                _DMPDATA_CACHE_READY.set()
+            elif _DMPDATA_CACHE_PATH != source_str:
+                _DMPDATA_CACHE_PATH = source_str
+            return
+
+        _DMPDATA_CACHE_PATH = cache_final
+        _DMPDATA_SOURCE_MTIME = current_mtime
+        logger.info("dmpdata_cache: refreshed local copy from %s (mtime=%s)", dmpdata_path, current_mtime)
+
+        _DMPDATA_CACHE_READY.set()
+
+
+@asynccontextmanager
+async def _lifespan(application):
+    watcher_thread = threading.Thread(target=_watch_dmp_changes_loop, daemon=True)
+    watcher_thread.start()
+    # Build the initial local caches in thread executors so the async event loop
+    # is not blocked during startup.  Simple endpoints (templates, config) can
+    # respond immediately; DB-backed endpoints wait for the *_CACHE_READY events.
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: _dm2000_refresh_ls_cache(force=True))
+    await loop.run_in_executor(None, lambda: _dm3000_refresh_ls_cache(force=True))
+    await loop.run_in_executor(None, lambda: _dmpdata_refresh_cache(force=True))
+    # Register with the Voniko server only AFTER the local caches are ready so
+    # that requests proxied to this station are not met with a premature 503.
+    if VONIKO_SERVER_URL and DMP_STATION_NAME:
+        t = threading.Thread(target=_registration_loop, daemon=True)
+        t.start()
+    yield
+
+
+app = FastAPI(title="DMP Battery Data Bridge", version="1.0.0", lifespan=_lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@contextmanager
+def shadow_copy_any(mdb_path: str, allowed_dir: str):
+    """Generic shadow copy with path restriction under allowed_dir."""
+    source = Path(mdb_path).resolve()
+    base_dir = Path(allowed_dir).resolve()
+    if source.suffix.lower() != ".mdb":
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="MDB file not found")
+    try:
+        source.relative_to(base_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid path") from exc
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mdb")
+    os.close(tmp_fd)
+    try:
+        try:
+            shutil.copy2(str(source), tmp_path)
+        except PermissionError as exc:
+            logger.warning("shadow_copy: PermissionError copying %s — file locked by DMP app: %s", source, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"MDB file is locked by DMP application, retry later: {exc}",
+            ) from exc
+        except OSError as exc:
+            logger.warning("shadow_copy: OSError copying %s: %s", source, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot read MDB file: {exc}",
+            ) from exc
+
+        # Validate: must be at least 32 KB and start with Jet/ACE magic bytes
+        copied_size = os.path.getsize(tmp_path)
+        if copied_size < 32 * 1024:
+            raise HTTPException(
+                status_code=422,
+                detail=f"File too small ({copied_size} bytes) to be a valid Access database (possible Windows shortcut)",
+            )
+        with open(tmp_path, "rb") as fh:
+            magic = fh.read(4)
+        if magic != b"\x00\x01\x00\x00":
+            raise HTTPException(
+                status_code=422,
+                detail="Not a valid Access database header (possible Windows shortcut)",
+            )
+
+        yield tmp_path
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+@contextmanager
+def shadow_copy(mdb_path: str):
+    """Copy live DMP .mdb to temp location before querying to avoid file-lock errors."""
+    with shadow_copy_any(mdb_path, DMP_DATA_DIR) as tmp:
+        yield tmp
+
+
+@contextmanager
+def shadow_copy_dm2000(mdb_path: str):
+    """Copy DM2000 .mdb to a temp file before querying to avoid lock conflicts."""
+    with shadow_copy_any(mdb_path, DM2000_DATA_DIR) as tmp:
+        yield tmp
+
+
+def _parse_access_date(v) -> Optional[str]:
+    """Normalise an Access date value to canonical ``YYYY-MM-DD`` string.
+
+    Returns ``None`` when the input cannot be interpreted as a real date.
+
+    Handles datetime-like objects plus the date string formats the Access
+    databases actually emit:
+
+      * ``YYYY-MM-DD`` / ``YYYY-M-D`` (DMP ``para_pub.fdrq`` style)
+      * ``YYYY/M/D``  / ``YYYY/MM/DD`` (DM2000 ``ls_jb_cs.scrq`` style)
+      * ``M/D/YYYY``  / ``MM/DD/YYYY`` (DMP ``para_singl.scrq`` style)
+      * ``D/M/YYYY``  only when the first component is > 12 (unambiguous)
+      * ``YYYY/M`` or ``YYYY-M`` partial date — treated as 1st of the month.
+        Covers DMP ``para_singl.scrq`` entries like ``"2024/10"``.
+      * ``YYYY/M/D-end`` range notation — only the start date is used.
+        Covers DMP entries like ``"2025/3/15-17"`` or ``"2025/03/20-21"``.
+        Also handles compound suffixes such as ``"2025/3/29-31-1"`` (the day
+        component ``"29-31-1"`` has its leading integer ``29`` extracted).
+
+    Garbage like ``"20265/7/10"`` or ``"None"`` returns ``None``.
+    """
+    if v is None:
+        return None
+    if hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except (ValueError, AttributeError):
+            return None
+    s = str(v).strip()
+    if not s or s.lower() in ("none", "null"):
+        return None
+    # Strip any time portion ("2024-07-12 15:30:00" or ISO "2024-07-12T15:30")
+    s = s.split()[0].split("T")[0]
+    for sep in ("-", "/"):
+        if sep not in s:
+            continue
+        parts = s.split(sep)
+        # Handle YYYY/M or YYYY-M partial date (year + month, no day).
+        # Treat as the 1st of that month.  Covers entries like "2024/10".
+        if len(parts) == 2:
+            try:
+                a, b = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                continue
+            if 1900 <= a <= 2999 and 1 <= b <= 12:
+                try:
+                    return date(a, b, 1).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            continue
+        if len(parts) != 3:
+            continue
+        try:
+            a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
+        except (ValueError, TypeError):
+            # Handle range notation in the day component: "15-17" → 15.
+            # Covers DMP para_singl.scrq entries like "2025/3/15-17".
+            try:
+                a = int(parts[0])
+                b = int(parts[1])
+                _c_m = re.match(r'^\d+', str(parts[2]))
+                if not _c_m:
+                    continue
+                c = int(_c_m.group())
+            except (ValueError, TypeError):
+                continue
+        # YYYY-M-D (or YYYY/M/D): first component is a 4-digit year
+        if 1900 <= a <= 2999 and 1 <= b <= 12 and 1 <= c <= 31:
+            try:
+                return date(a, b, c).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        # M/D/YYYY: third component is a 4-digit year, first <= 12
+        if 1900 <= c <= 2999 and 1 <= a <= 12 and 1 <= b <= 31:
+            try:
+                return date(c, a, b).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        # D/M/YYYY: third component is a 4-digit year, first > 12 (unambiguous)
+        if 1900 <= c <= 2999 and 13 <= a <= 31 and 1 <= b <= 12:
+            try:
+                return date(c, b, a).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+    return None
+
+
+def _inline_params(sql: str, params: tuple) -> str:
+    """Inline params into SQL for Access ODBC drivers that don't support SQLBindParameter."""
+    parts = sql.split("?")
+    if len(parts) != len(params) + 1:
+        raise ValueError("Parameter count mismatch")
+    result = parts[0]
+    for i, param in enumerate(params):
+        if param is None:
+            result += "NULL"
+        elif isinstance(param, (int, float)):
+            result += str(param)
+        else:
+            value = str(param)
+            # Permit only a conservative character set used by batch/cdmc identifiers
+            # and date-like strings when fallback inlining is required by Access ODBC.
+            # Includes () , + / # @ which appear in cdmc values and model names.
+            if not re.fullmatch(r"[A-Za-z0-9 _:.(),%+/#@-]+", value):
+                raise ValueError("Unsafe string parameter for inline SQL fallback")
+            escaped = value.replace("'", "''")
+            result += f"'{escaped}'"
+        result += parts[i + 1]
+    return result
+
+
+@contextmanager
+def _acquire_query_lock():
+    """Acquire the Access DB semaphore with a timeout.
+
+    Raises HTTPException(503) instead of blocking indefinitely when the
+    database is saturated with concurrent requests.
+    """
+    acquired = _ACCESS_QUERY_LOCK.acquire(timeout=_ACCESS_QUERY_TIMEOUT)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is busy with too many concurrent requests, please retry shortly",
+        )
+    try:
+        yield
+    finally:
+        _ACCESS_QUERY_LOCK.release()
+
+
+def query_mdb(mdb_path: str, sql: str, params: tuple = (), retries: int = 2) -> list[dict]:
+    """Run an Access query with bounded concurrency and short HY000 retries.
+
+    Retries are applied to transient HY000 driver errors and UnicodeDecodeError
+    (raised by the Access ODBC driver when it reads an MDB file that is being
+    atomically replaced by the cache-refresh logic, resulting in a briefly
+    truncated read).  Both use a linear backoff of 0.3s * attempt.
+    The HYC00 inline fallback is preserved.
+    """
+    conn_str = (
+        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={mdb_path};"
+    )
+    for attempt_num in range(1, retries + 2):
+        try:
+            with _acquire_query_lock():
+                with pyodbc.connect(conn_str, timeout=10) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute(sql, params) if params else cursor.execute(sql)
+                    except pyodbc.Error as exc:
+                        err_str = str(exc)
+                        if params and ("HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str):
+                            try:
+                                cursor = conn.cursor()
+                                cursor.execute(_inline_params(sql, params))
+                            except (pyodbc.Error, ValueError) as inline_exc:
+                                # Use DEBUG for 07002 ("Too few parameters") because that
+                                # error means a column name is not recognised in this
+                                # database schema — the schema-probe multi-query pattern
+                                # in _read_dm2000_ls_multi intentionally tries both the
+                                # cdid-based and archname-based schemas and handles the
+                                # exception gracefully, so the WARNING level is misleading.
+                                log_level = (
+                                    logger.debug
+                                    if "07002" in str(inline_exc) or "07002" in str(exc)
+                                    else logger.warning
+                                )
+                                log_level(
+                                    "Inline parameter fallback failed (%s); re-raising original execute error (%s)",
+                                    inline_exc,
+                                    exc,
+                                )
+                                raise exc from inline_exc
+                        else:
+                            raise
+                    columns = [col[0] for col in cursor.description] if cursor.description else []
+                    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except (pyodbc.Error, UnicodeDecodeError) as exc:
+            err_str = str(exc) if isinstance(exc, pyodbc.Error) else ""
+            is_transient = isinstance(exc, UnicodeDecodeError) or "HY000" in err_str
+            if is_transient and attempt_num <= retries:
+                wait = 0.3 * attempt_num
+                logger.debug("Transient error on attempt %d, retrying in %.1fs: %s", attempt_num, wait, exc)
+                time.sleep(wait)
+                continue
+            raise
+
+
+def resolve_data_file(filename: str) -> str:
+    """Resolve a filename to absolute path within DMP_DATA_DIR. Raises HTTPException on traversal."""
+    parsed = Path(filename)
+    if parsed.parent != Path("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    stem = parsed.stem
+    if not re.match(r'^[A-Za-z0-9_-]+$', stem):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    result = Path(DMP_DATA_DIR).resolve() / (stem + ".mdb")
+    if not str(result).startswith(str(Path(DMP_DATA_DIR).resolve())):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not result.exists():
+        raise HTTPException(status_code=404, detail="Data file not found")
+    return str(result)
+
+
+def get_dmpdata_path() -> str:
+    return str(Path(DMP_DATA_DIR).resolve() / "DMPDATA.mdb")
+
+
+def get_dm2000_ls_path() -> str:
+    """Backward-compatible accessor — returns the DM2000 ls.mdb source path."""
+    return DM2000_MOD.get_ls_path()
+
+
+def get_dm3000_ls_path() -> str:
+    """Returns the DM3000 ls.mdb source path."""
+    return DM3000_MOD.get_ls_path()
+
+
+def get_dm2000_main_path() -> str:
+    return DM2000_MOD.get_main_path()
+
+
+def get_dm3000_main_path() -> str:
+    return DM3000_MOD.get_main_path()
+
+
+def compute_stats(rows: list[dict]) -> dict:
+    def safe_float(value):
+        if value == "--" or value == "" or value is None:
+            return None
+        try:
+            f = float(value)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    def get_value(row: dict, *keys):
+        for key in keys:
+            if key in row and row.get(key) is not None:
+                v = row.get(key)
+                if v == "--" or v == "":
+                    continue
+                return v
+        return None
+
+    volt_vals = [safe_float(get_value(r, "VOLT", "volt", "Volt")) for r in rows]
+    volt_vals = [v for v in volt_vals if v is not None]
+    im_vals_all = [safe_float(get_value(r, "Im", "IM", "im")) for r in rows]
+    im_vals_all = [i for i in im_vals_all if i is not None]
+    im_vals_active = [i for i in im_vals_all if i > 0]
+
+    def agg(vals):
+        if not vals:
+            return {"max": None, "min": None, "avg": None}
+        return {
+            "max": round(max(vals), 4),
+            "min": round(min(vals), 4),
+            "avg": round(sum(vals) / len(vals), 4),
+        }
+
+    v = agg(volt_vals)
+    i_all = agg(im_vals_all)
+    i_active = agg(im_vals_active)
+    return {
+        "VOLT_MAX": v["max"],
+        "VOLT_MIN": v["min"],
+        "VOLT_AVG": v["avg"],
+        "IM_MAX": i_all["max"],
+        "IM_MIN": i_all["min"],
+        "IM_AVG": i_active["avg"],
+    }
+
+
+class ReportRequest(BaseModel):
+    batch_id: str
+    cdmc: str
+    channel: int
+    template_name: str
+
+
+class DMPSimpleReportRequest(BaseModel):
+    batch_id: str
+    # Legacy single-channel fields (used when ``batys`` is not provided so older
+    # callers keep working).  When ``batys`` is non-empty the new DM2000-style
+    # multi-battery preview format is generated and these fields are ignored.
+    cdmc: Optional[str] = None
+    channel: Optional[int] = None
+    # New multi-battery fields mirroring DM2000SimpleReportRequest
+    batys: list[int] = Field(default=[])
+    override_battery_type: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+    endpoint_cutoff: Optional[float] = None
+
+
+class DM2000ReportRequest(BaseModel):
+    archname: str
+    baty: int = Field(ge=0)
+    template_name: str = Field(min_length=6)
+    override_archname: Optional[str] = None
+    override_start_date: Optional[str] = None
+    override_battery_type: Optional[str] = None
+    override_batch_name: Optional[str] = None
+    override_discharge_condition: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+    override_made_date: Optional[str] = None
+    override_serial_no: Optional[str] = None
+    override_remarks: Optional[str] = None
+
+
+class DM2000SimpleReportRequest(BaseModel):
+    archname: str
+    batys: list[int] = Field(default=[])
+    override_battery_type: Optional[str] = None
+    override_manufacturer: Optional[str] = None
+    endpoint_cutoff: Optional[float] = None
+
+
+class PerfReportEntry(BaseModel):
+    archname: str
+    battery_type: str  # e.g. "HP", "UD", "UD+"
+    batys: list[int] = Field(default=[])  # empty = use all detected batteries
+    sheet_name: str = ""  # auto-derived from dcxh+serialno when empty
+    override_serial_no: Optional[str] = None  # override serialno for sheet-name derivation
+    override_remarks: Optional[str] = None  # override remarks (informational)
+
+
+class PerfReportRequest(BaseModel):
+    entries: list[PerfReportEntry]
+    template_name: Optional[str] = None
+
+
+class DmpPerfGroup(BaseModel):
+    loai: str  # e.g. "UD", "HP", "UD+"
+    chuyen: str  # production-line number, e.g. "501"
+    trays: list[int] = Field(default=[])  # channel numbers (1-9); empty = auto-assigned
+
+
+class DmpPerfEntry(BaseModel):
+    batch_id: str  # para_pub.id
+    model: str  # e.g. "LR6", "LR03", "LR61", "9V"
+    groups: list[DmpPerfGroup]
+    special_type: str = "normal"  # "normal" | "6020" | "3thang" | "6thang"
+    report_date: Optional[str] = None  # YYYY-MM-DD from SQLite; used as row-label fallback
+    raw_remark: Optional[str] = None  # free-text remark; used as fallback to search para_pub.bz
+    dm2000_archname: Optional[str] = None  # DM2000 archive name; when set, data is read from DM2000 instead of DMP
+    # Optional flags derived from raw_remark suffixes; if not provided by the
+    # client they are re-derived server-side from raw_remark using
+    # _strip_remark_suffixes.  ``is_quarter`` (suffix ``Q``) marks a quarterly
+    # measurement: the entry is recorded on a normal date row but is intended
+    # to capture all condition columns measured that day.  ``is_15d`` (suffix
+    # ``15``) marks the LR6-only 15-day variant of the
+    # ``(1500mW2s,650mW28s)10T/h,24h/d`` condition; the value is routed to the
+    # 15-day column instead of the daily column.
+    is_quarter: Optional[bool] = None
+    is_15d: Optional[bool] = None
+
+
+class DmpPerfReportRequest(BaseModel):
+    entries: list[DmpPerfEntry]
+    template_name: Optional[str] = None
+
+
+class DM2000UpdateArchiveMetaRequest(BaseModel):
+    archname: str
+    remarks: Optional[str] = None   # None = no change; "" = clear the field
+    serialno: Optional[str] = None  # None = no change; "" = clear the field
+
+
+class DMPUpdateBatchMetaRequest(BaseModel):
+    batch_id: str
+    remarks: Optional[str] = None   # None = no change; "" = clear the field
+    serialno: Optional[str] = None  # None = no change; "" = clear the field
+
+
+def render_excel_template(template_path: str, context: dict) -> bytes:
+    wb = load_workbook(template_path)
+    for ws in wb.worksheets:
+        _process_worksheet(ws, context)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _interpolate_cell(value, ctx: dict):
+    if not isinstance(value, str):
+        return value
+    m = re.fullmatch(r'\{\{(\w+)\}\}', value.strip())
+    if m:
+        key = m.group(1)
+        return ctx.get(key, value)
+
+    def replacer(match):
+        key = match.group(1)
+        v = ctx.get(key, match.group(0))
+        return str(v) if v is not None else ''
+
+    return re.sub(r'\{\{(\w+)\}\}', replacer, value)
+
+
+def _process_worksheet(ws, ctx: dict):
+    history_data = ctx.get("HISTORY_DATA", [])
+
+    rows_to_expand = []
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and '{{#HISTORY_DATA}}' in cell.value:
+                rows_to_expand.append(cell.row)
+                break
+
+    for template_row_idx in sorted(rows_to_expand, reverse=True):
+        template_row = list(ws.iter_rows(min_row=template_row_idx, max_row=template_row_idx))[0]
+
+        if history_data:
+            if len(history_data) > 1:
+                ws.insert_rows(template_row_idx + 1, len(history_data) - 1)
+
+            for i, item in enumerate(history_data):
+                target_row = template_row_idx + i
+                for j, tmpl_cell in enumerate(template_row):
+                    target_cell = ws.cell(row=target_row, column=tmpl_cell.column)
+                    if i > 0:
+                        target_cell._style = tmpl_cell._style
+                    raw = tmpl_cell.value
+                    if isinstance(raw, str):
+                        raw = raw.replace('{{#HISTORY_DATA}}', '').strip()
+                    target_cell.value = _interpolate_cell(raw, item) if raw else raw
+        else:
+            for cell in template_row:
+                cell.value = None
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and '{{' in cell.value and '{{#HISTORY_DATA}}' not in cell.value:
+                cell.value = _interpolate_cell(cell.value, ctx)
+
+
+def _resolve_template_path(template_name: str) -> str:
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template")
+
+    base = Path(DMP_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail="Template not found")
+    result = (base / template_name).resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+    if not result.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+    return str(result)
+
+
+def _read_dmpdata(sql: str, params: tuple = ()) -> list[dict]:
+    """Query the persistent local cache of DMPDATA.mdb.
+
+    Waits up to _DMPDATA_CACHE_READY_TIMEOUT seconds for the initial cache to be
+    built on startup, then reads directly from the cached copy without creating a
+    new shadow copy per request.  Falls back to a fresh shadow copy of the source
+    file when the cache has not been built (e.g. DMPDATA_CACHE_DIR unavailable).
+    """
+    if _DMPDATA_CACHE_READY.wait(timeout=_DMPDATA_CACHE_READY_TIMEOUT):
+        if _DMPDATA_CACHE_PATH:
+            return query_mdb(_DMPDATA_CACHE_PATH, sql, params)
+    # Fallback: original shadow-copy path (cache not available)
+    dmpdata = Path(get_dmpdata_path())
+    if not dmpdata.exists():
+        raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+    with shadow_copy(str(dmpdata)) as copied:
+        return query_mdb(copied, sql, params)
+
+
+def _read_dm_ls(cfg: DmModule, sql: str, params: tuple = ()) -> list[dict]:
+    """Query the persistent local cache of ``<module>/dmdata_ls.mdb``.
+
+    Parameterised over the DM module so DM2000 and DM3000 share the same
+    code path.  Waits up to ``_DM_LS_CACHE_READY_TIMEOUT`` seconds for the
+    initial cache to be built (startup), then reads directly from the cached
+    copy without creating a new shadow copy per request.  The global
+    ACCESS_QUERY_LOCK inside ``query_mdb`` still caps concurrent ODBC
+    connections, but no per-request file duplication overhead exists.
+    """
+    if not cfg.ls_cache_ready.wait(timeout=_DM_LS_CACHE_READY_TIMEOUT):
+        raise HTTPException(
+            status_code=503,
+            detail=f"{cfg.name.upper()} database not ready, please retry shortly",
+        )
+    if not cfg.ls_cache_path:
+        raise HTTPException(status_code=404, detail=f"{cfg.ls_filename} not found")
+    return query_mdb(cfg.ls_cache_path, sql, params)
+
+
+def _read_dm_ls_multi(cfg: DmModule, queries: list[tuple[str, tuple]]) -> list[dict]:
+    """Execute a list of (sql, params) queries against the persistent local
+    cache of ``<module>/dmdata_ls.mdb`` for *cfg*, returning the first
+    successful result.
+
+    Raises HTTPException(503) when the cache is not yet ready.
+    Re-raises the last :class:`pyodbc.Error` when every query in *queries* fails.
+    """
+    if not cfg.ls_cache_ready.wait(timeout=_DM_LS_CACHE_READY_TIMEOUT):
+        raise HTTPException(
+            status_code=503,
+            detail=f"{cfg.name.upper()} database not ready, please retry shortly",
+        )
+    if not cfg.ls_cache_path:
+        raise HTTPException(status_code=404, detail=f"{cfg.ls_filename} not found")
+    last_exc: "pyodbc.Error | None" = None
+    for sql, params in queries:
+        try:
+            return query_mdb(cfg.ls_cache_path, sql, params)
+        except pyodbc.Error as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return []  # only reached when queries is empty
+
+
+# Backward-compatible thin wrappers — many existing callers reference the
+# DM2000-specific names.
+def _read_dm2000_ls(sql: str, params: tuple = ()) -> list[dict]:
+    return _read_dm_ls(DM2000_MOD, sql, params)
+
+
+def _read_dm2000_ls_multi(queries: list[tuple[str, tuple]]) -> list[dict]:
+    return _read_dm_ls_multi(DM2000_MOD, queries)
+
+
+def _resolve_dm_template_path(cfg: DmModule, template_name: str) -> str:
+    """Resolve *template_name* against ``cfg.templates_dir`` with traversal checks.
+
+    Shared by DM2000 and DM3000.  The two modules use separate templates
+    directories (``./dm2000_templates`` and ``./dm3000_templates`` by default)
+    so they can ship distinct workbooks with the right unit headers.
+    """
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template")
+
+    base = Path(cfg.templates_dir).resolve()
+    allowed = {
+        f.name for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail="Template not found")
+    result = (base / template_name).resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+    if not result.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+    return str(result)
+
+
+def _resolve_dm2000_template_path(template_name: str) -> str:
+    return _resolve_dm_template_path(DM2000_MOD, template_name)
+
+
+def _resolve_dm_perf_template_path(cfg: DmModule, template_name: str) -> str:
+    """Resolve *template_name* against ``cfg.perf_templates_dir`` with
+    traversal checks.  When the requested template is missing from the
+    DM3000 directory, fall back to the DM2000 directory so the two modules
+    can share workbooks until DM3000-specific perf templates exist."""
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template")
+
+    base = Path(cfg.perf_templates_dir).resolve()
+    allowed = {
+        f.name: f for f in base.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if base.exists() else {}
+    if template_name not in allowed:
+        # Fallback: DM3000 may reuse DM2000 perf templates initially
+        if cfg.name != "dm2000":
+            fallback = Path(DM2000_MOD.perf_templates_dir).resolve()
+            fb_allowed = {
+                f.name: f for f in fallback.iterdir()
+                if f.is_file() and _is_valid_template_name(f.name)
+            } if fallback.exists() else {}
+            if template_name in fb_allowed:
+                fb_result = fb_allowed[template_name].resolve()
+                try:
+                    fb_result.relative_to(fallback)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+                if fb_result.is_file():
+                    return str(fb_result)
+        raise HTTPException(status_code=404, detail="Perf template not found")
+    # Use the filesystem-derived Path object (not raw user input) to avoid taint
+    result = allowed[template_name].resolve()
+    try:
+        result.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Template path traversal detected") from exc
+    if not result.is_file():
+        raise HTTPException(status_code=404, detail="Perf template not found")
+    return str(result)
+
+
+def _resolve_perf_template_path(template_name: str) -> str:
+    """Backward-compatible wrapper — resolves against the DM2000 perf templates dir."""
+    return _resolve_dm_perf_template_path(DM2000_MOD, template_name)
+
+
+def _perf_cell_value_with_merge(ws, row: int, col: int):
+    """Return the effective display value of a cell, accounting for merged ranges."""
+    for merge_range in ws.merged_cells.ranges:
+        if (
+            merge_range.min_row <= row <= merge_range.max_row
+            and merge_range.min_col <= col <= merge_range.max_col
+        ):
+            return ws.cell(row=merge_range.min_row, column=merge_range.min_col).value
+    return ws.cell(row=row, column=col).value
+
+
+def _perf_col_header(ws, col: int, below_row: int) -> str:
+    """Scan upward from *below_row* and return the first non-empty cell value
+    in *col*, respecting merged cells.  Returns an empty string if not found."""
+    for row_idx in range(below_row - 1, 0, -1):
+        val = _perf_cell_value_with_merge(ws, row_idx, col)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _perf_find_fdfs_for_col(
+    ws, col: int, below_row: int, all_fdfs: list[str]
+) -> tuple[str, str]:
+    """Scan *all* rows above *below_row* in *col* and return the first
+    ``(fdfs_label, header_text)`` pair where the header matches a known fdfs.
+    Returns ``("", "")`` when no match is found.
+
+    This correctly handles templates where multiple header rows exist above the
+    data-tag row (e.g. a merged fdfs label in row 2 and a sub-header in row 3).
+    """
+    for row_idx in range(below_row - 1, 0, -1):
+        val = _perf_cell_value_with_merge(ws, row_idx, col)
+        if val is None:
+            continue
+        s = str(val).strip()
+        if not s:
+            continue
+        for fdfs_lbl in all_fdfs:
+            if _perf_fdfs_matches_header(fdfs_lbl, s):
+                return (fdfs_lbl, s)
+    return ("", "")
+
+
+def _perf_normalize_date(v) -> str:
+    """Normalise a cell value to a ``YYYY-MM-DD`` string, or return ``""``."""
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    s = str(v).strip()
+    # Accept YYYY/MM/DD or YYYY-MM-DD (first 10 chars)
+    s = s[:10].replace("/", "-")
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    return ""
+
+
+# Standard IEC 60086-2 discharge-test-condition template order per battery family.
+# Each entry is a condition label as it typically appears in the Excel report template.
+# Matching against actual DB labels uses _perf_fdfs_matches_template (fuzzy + bracket-norm).
+_TEMPLATE_CONDITION_ORDER: dict[str, list[str]] = {
+    "LR6": [
+        "10ohm 24h/d-0.9V",
+        "1000mA 24h/d-0.9V",
+        # The following two entries cover the SAME physical discharge condition
+        # ``(1500mW2s,650mW28s)10T/h,24h/d``; they are split into two adjacent
+        # columns because LR6 has both a daily measurement and a 15-day-cadence
+        # measurement for the condition.  The 15-day column is shown
+        # immediately to the right of the daily column under the same
+        # ``Everyday`` group; routing between them is performed by
+        # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
+        # suffix (``15`` writes the 15-day column ONLY; daily measurements
+        # without ``15`` write the daily column only).
+        "(1500mW2s,650mW28s)10T/h,24h/d",
+        "(1500mW2s,650mW28s)10T/h,24h/d 15D",
+        "3.9ohm 1h/d-0.8V",
+        "3.9ohm 4m/h 8h/d-0.9V",
+        "250mA 1h/d-0.9V",
+        "3.9ohm 24h/d-0.8V",
+        "1000mA 10s/m 1h/d-0.9V",
+        "100mA 1h/d-0.9V",
+        "50mA 1h/8h 24h/d-1V",
+        "750mA 2m/h 8h/d-1.1V",
+        "(450mW5s,45mW175s) 3h/124h-1.1V",
+        "(1ohm,0.25s.3.0ohm,19.75s),10m/h,1h/12h-1.0V",
+    ],
+    "LR03": [
+        "20ohm 24h/d-0.9V",
+        "600mA 24h/d-0.9V",
+        "5.1ohm 1h/d-0.8V",
+        "5.1ohm 4m/h 8h/d-0.9V",
+        "600mA 10s/m 1h/d-0.9V",
+        "50mA 1h/12h-0.9V",
+        "250mA 5m/h 12h/d-1.1V",
+        "100mA 1h/d-0.9V",
+        "24ohm 15s/m 8h/d-1V",
+        "3.9ohm 24h/d-0.8V",
+        "75mA 1h/12h 24h/d-0.9V",
+    ],
+    "LR61": [
+        "35mA 24h/d-0.9V",
+        "5.1ohm 5m/d-0.9V",
+        "75ohm 1h/d-0.9V",
+        "75ohm 1h/d-1.1V",
+    ],
+    "9V": [
+        "35mA 24h/d-5.4V",
+        "180ohm 4h/d-6.8V",
+        "270ohm 1h/d-5.4V",
+        "620ohm 2h/d-5.4V",
+        "620ohm+10Kohm 1s/60m.24h/d-7.5V",
+    ],
+}
+
+# Frequency group for each standard discharge condition, keyed by battery family.
+# Groups: "everyday" | "everyweek" | "everymonth".
+# Matching against actual DB condition labels uses the same fuzzy logic as
+# _perf_fdfs_matches_template (see _get_condition_freq_group below).
+_CONDITION_FREQ_GROUP: dict[str, dict[str, str]] = {
+    "LR6": {
+        "10ohm 24h/d-0.9V":                                    "everyday",
+        "1000mA 24h/d-0.9V":                                   "everyday",
+        # Same condition shown across two adjacent columns under the same
+        # ``Everyday`` group: the daily column and the 15-day column.  Both
+        # belong to ``everyday`` so the report's frequency-group header /
+        # filter is unaffected; column-level distinction comes from the
+        # distinct labels (the ``15D`` suffix is the visible column-header
+        # marker), and routing between them is performed by
+        # ``_lr6_route_fdfs_labels`` based on the operator's ``15`` remark
+        # suffix (15-day measurements write to the 15-day column ONLY,
+        # daily measurements write to the daily column ONLY).
+        "(1500mW2s,650mW28s)10T/h,24h/d":                      "everyday",
+        "(1500mW2s,650mW28s)10T/h,24h/d 15D":                  "everyday",
+        "3.9ohm 1h/d-0.8V":                                    "everyweek",
+        "3.9ohm 4m/h 8h/d-0.9V":                               "everyweek",
+        "250mA 1h/d-0.9V":                                     "everyweek",
+        "3.9ohm 24h/d-0.8V":                                   "everymonth",
+        "1000mA 10s/m 1h/d-0.9V":                              "everymonth",
+        "100mA 1h/d-0.9V":                                     "everymonth",
+        "50mA 1h/8h 24h/d-1V":                                 "everymonth",
+        "750mA 2m/h 8h/d-1.1V":                                "everymonth",
+        "(450mW5s,45mW175s) 3h/124h-1.1V":                     "everymonth",
+        "(1ohm,0.25s.3.0ohm,19.75s),10m/h,1h/12h-1.0V":        "everymonth",
+    },
+    "LR03": {
+        "20ohm 24h/d-0.9V":                                    "everyday",
+        "600mA 24h/d-0.9V":                                    "everyday",
+        "5.1ohm 1h/d-0.8V":                                    "everyweek",
+        "5.1ohm 4m/h 8h/d-0.9V":                               "everyweek",
+        "600mA 10s/m 1h/d-0.9V":                               "everyweek",
+        "50mA 1h/12h-0.9V":                                    "everymonth",
+        "250mA 5m/h 12h/d-1.1V":                               "everymonth",
+        "100mA 1h/d-0.9V":                                     "everymonth",
+        "24ohm 15s/m 8h/d-1V":                                 "everymonth",
+        "3.9ohm 24h/d-0.8V":                                   "everymonth",
+        "75mA 1h/12h 24h/d-0.9V":                              "everymonth",
+    },
+    "LR61": {
+        "35mA 24h/d-0.9V":                                     "everyday",
+        "5.1ohm 5m/d-0.9V":                                    "everyweek",
+        "75ohm 1h/d-0.9V":                                     "everymonth",
+        "75ohm 1h/d-1.1V":                                     "everymonth",
+    },
+    "9V": {
+        "35mA 24h/d-5.4V":                                     "everyday",
+        "180ohm 4h/d-6.8V":                                    "everyweek",
+        "270ohm 1h/d-5.4V":                                    "everyweek",
+        "620ohm 2h/d-5.4V":                                    "everymonth",
+        "620ohm+10Kohm 1s/60m.24h/d-7.5V":                     "everymonth",
+    },
+}
+
+# Normalise bracket style so that DMP-software labels using {} are treated the
+# same as template labels that use () when doing template-order lookups.
+_BRACKET_NORM_TABLE = str.maketrans("{}", "()")
+
+# Compiled once at import time: matches one or more whitespace, comma, or dot
+# characters.  Used by ``_perf_fdfs_matches_template`` to normalise schedule
+# separators before its final compact-comparison fallback.
+_SEPARATOR_RE = re.compile(r"[\s.,]+")
+
+
+def _perf_fdfs_matches_template(cond: str, tmpl: str) -> bool:
+    """Return True if *cond* (a DB condition label) matches *tmpl* (a template entry).
+
+    Stricter than ``_perf_fdfs_matches_header``: the leading-token fallback is
+    intentionally omitted so that ``1000mA 10s/m 1h/d-0.9V`` does not
+    incorrectly match ``1000mA 24h/d-0.9V`` via the shared ``1000mA`` prefix.
+    Also normalises ``{}`` → ``()`` on both sides before comparing.
+    """
+    c_norm = cond.translate(_BRACKET_NORM_TABLE)
+    t_norm = tmpl.translate(_BRACKET_NORM_TABLE)
+
+    # Strip trailing unit annotation like "(h)", "(m)", "(t)"
+    _unit_re = re.compile(r"\s*\([hHmMtT]\)\s*$")
+    f = re.sub(_unit_re, "", c_norm).strip().lower()
+    h = re.sub(_unit_re, "", t_norm).strip().lower()
+    if not f or not h:
+        return False
+
+    # Exact match after normalisation
+    if f == h:
+        return True
+
+    # Whitespace-normalised match (spacing differences)
+    f_no_ws = re.sub(r'\s+', '', f)
+    h_no_ws = re.sub(r'\s+', '', h)
+    if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
+        return True
+
+    # Strip trailing endpoint-voltage suffix from one or both sides.
+    # Handles both "-0.9V" (template / DMP jstj format) and " to 0.900V"
+    # (older DM2000 label format) suffixes so that "10ohm 24h/d-0.900V"
+    # and "10ohm 24h/d-0.9V" are considered equivalent.
+    _vsuf = re.compile(r'(\s*-\s*|\s+to\s+)\d+\.?\d*\s*[vV]\s*$', re.IGNORECASE)
+    f_no_v = re.sub(r'\s+', '', _vsuf.sub('', f))
+    h_no_v = re.sub(r'\s+', '', _vsuf.sub('', h))
+    if f_no_v and h_no_ws and f_no_v == h_no_ws:
+        return True
+    if f_no_ws and h_no_v and f_no_ws == h_no_v:
+        return True
+    # Both sides voltage-stripped (handles differing decimal precision, e.g.
+    # "10ohm 24h/d-0.900V" vs "10ohm 24h/d-0.9V")
+    if f_no_v and h_no_v and f_no_v == h_no_v:
+        return True
+
+    # Final fallback: voltage-stripped + separator-stripped comparison.
+    # DM2000 stores the discharge schedule with comma-without-space separators
+    # (e.g. ``4m/h,8h/d`` or ``1s/60m,24h/d``) while the IEC template uses
+    # spaces or dots (``4m/h 8h/d`` / ``1s/60m.24h/d``).  Stripping all of
+    # ``[\s.,]`` from both sides bridges that gap without enabling the
+    # leading-token false matches the function intentionally avoids
+    # (``1000mA24h/d`` ≠ ``1000mA10s/m1h/d``, ``100mA1h/d`` ≠ ``1000mA24h/d``).
+    f_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", f))
+    h_compact = _SEPARATOR_RE.sub("", _vsuf.sub("", h))
+    if f_compact and h_compact and f_compact == h_compact:
+        return True
+
+    return False
+
+
+def _template_condition_sort_key(cond: str, battery_type: str) -> tuple:
+    """Return a sort key ``(template_pos, cond)`` for a condition label.
+
+    *template_pos* is the 0-based position in the IEC template for *battery_type*,
+    or ``len(template)`` when the condition is not found (unrecognised conditions
+    are appended at the end, preserving their relative insertion order via *cond*).
+    """
+    battery_type_upper = battery_type.strip().upper()
+    template = _TEMPLATE_CONDITION_ORDER.get(battery_type_upper, [])
+    for i, tmpl_entry in enumerate(template):
+        if _perf_fdfs_matches_template(cond, tmpl_entry):
+            return (i, cond)
+    return (len(template), cond)
+
+
+def _get_condition_freq_group(cond: str, battery_type: str) -> str:
+    """Return the frequency group for *cond*: ``"everyday"``, ``"everyweek"``,
+    ``"everymonth"``, or ``"other"`` when not found.
+
+    Uses the same fuzzy matching as ``_perf_fdfs_matches_template`` so that
+    minor variations in spacing, bracket style, or trailing voltage suffix are
+    still correctly categorised.
+    """
+    freq_map = _CONDITION_FREQ_GROUP.get(battery_type.strip().upper(), {})
+    for tmpl_label, group in freq_map.items():
+        if _perf_fdfs_matches_template(cond, tmpl_label):
+            return group
+    return "other"
+
+
+# Canonical labels for the LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` daily and
+# 15-day-cadence columns.  These two labels share the same physical condition
+# but are stored as distinct keys so the report shows two adjacent columns
+# (the 15-day column to the right of the daily column, both under the same
+# ``Everyday`` group header) and routes data to the correct one based on the
+# operator's ``15`` remark suffix.  ``15D`` is the visible header marker.
+_LR6_1500MW_DAILY_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d"
+_LR6_1500MW_15D_LABEL: str = "(1500mW2s,650mW28s)10T/h,24h/d 15D"
+
+
+def _lr6_route_fdfs_labels(fdfs_label: str, model: str, is_15d: bool) -> list[str]:
+    """Route an LR6 ``(1500mW2s,650mW28s)10T/h,24h/d`` fdfs label to the
+    set of report columns that should receive the measurement.
+
+    Returns a list of one or two canonical column labels:
+
+    * Non-LR6 models, or LR6 fdfs labels that don't match the special
+      1500mW2s/650mW28s condition → ``[fdfs_label]`` unchanged.
+    * LR6 + matching condition + ``is_15d=False`` → ``[daily]`` only.
+      This includes the quarterly case: a quarterly measurement (``Q``
+      suffix, no ``15`` suffix) targets the normal daily column only.
+      The 15-day column is exclusive and protected — only entries with
+      the ``15`` remark suffix may write into it.
+    * LR6 + matching condition + ``is_15d=True`` → ``[15D]`` only.
+      A 15-day-cadence measurement is routed exclusively to the
+      dedicated 15-day column on the right; it does NOT also populate
+      the daily column.  This keeps the two columns visually distinct
+      (daily measurements on the left, 15-day-cadence measurements on
+      the right) instead of having the 15-day value overwrite/duplicate
+      into the daily slot.
+
+    The two columns share the same physical discharge condition; the
+    distinction is purely operational (daily measurement vs. 15-day-cadence
+    measurement).  In the DMP database both end up with the same fdfs/jstj
+    string (sometimes with a ``-1.05V`` or ``-1.0V`` endpoint-voltage suffix),
+    so this helper canonicalises the label(s) based on the operator's ``15``
+    remark suffix instead of the endpoint voltage.
+    """
+    if not fdfs_label:
+        return [fdfs_label]
+    if model.strip().upper() != "LR6":
+        return [fdfs_label]
+    # Match the base condition with or without an endpoint-voltage suffix
+    # (e.g. ``-1.05V``/``-1.0V``).  Use the same fuzzy matcher the template
+    # ordering relies on so spacing/bracket variations are tolerated.
+    if not _perf_fdfs_matches_template(fdfs_label, _LR6_1500MW_DAILY_LABEL):
+        return [fdfs_label]
+    if is_15d:
+        # 15-day-cadence measurement: route ONLY to the dedicated 15D
+        # column on the right.  Do not also write the daily column —
+        # that would visually overwrite/duplicate the value into the
+        # left-hand daily slot, which is exactly what the operator
+        # wants to avoid by tagging the remark with ``15``.
+        return [_LR6_1500MW_15D_LABEL]
+    return [_LR6_1500MW_DAILY_LABEL]
+
+
+# Suffix tokens that may appear at the end of an operator-entered remark to
+# flag a quarterly or 15-day-cadence measurement.  See _strip_remark_suffixes.
+_REMARK_QUARTER_TOKENS: frozenset[str] = frozenset({"Q"})
+_REMARK_15D_TOKENS: frozenset[str] = frozenset({"15"})
+
+
+def _strip_remark_suffixes(remark: Optional[str]) -> tuple[str, bool, bool]:
+    """Strip optional ``Q`` (quarterly) and ``15`` (LR6 15-day) flag suffixes
+    from a free-text remark and return ``(clean_remark, is_quarter, is_15d)``.
+
+    Only tokens that appear as standalone whitespace-separated tokens are
+    treated as flags, so identifiers that legitimately contain ``15`` or
+    ``q`` (e.g. ``UD515``, ``UDQ7``) are not stripped.  Matching is
+    case-insensitive for ``Q``.
+
+    Returning the cleaned remark lets all downstream ``para_pub.bz`` /
+    ``ls_jb_cs.bz`` LIKE lookups continue to match the existing master remark
+    records, which were never modified to include the suffixes.
+    """
+    if remark is None:
+        return ("", False, False)
+    raw = str(remark).strip()
+    if not raw:
+        return ("", False, False)
+    is_quarter = False
+    is_15d = False
+    out_tokens: list[str] = []
+    for tok in raw.split():
+        tok_up = tok.strip().upper()
+        if tok_up in _REMARK_QUARTER_TOKENS:
+            is_quarter = True
+            continue
+        if tok_up in _REMARK_15D_TOKENS:
+            is_15d = True
+            continue
+        out_tokens.append(tok)
+    return (" ".join(out_tokens), is_quarter, is_15d)
+
+
+def _resolve_entry_flags(entry) -> tuple[str, bool, bool]:
+    """Return ``(clean_remark, is_quarter, is_15d)`` for a ``DmpPerfEntry``.
+
+    Prefers explicit ``entry.is_quarter`` / ``entry.is_15d`` when set by the
+    client; otherwise re-parses ``entry.raw_remark``.  The clean remark is
+    always derived from ``raw_remark`` with suffixes stripped, so it is safe
+    to use for ``bz`` LIKE lookups against unmodified master records.
+    """
+    raw = getattr(entry, "raw_remark", None) or ""
+    clean, parsed_q, parsed_15d = _strip_remark_suffixes(raw)
+    explicit_q = getattr(entry, "is_quarter", None)
+    explicit_15d = getattr(entry, "is_15d", None)
+    is_quarter = bool(explicit_q) if explicit_q is not None else parsed_q
+    is_15d = bool(explicit_15d) if explicit_15d is not None else parsed_15d
+    return (clean, is_quarter, is_15d)
+
+
+def _merge_bz_suffix_flags(
+    is_quarter: bool, is_15d: bool, bz: Optional[str]
+) -> tuple[bool, bool]:
+    """OR the ``Q`` / ``15`` flag suffixes parsed from a master ``bz`` value
+    into the existing entry-derived flags.
+
+    The ``bz`` column on ``para_pub`` (DMP) and ``ls_jb_cs`` (DM2000) is the
+    canonical source of truth for the discharge-condition routing flags: the
+    operator edits it via the DM management page and that value is what every
+    other column on the perf report is derived from.  Without this merge, a
+    perf-entry whose ``raw_remark`` was created before the ``15`` / ``Q``
+    suffix was added to ``bz`` would still route to the wrong column.
+
+    Empty / missing ``bz`` values are a no-op: the entry-level flags are
+    returned unchanged.  This preserves the previous behaviour for callers
+    that have not yet adopted the ``bz`` column read.
+    """
+    if not bz:
+        return (is_quarter, is_15d)
+    _, bz_q, bz_15d = _strip_remark_suffixes(str(bz))
+    return (is_quarter or bz_q, is_15d or bz_15d)
+
+
+# Matches the standalone ``15D`` (or ``15d``) column marker used to distinguish
+# the LR6 15-day-cadence column from the adjacent daily column.  Used by
+# ``_perf_fdfs_matches_header`` to prevent cross-matching between the two columns.
+_15D_COL_PATTERN: re.Pattern = re.compile(r'(?<![0-9A-Za-z])15d(?![0-9A-Za-z])')
+
+
+def _perf_fdfs_matches_header(fdfs: str, header: str) -> bool:
+    """Return True if *fdfs* label is a reasonable match for *header* text.
+
+    The header may contain a unit suffix such as ``(h)`` / ``(m)`` / ``(t)``
+    which is ignored for matching purposes.
+
+    Uses whole-word boundary matching to avoid false positives such as
+    "10ohm" incorrectly matching a "100ohm" column header.
+    """
+    if not fdfs or not header:
+        return False
+    # Strip trailing unit annotation like "(h)", "(m)", "(t)"
+    clean_header = re.sub(r"\s*\([hHmMtT]\)\s*$", "", header).strip()
+    f = fdfs.lower().strip()
+    h = clean_header.lower().strip()
+    if not f or not h:
+        return False
+    # ``15D`` is an exclusive column marker that distinguishes the LR6 15-day-
+    # cadence column from the adjacent daily column.  A label that carries the
+    # ``15D`` suffix must ONLY match a header that also carries ``15D`` (and
+    # vice versa).  Without this guard the whole-word fallback below would
+    # incorrectly match the 15D fdfs label
+    # "(1500mW2s,650mW28s)10T/h,24h/d 15D" against the daily column header
+    # "(1500mW2s,650mW28s)10T/h,24h/d" because the daily label is a
+    # whole-word prefix inside the 15D label, causing 15D data to be written
+    # to the daily column instead of the dedicated 15D column.
+    if bool(_15D_COL_PATTERN.search(f)) != bool(_15D_COL_PATTERN.search(h)):
+        return False
+    # When both sides carry the ``15D`` marker, strip it (and surrounding
+    # whitespace) from both before the remaining comparisons.  This lets the
+    # end-anchored voltage-suffix regex operate on a string that ends with the
+    # voltage (e.g. "-1.05V") rather than "-1.05V 15D", which the ``$``-anchored
+    # pattern cannot strip.  Without this step the canonical label
+    # "(1500mW2s,650mW28s)10T/h,24h/d 15D" would not match the template column
+    # header "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V 15D" because the embedded
+    # voltage precedes the 15D marker, so neither the exact match nor the
+    # voltage-stripping branch could unify the two strings.
+    if _15D_COL_PATTERN.search(f):
+        f = _15D_COL_PATTERN.sub("", f).strip()
+        h = _15D_COL_PATTERN.sub("", h).strip()
+    # Exact match after normalisation
+    if f == h:
+        return True
+    # Whitespace-normalized match: ignore internal spacing differences.
+    # e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V" (DB) vs
+    #      "(1500mW2s,650mW28s) 10T/h,24h/d-1.05V" (template header with space)
+    f_no_ws = re.sub(r'\s+', '', f)
+    h_no_ws = re.sub(r'\s+', '', h)
+    if f_no_ws and h_no_ws and f_no_ws == h_no_ws:
+        return True
+    # Match when one side carries a trailing endpoint-voltage suffix ("-X.XXV")
+    # and the other does not.  The most common case is the fdfs label coming from
+    # para_pub.jstj which embeds the voltage (e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V")
+    # while the Excel template header omits it (e.g. "(1500mW2s,650mW28s) 10T/h,24h/d").
+    # Only one side is stripped at a time so two labels with *different* voltages
+    # (e.g. "-1.05V" vs "-0.9V") are never incorrectly considered equal.
+    _voltage_suffix_pattern = re.compile(r'\s*-\s*\d+\.?\d*\s*[vV]\s*$')
+    f_no_v = re.sub(r'\s+', '', _voltage_suffix_pattern.sub('', f))
+    h_no_v = re.sub(r'\s+', '', _voltage_suffix_pattern.sub('', h))
+    if f_no_v and h_no_ws and f_no_v == h_no_ws:
+        return True
+    if f_no_ws and h_no_v and f_no_ws == h_no_v:
+        return True
+    # Whole-word boundary check — prevents "10ohm" from matching "100ohm".
+    # A word boundary here means the match is not immediately preceded or
+    # followed by an alphanumeric character or a forward-slash.
+    _wb = r'(?<![0-9A-Za-z/])'
+    _we = r'(?![0-9A-Za-z/])'
+
+    def _whole_word(needle: str, haystack: str) -> bool:
+        return bool(re.search(_wb + re.escape(needle) + _we, haystack))
+
+    if _whole_word(f, h) or _whole_word(h, f):
+        return True
+    # Match on leading token (e.g. "10ohm" vs "10ohm 24h/d-0.9V")
+    f_tok = f.split()[0] if f.split() else ""
+    h_tok = h.split()[0] if h.split() else ""
+    if f_tok and h_tok and f_tok == h_tok:
+        return True
+    return False
+
+
+def _render_perf_template(template_path: str, groups: dict) -> bytes:
+    """Fill a user-uploaded perf template Excel with performance data.
+
+    **Template tag reference** — place these tags in the worksheet cells:
+
+    * ``{{PERF_SHEET_NAME}}`` — replaced with the battery-series sheet name
+      (e.g. "LR6 501").  Can be placed in any cell (title row, etc.).
+
+    **Mode A — row-expansion (``{{#PERF_ROWS}}``):**
+      Any cell in a row that contains ``{{#PERF_ROWS}}`` marks that row as the
+      template for data rows.  That row is expanded (one copy per data point).
+      Tags available inside the row:
+
+      * ``{{DATE}}``       — test date (``YYYY-MM-DD``)
+      * ``{{TYPE}}``       — battery grade (``HP`` / ``UD`` / ``UD+``)
+      * ``{{RESULT_0}}``   — avg discharge result for the 1st fdfs condition
+      * ``{{RATE_0}}``     — uniform rate (%) for the 1st fdfs condition
+      * ``{{RESULT_1}}``, ``{{RATE_1}}`` — 2nd fdfs condition, … and so on.
+
+    **Mode B — date-based cell lookup (no ``{{#PERF_ROWS}}``):**
+      When no ``{{#PERF_ROWS}}`` marker is found the engine falls back to
+      date-based row matching.  The template must have dates pre-filled in
+      column A (format ``YYYY/MM/DD`` or ``YYYY-MM-DD``).  Place the following
+      tags in any row that contains a matching date in column A:
+
+      * ``{{TYPE}}``         — battery grade
+      * ``{{RESULT_0}}`` … — result for the 1st (alphabetically) fdfs condition.
+        The engine also inspects column headers *above* each ``{{RESULT_N}}``
+        tag and tries to match them against the archive's discharge-pattern
+        (fdfs) label, allowing the correct column to be filled regardless of
+        the number of conditions exported in one call.
+      * ``{{RATE_0}}`` …    — uniform rate for the matching fdfs condition.
+
+      The unit written for ``{{RESULT_N}}`` is chosen from the column header
+      suffix.  **Convention by data source:**
+
+      * **DM2000** reports time-based metrics:
+
+        * header ending with ``(h)``  → average discharge time in **hours**
+        * header ending with ``(m)``  → average discharge time in **minutes**
+        * header ending with ``(t)``  → also minutes (legacy alias for ``(m)``)
+
+      * **DMP** reports cycle-count metrics for ``(t)`` columns:
+
+        * header ending with ``(h)``  → average discharge time in **hours**
+        * header ending with ``(t)``  → average **number of discharge cycles**
+          ("số lần phóng điện") — an integer count, *not* a time value
+        * header ending with ``(m)`` is **not used** for DMP and will fall back
+          to hours; if a DMP column is meant to track cycles, mark it with
+          ``(t)`` in the header.
+
+      **Rate cells:** Any cell whose ``{{RATE_N}}`` tag (or destination cell
+      in date-lookup mode) is formatted as a percentage (``0.00%``) receives
+      the uniform rate as a 0-1 fraction; otherwise it receives the value in
+      0-100 form.  The percentage format is detected from the destination
+      cell, so the data row that actually holds the value must be formatted
+      as ``0.00%``.
+
+      **Column-header naming guide** (so values land in the correct column):
+
+      * The text **before** the ``(h)``/``(m)``/``(t)`` suffix must contain
+        the discharge-condition (fdfs) label exactly as stored in the source
+        DB (``para_pub.fdfs`` for DMP, ``ls_jb_cs.fdfs`` for DM2000), or
+        contain the leading token (e.g. ``10ohm``, ``1000mA``,
+        ``(1500mW2s,650mW28s)10T/h,24h/d``).  Matching is case-insensitive and
+        uses whole-word boundaries to avoid false hits like ``10ohm`` matching
+        ``100ohm``.
+      * If a header text cannot be matched to any condition exported in the
+        request, **no value is written** to that column (the cell is left as
+        defined in the template).  This prevents wrong-column writes when the
+        source DB has empty ``fdfs``/``jstj`` fields.
+
+    Sheet matching: the key in *groups* may contain ``|``-separated candidate
+    names (e.g. ``"LR6 Voniko|LR6 501|LR6"``).  The engine tries each candidate
+    in order and uses the first one that exists in the workbook.  If none match,
+    the entry is skipped and the template sheet is left unchanged.
+    """
+    wb = load_workbook(template_path)
+
+    for sheet_name_key, date_type_map in groups.items():
+        # Resolve the first candidate that exists in the workbook.
+        candidates = [s for c in sheet_name_key.split("|") if (s := c.strip())]
+        sheet_name = next((c for c in candidates if c in wb.sheetnames), None)
+        if sheet_name is None:
+            continue
+        ws = wb[sheet_name]
+
+        # Collect sorted fdfs labels for this sheet
+        all_fdfs: list[str] = []
+        seen_fdfs: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen_fdfs:
+                    seen_fdfs.add(lbl)
+                    all_fdfs.append(lbl)
+        all_fdfs.sort()
+
+        # Sort data rows by (date, battery_type)
+        sorted_keys = sorted(date_type_map.keys(), key=lambda k: (k[0], k[1]))
+
+        # ── Mode A: find the PERF_ROWS template row ───────────────────────────
+        perf_row_idx: int | None = None
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and "{{#PERF_ROWS}}" in cell.value:
+                    perf_row_idx = cell.row
+                    break
+            if perf_row_idx is not None:
+                break
+
+        if perf_row_idx is not None and sorted_keys:
+            template_row = list(ws.iter_rows(min_row=perf_row_idx, max_row=perf_row_idx))[0]
+
+            # Pre-scan template row to detect which RATE_j columns are percentage-formatted.
+            # A percentage-formatted cell (number_format containing "%") expects a 0-1
+            # decimal fraction; the uniform_rate values are in the 0-100 range, so they
+            # must be divided by 100 before being placed in such cells.
+            #
+            # Also detect the unit suffix of each RESULT_j column header so DMP
+            # cycle-count columns ("(t)") are populated with ``avg_count`` rather
+            # than ``avg_hours``.
+            rate_is_pct: dict[int, bool] = {}  # j → True if RATE_j cell is pct-formatted
+            result_unit: dict[int, str] = {}   # j → "h" | "m" | "t" | "" (lowercased suffix; "" = no explicit unit)
+            for rate_tmpl_cell in template_row:
+                if isinstance(rate_tmpl_cell.value, str):
+                    rate_match = re.fullmatch(r"\{\{RATE_(\d+)\}\}", rate_tmpl_cell.value.strip())
+                    if rate_match:
+                        rate_fmt = rate_tmpl_cell.number_format or ""
+                        rate_is_pct[int(rate_match.group(1))] = "%" in rate_fmt
+                    result_match = re.fullmatch(r"\{\{RESULT_(\d+)\}\}", rate_tmpl_cell.value.strip())
+                    if result_match:
+                        # Inspect column header above this RESULT_j cell to pick the unit
+                        hdr = _perf_col_header(ws, rate_tmpl_cell.column, perf_row_idx)
+                        h_lower = (hdr or "").lower()
+                        if h_lower.endswith("(t)"):
+                            result_unit[int(result_match.group(1))] = "t"
+                        elif h_lower.endswith("(m)"):
+                            result_unit[int(result_match.group(1))] = "m"
+                        elif h_lower.endswith("(h)"):
+                            result_unit[int(result_match.group(1))] = "h"
+                        else:
+                            # No explicit unit suffix — resolved per data source at write time
+                            result_unit[int(result_match.group(1))] = ""
+
+            # Insert extra rows so there is one row per data point
+            if len(sorted_keys) > 1:
+                ws.insert_rows(perf_row_idx + 1, len(sorted_keys) - 1)
+
+            for i, row_key in enumerate(sorted_keys):
+                date_str, btype = row_key
+                row_data = date_type_map[row_key]
+                target_row_idx = perf_row_idx + i
+
+                ctx: dict = {"DATE": date_str, "TYPE": btype}
+                for j, fdfs_lbl in enumerate(all_fdfs):
+                    entry = row_data.get(fdfs_lbl, {})
+                    avg_h = entry.get("avg_hours")
+                    avg_m = entry.get("avg_minutes")
+                    avg_c = entry.get("avg_count")
+                    ur = entry.get("uniform_rate")
+                    is_dmp = bool(entry.get("is_dmp"))
+
+                    unit = result_unit.get(j, "")
+                    if unit == "t":
+                        # DMP "(t)" → cycle count; DM2000 "(t)" → minutes (legacy)
+                        val = avg_c if is_dmp else avg_m
+                    elif unit == "m":
+                        val = avg_m
+                    elif unit == "h":
+                        val = avg_h
+                    else:
+                        # No explicit unit suffix: DMP → cycle count, DM2000 → hours
+                        val = avg_c if is_dmp else avg_h
+                    ctx[f"RESULT_{j}"] = val if val is not None else ""
+
+                    ur_val = ur if ur is not None else ""
+                    if isinstance(ur_val, (int, float)) and rate_is_pct.get(j, False):
+                        ur_val = ur_val / 100.0
+                    ctx[f"RATE_{j}"] = ur_val
+
+                for tmpl_cell in template_row:
+                    target_cell = ws.cell(row=target_row_idx, column=tmpl_cell.column)
+                    if i > 0:
+                        target_cell._style = tmpl_cell._style  # type: ignore[attr-defined]
+                    raw = tmpl_cell.value
+                    if isinstance(raw, str):
+                        raw = raw.replace("{{#PERF_ROWS}}", "").strip()
+                    target_cell.value = _interpolate_cell(raw, ctx) if raw else raw
+
+        else:
+            # ── Mode B: date-based cell lookup ────────────────────────────────
+            # Step 1: locate the template tag row — the first row that contains
+            #   {{TYPE}}, {{RESULT_N}}, or {{RATE_N}} in any cell.
+            type_col: int | None = None
+            result_cols: dict[int, int] = {}   # N → column index
+            rate_cols: dict[int, int] = {}     # N → column index
+            tag_row_idx: int | None = None
+
+            for row in ws.iter_rows():
+                for cell in row:
+                    if not isinstance(cell.value, str):
+                        continue
+                    v = cell.value.strip()
+                    if v == "{{TYPE}}":
+                        type_col = cell.column
+                        tag_row_idx = cell.row
+                    m = re.fullmatch(r"\{\{RESULT_(\d+)\}\}", v)
+                    if m:
+                        result_cols[int(m.group(1))] = cell.column
+                        tag_row_idx = cell.row
+                    m = re.fullmatch(r"\{\{RATE_(\d+)\}\}", v)
+                    if m:
+                        rate_cols[int(m.group(1))] = cell.column
+                        tag_row_idx = cell.row
+                if tag_row_idx is not None:
+                    break  # only scan up to the first tagged row
+
+            if tag_row_idx is not None and (type_col is not None or result_cols):
+                # Step 2: build fdfs → (result_col, rate_col, header_text) map.
+                # Scan all rows above the tag row for each RESULT column and
+                # try to match the cell text against a known fdfs label.  This
+                # handles templates where a merged fdfs label sits in one row
+                # (e.g. row 2) while a sub-header ("Kết quả") occupies row 3.
+                fdfs_col_map: dict[str, tuple[int | None, int | None, str]] = {}
+                for n, r_col in result_cols.items():
+                    ur_col = rate_cols.get(n)
+                    matched_fdfs, header = _perf_find_fdfs_for_col(ws, r_col, tag_row_idx, all_fdfs)
+                    if matched_fdfs and matched_fdfs not in fdfs_col_map:
+                        fdfs_col_map[matched_fdfs] = (r_col, ur_col, header)
+                # Position-based fallback for unmatched fdfs labels.
+                # DMP batches commonly leave para_pub.fdfs and para_pub.jstj
+                # empty, so the fdfs_label falls back to grp.loai (e.g. "UD").
+                # That value never matches a column header, so without this
+                # fallback the entire data row would be skipped and only the
+                # {{TYPE}} cell would be written.  Header-matched columns keep
+                # priority; position-based entries only fill the remaining gaps.
+                _unmatched = [
+                    lbl for lbl in all_fdfs if lbl not in fdfs_col_map
+                ]
+                if _unmatched:
+                    claimed_cols = {v[0] for v in fdfs_col_map.values()}
+                    free_result_cols = sorted(
+                        [
+                            (n, r_col, rate_cols.get(n))
+                            for n, r_col in result_cols.items()
+                            if r_col not in claimed_cols
+                        ],
+                        key=lambda t: t[1],
+                    )
+                    for lbl, (n, r_col, ur_col) in zip(sorted(_unmatched), free_result_cols):
+                        hdr = _perf_col_header(ws, r_col, tag_row_idx)
+                        fdfs_col_map[lbl] = (r_col, ur_col, hdr or "")
+                        logger.info(
+                            "_render_perf_template[%s]: positional fallback assigned"
+                            " fdfs label %r → col %d (header: %r)",
+                            sheet_name, lbl, r_col, hdr,
+                        )
+
+                # Step 3: build date/label → row index map from column A.
+                # Also captures special row labels like "6020", "3 THÁNG", "6 THÁNG".
+                _SPECIAL_LABELS = {"6020", "3 THÁNG", "6 THÁNG", "3 THANG", "6 THANG"}
+                date_row_map: dict[str, int] = {}
+                for drow in ws.iter_rows(min_col=1, max_col=1):
+                    for dcell in drow:
+                        ds = _perf_normalize_date(dcell.value)
+                        if ds:
+                            date_row_map[ds] = dcell.row
+                        elif dcell.value is not None:
+                            # Capture special row labels (case-insensitive strip)
+                            raw_label = str(dcell.value).strip()
+                            up_label = raw_label.upper()
+                            if up_label in {s.upper() for s in _SPECIAL_LABELS}:
+                                date_row_map[up_label] = dcell.row
+                            elif raw_label:
+                                # Store any non-date text label as-is (upper) for lookup
+                                date_row_map[up_label] = dcell.row
+
+                # Step 4: write data to the matching date rows
+                for row_key in sorted_keys:
+                    date_str, btype = row_key
+                    row_data = date_type_map[row_key]
+                    norm_date = _perf_normalize_date(date_str) or date_str.replace("/", "-")
+                    # Try date first, then fall back to upper-cased label lookup
+                    target_row = date_row_map.get(norm_date) or date_row_map.get(date_str.upper())
+                    if target_row is None:
+                        continue
+
+                    if type_col is not None:
+                        ws.cell(row=target_row, column=type_col).value = btype
+
+                    for fdfs_lbl, (r_col, ur_col, header) in fdfs_col_map.items():
+                        entry = row_data.get(fdfs_lbl, {})
+                        avg_h = entry.get("avg_hours")
+                        avg_m = entry.get("avg_minutes")
+                        avg_c = entry.get("avg_count")
+                        ur = entry.get("uniform_rate")
+                        is_dmp = bool(entry.get("is_dmp"))
+
+                        if r_col is not None:
+                            # Choose unit from the column header suffix:
+                            #   (h)            → hours
+                            #   (m)            → minutes  (DM2000 only)
+                            #   (t) for DMP    → cycle count ("số lần phóng điện")
+                            #   (t) for DM2000 → minutes (legacy alias of (m))
+                            #   no suffix      → DMP → cycle count, DM2000 → hours
+                            h_lower = header.lower()
+                            if h_lower.endswith("(t)"):
+                                val = avg_c if is_dmp else avg_m
+                            elif h_lower.endswith("(m)"):
+                                val = avg_m
+                            elif h_lower.endswith("(h)"):
+                                val = avg_h
+                            else:
+                                # No explicit unit suffix: DMP → cycle count, DM2000 → hours
+                                val = avg_c if is_dmp else avg_h
+                            ws.cell(row=target_row, column=r_col).value = (
+                                val if val is not None else ""
+                            )
+                        if ur_col is not None:
+                            ur_write: float | str = ur if ur is not None else ""
+                            if isinstance(ur_write, (int, float)):
+                                # Detect percentage formatting from the actual
+                                # destination cell — the template tag row often
+                                # uses "General" while the data rows below it
+                                # are formatted as "0.00%".  Excel expects a
+                                # 0-1 fraction in percentage-formatted cells,
+                                # so divide accordingly.
+                                ur_fmt = (
+                                    ws.cell(row=target_row, column=ur_col).number_format
+                                    or ""
+                                )
+                                if "%" not in ur_fmt:
+                                    # Fall back to the tag row's format for
+                                    # backward compatibility with templates
+                                    # that only set the format on the tag row.
+                                    ur_fmt = (
+                                        ws.cell(row=tag_row_idx, column=ur_col).number_format
+                                        or ""
+                                    )
+                                if "%" in ur_fmt:
+                                    ur_write = ur_write / 100.0
+                            ws.cell(row=target_row, column=ur_col).value = ur_write
+
+                # Step 5: clear template tags from the tag row if that row's
+                # date was not among the exported data dates (so stale tags
+                # don't appear in the output).
+                exported_dates = {
+                    _perf_normalize_date(ds) or ds.replace("/", "-")
+                    for ds, _ in sorted_keys
+                }
+                tag_row_date = _perf_normalize_date(ws.cell(row=tag_row_idx, column=1).value)
+                if tag_row_date not in exported_dates:
+                    for trow in ws.iter_rows(min_row=tag_row_idx, max_row=tag_row_idx):
+                        for tcell in trow:
+                            if isinstance(tcell.value, str) and (
+                                "{{TYPE}}" in tcell.value
+                                or re.search(r"\{\{(RESULT|RATE)_\d+\}\}", tcell.value)
+                            ):
+                                tcell.value = ""
+
+        # Replace {{PERF_SHEET_NAME}} anywhere in the sheet
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and "{{PERF_SHEET_NAME}}" in cell.value:
+                    cell.value = cell.value.replace("{{PERF_SHEET_NAME}}", sheet_name)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def compute_dm2000_stats(rows: list[dict]) -> dict:
+    """Compute DM2000 curve statistics. TIM is already in minutes."""
+    def safe_float(v):
+        if v is None or v == "--" or v == "":
+            return None
+        try:
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    volt_vals = [safe_float(r.get("VOLT") or r.get("volt")) for r in rows]
+    volt_vals = [v for v in volt_vals if v is not None]
+
+    tim_vals = [safe_float(r.get("TIM") or r.get("tim")) for r in rows]
+    tim_vals = [t for t in tim_vals if t is not None]
+
+    def agg(vals):
+        if not vals:
+            return {"max": None, "min": None, "avg": None}
+        return {
+            "max": round(max(vals), 4),
+            "min": round(min(vals), 4),
+            "avg": round(sum(vals) / len(vals), 4),
+        }
+
+    v = agg(volt_vals)
+    duration = max(tim_vals) if tim_vals else None
+    return {
+        "VOLT_MAX": v["max"],
+        "VOLT_MIN": v["min"],
+        "VOLT_AVG": v["avg"],
+        "DURATION_MIN": duration,
+    }
+
+
+def _compute_average_curve(rows: list[dict]) -> list[dict]:
+    """Group by TIM and average VOLT values."""
+    from collections import defaultdict
+    tim_groups: dict[float, list[float]] = defaultdict(list)
+    for row in rows:
+        tim = row.get("TIM") or row.get("tim")
+        volt = row.get("VOLT") or row.get("volt")
+        try:
+            t = float(tim)
+            v = float(volt)
+            if not math.isnan(t) and not math.isnan(v):
+                tim_groups[t].append(v)
+        except (TypeError, ValueError):
+            continue
+    return [
+        {"TIM": t, "VOLT": round(sum(vs) / len(vs), 6)}
+        for t, vs in sorted(tim_groups.items())
+    ]
+
+
+def _compute_sot_mah_from_tav(tav_rows: list, load_r_ohm: float, fcv=None) -> float | None:
+    """Compute approximate SOt mAh by trapezoidal integration over voltage thresholds.
+
+    tav_rows: list of dicts with 'sj'/'SJ' (voltage threshold, V) and
+              'minutes'/'MINUTES' (cumulative time from discharge start, min).
+    load_r_ohm: load resistance in Ohms.
+    fcv: final closed-circuit voltage in V (optional). When provided, an extra
+         segment from FCV at t=0 to the first threshold is included, which gives
+         a more accurate total capacity.
+
+    Returns SOt in mAh, or None if the data is insufficient.
+    """
+    if not tav_rows or not load_r_ohm or load_r_ohm <= 0:
+        return None
+
+    points: list[tuple] = []
+    for row in tav_rows:
+        sj = row.get("sj") or row.get("SJ")
+        mins = row.get("minutes") or row.get("MINUTES")
+        try:
+            v = float(sj)
+            t = float(mins)
+            if not math.isnan(v) and not math.isnan(t) and t >= 0:
+                points.append((v, t))
+        except (TypeError, ValueError):
+            continue
+
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda x: x[1])  # sort by time ascending
+
+    total_mah = 0.0
+
+    # Include initial segment from FCV (at t=0) to the first threshold
+    if fcv is not None:
+        try:
+            fcv_f = float(fcv)
+            if not math.isnan(fcv_f) and points[0][1] > 0 and fcv_f > points[0][0]:
+                dt_hours = points[0][1] / 60.0
+                v_avg = (fcv_f + points[0][0]) / 2.0
+                total_mah += (v_avg / load_r_ohm) * 1000.0 * dt_hours
+        except (TypeError, ValueError):
+            pass
+
+    # Sum all threshold-to-threshold segments
+    for i in range(len(points) - 1):
+        v1, t1 = points[i]
+        v2, t2 = points[i + 1]
+        if t2 > t1:
+            dt_hours = (t2 - t1) / 60.0
+            v_avg = (v1 + v2) / 2.0
+            total_mah += (v_avg / load_r_ohm) * 1000.0 * dt_hours
+
+    return total_mah if total_mah > 0 else None
+
+
+def _derive_thresholds_from_curves(
+    curves_by_baty: dict, endpoint_voltage: Optional[float] = None
+) -> list[float]:
+    """Derive a sensible set of voltage thresholds for DMP discharge curves.
+
+    Returns thresholds in descending order, snapped to 0.05 V steps from
+    the maximum starting voltage down to ``endpoint_voltage`` (or the lowest
+    voltage observed across all curves when no endpoint is provided).
+    """
+    max_v: Optional[float] = None
+    min_v: Optional[float] = None
+    for rows in curves_by_baty.values():
+        for r in rows or []:
+            v = r.get("VOLT")
+            if v is None or v == "" or v == "--":
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(fv):
+                continue
+            if max_v is None or fv > max_v:
+                max_v = fv
+            if min_v is None or fv < min_v:
+                min_v = fv
+    if max_v is None or min_v is None:
+        return []
+    low_bound = endpoint_voltage if endpoint_voltage is not None else min_v
+    if low_bound > max_v:
+        low_bound = min_v
+    # Snap to 0.05 V grid for clean display rows
+    step = 0.05
+    top = math.floor(max_v / step) * step
+    bot = math.ceil(low_bound / step) * step
+    if bot > top:
+        bot = top
+    thresholds: list[float] = []
+    v = top
+    # Cap the number of rows so the report stays readable for very long curves
+    max_rows = 80
+    while v >= bot - 1e-9 and len(thresholds) < max_rows:
+        thresholds.append(round(v, 3))
+        v -= step
+    return thresholds
+
+
+def _tav_from_dmp_telemetry(telemetry: list[dict], thresholds: list[float]) -> list[dict]:
+    """Build time-at-voltage rows from DMP telemetry for the given thresholds.
+
+    For each threshold V the function returns the cumulative discharge time
+    (in minutes) at which the curve first drops to or below V, interpolating
+    linearly between the two surrounding telemetry samples.
+
+    Returns rows shaped like ls_vtime: ``[{"sj": V, "minutes": M}, ...]``.
+    Thresholds that are never reached (curve still above V at the end of the
+    run) are omitted.
+    """
+    points: list[tuple[float, float]] = []  # (TIM hours, VOLT)
+    for r in telemetry or []:
+        t = r.get("TIM")
+        v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+        if t is None or v is None or t == "--" or v == "--":
+            continue
+        try:
+            tf = float(t)
+            vf = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(tf) or math.isnan(vf):
+            continue
+        points.append((tf, vf))
+    if len(points) < 2:
+        return []
+    points.sort(key=lambda p: p[0])
+
+    rows: list[dict] = []
+    for thr in thresholds:
+        cross_t: Optional[float] = None
+        for i in range(1, len(points)):
+            t1, v1 = points[i - 1]
+            t2, v2 = points[i]
+            if v1 >= thr and v2 <= thr:
+                if v1 == v2:
+                    cross_t = t1
+                else:
+                    # Linear interpolation: solve for t where v(t) = thr
+                    cross_t = t1 + (t2 - t1) * ((v1 - thr) / (v1 - v2))
+                break
+        if cross_t is not None and cross_t >= 0:
+            rows.append({"sj": round(thr, 3), "minutes": round(cross_t * 60.0, 4)})
+    return rows
+
+
+def _count_at_volt_from_dmp_telemetry(
+    telemetry: list[dict], thresholds: list[float]
+) -> list[dict]:
+    """Build sample-count rows from DMP telemetry for the given thresholds.
+
+    For each threshold V, returns the 1-based position (along the time-sorted
+    telemetry) of the first sample whose voltage is ``<= V``. Equivalently,
+    the number of "times" / discharge samples accumulated from the start of
+    the run up to and including the sample that crosses the threshold. This
+    matches the DMP-1 sample report's "Unit: times" column.
+
+    Returns rows shaped as ``[{"sj": V, "count": N}, ...]``. Thresholds that
+    are never reached (curve still above V at end of run) are omitted.
+    """
+    points: list[tuple[float, float]] = []  # (TIM, VOLT)
+    for r in telemetry or []:
+        t = r.get("TIM")
+        v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+        if t is None or v is None or t == "--" or v == "--":
+            continue
+        try:
+            tf = float(t)
+            vf = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(tf) or math.isnan(vf):
+            continue
+        points.append((tf, vf))
+    if len(points) < 2:
+        return []
+    points.sort(key=lambda p: p[0])
+
+    rows: list[dict] = []
+    for thr in thresholds:
+        cross_idx: Optional[int] = None
+        for i in range(1, len(points)):
+            v1 = points[i - 1][1]
+            v2 = points[i][1]
+            if v1 >= thr and v2 <= thr:
+                cross_idx = i + 1  # 1-based ordinal of the sample at/after crossing
+                break
+        if cross_idx is not None:
+            rows.append({"sj": round(thr, 3), "count": cross_idx})
+    return rows
+
+
+
+def _get_pam2_ocv_fcv(archname: str, baty: int) -> dict | None:
+    """Get OCV (open-circuit voltage) and FCV (final closed-circuit voltage) for
+    a single battery.
+
+    Tries ls_pam2 first (archname-based schema where ocv/fcv columns exist),
+    then falls back to ls_evolt (cdid-based schema) where the DM2000 stores the
+    initial OCV and FCV measurements as dedicated rows with dy='OCV' / dy='FCV'
+    and per-pin voltages in volt1..volt9 columns.
+
+    Returns a dict with VOLT_MAX (OCV) and VOLT_MIN (FCV), or None if the
+    data is unavailable.
+    """
+    def safe_float(v):
+        if v is None or v in ("--", ""):
+            return None
+        try:
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    ocv = None
+    fcv = None
+
+    # --- Try ls_pam2 first (archname-based schema) ---
+    # Query all pam2 rows for this archive and filter by battery position in
+    # Python to handle both integer and text storage of the gpp/baty column.
+    try:
+        rows = _read_dm2000_ls_multi([
+            ("SELECT * FROM ls_pam2 WHERE cdid = ?", (archname,)),
+            ("SELECT * FROM ls_pam2 WHERE archname = ?", (archname,)),
+        ])
+        for r in rows:
+            gpp_val = _dm2000_get_value(r, "gpp", "baty")
+            try:
+                if gpp_val is not None and int(float(str(gpp_val))) == baty:
+                    ocv = safe_float(_dm2000_get_value(r, "ocv", "OCV"))
+                    fcv = safe_float(_dm2000_get_value(r, "fcv", "FCV"))
+                    break
+            except (TypeError, ValueError):
+                pass
+    except (pyodbc.Error, HTTPException):
+        pass
+
+    # --- Fallback: read from ls_evolt (cdid-based schema) ---
+    # In the cdid-based schema the DM2000 instrument stores the open-circuit
+    # voltage (measured before discharge) and the loaded FCV (measured at the
+    # start of discharge) as special rows in ls_evolt with dy='OCV' / dy='FCV'.
+    # Each row has per-pin voltages in volt1..volt9.
+    if (ocv is None or fcv is None) and 1 <= baty <= 9:
+        volt_col = f"volt{baty}"
+        try:
+            evolt_rows = _read_dm2000_ls(
+                f"SELECT dy, {volt_col} AS val FROM ls_evolt"
+                f" WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+                (archname,),
+            )
+            for er in evolt_rows:
+                dy = str(er.get("dy") or "").strip().upper()
+                val = safe_float(er.get("val"))
+                if dy == "OCV" and ocv is None:
+                    ocv = val
+                elif dy == "FCV" and fcv is None:
+                    fcv = val
+        except (pyodbc.Error, HTTPException):
+            pass
+
+    if ocv is None and fcv is None:
+        return None
+
+    return {
+        "VOLT_MAX": ocv,
+        "VOLT_MIN": fcv,
+    }
+
+
+def _dm2000_get_value(row: dict, *keys):
+    # DM2000 Access databases use "--" as a null/empty indicator for many fields.
+    # The DM2000 software also writes the string "None" for empty/unconfigured
+    # fields (e.g. sbmc='None'), so treat that string as null as well.
+    _NULL_LIKE = (None, "", "--", "None", "none")
+    for key in keys:
+        if key in row and row.get(key) not in _NULL_LIKE:
+            return row.get(key)
+    lowered = {str(k).lower(): v for k, v in row.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value not in _NULL_LIKE:
+            return value
+    return None
+
+
+def _is_valid_template_name(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if not name.endswith(".xlsx"):
+        return False
+    stem = name[:-5]
+    return bool(stem) and all(ch.isalnum() or ch in "_-" for ch in stem)
+
+
+def _validate_dm2000_archname(archname: str) -> None:
+    # Allow alphanumeric, underscore, dot, hyphen, and forward slash (archname-based
+    # schema archives can include dates like "QC2026/4/18").  Null bytes, backslashes,
+    # and other shell-special characters are still rejected.
+    if not re.match(r'^[A-Za-z0-9_./ \-]+$', archname):
+        raise HTTPException(status_code=400, detail="Invalid archname")
+
+
+def _cache_set_with_cap(cache: dict, key, value) -> None:
+    cache[key] = value
+    if len(cache) <= _DM2000_CACHE_MAX_ENTRIES:
+        return
+    oldest_key = min(cache.items(), key=lambda item: item[1][1])[0]
+    cache.pop(oldest_key, None)
+
+
+def _read_dm_curve_rows(cfg: DmModule, archname: str, baty: int) -> list[dict]:
+    cache_key = (archname, baty)
+    with cfg.curve_cache_lock:
+        cached = cfg.curve_cache.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM_CURVE_CACHE_TTL:
+                return rows
+
+    if baty <= 0 or baty > 99:
+        raise HTTPException(status_code=400, detail="Invalid baty")
+    time_col = f"time{baty}"
+    # Try both schema variants in a single shadow copy to avoid duplicate file
+    # copies when the primary archname-based schema is not present.
+    try:
+        raw = _read_dm_ls_multi(cfg, [
+            ("SELECT TIM, VOLT FROM ls_vtime WHERE archname = ? AND baty = ? ORDER BY TIM ASC", (archname, baty)),
+            (f"SELECT dy, {time_col} AS TIM FROM ls_vtime WHERE cdid = ? ORDER BY {time_col} ASC", (archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        raw = []
+
+    # Detect which schema was returned and normalise to {TIM, VOLT} dicts.
+    if raw and "dy" in raw[0]:
+        # cdid-based schema: dy = voltage threshold, TIM = time{baty} for this battery.
+        # ls_vtime may have duplicate rows for the same voltage threshold (multiple
+        # discharge sessions stored in the same archive).  Group by voltage (dy) and
+        # average the TIM values so that each threshold appears exactly once, giving
+        # a single smooth curve instead of multiple overlapping lines.
+        volt_groups: dict[float, list[float]] = {}
+        for row in raw:
+            tim = row.get("TIM")
+            volt = row.get("dy")
+            try:
+                t = float(tim)
+                v = float(volt)
+                if not math.isnan(t) and not math.isnan(v):
+                    volt_groups.setdefault(v, []).append(t)
+            except (TypeError, ValueError):
+                continue
+        rows = sorted(
+            [{"TIM": sum(ts) / len(ts), "VOLT": v} for v, ts in volt_groups.items()],
+            key=lambda r: r["TIM"],
+        )
+    else:
+        # archname-based schema: full time-series rows with TIM and VOLT columns.
+        # Apply the same deduplication used for the average curve: group by TIM and
+        # average VOLT to collapse any duplicate measurements from multiple sessions.
+        rows = _compute_average_curve(raw)
+
+    with cfg.curve_cache_lock:
+        _cache_set_with_cap(cfg.curve_cache, cache_key, (rows, time.time()))
+    return rows
+
+
+def _read_dm2000_curve_rows(archname: str, baty: int) -> list[dict]:
+    """Backward-compat wrapper — DM2000 curve rows."""
+    return _read_dm_curve_rows(DM2000_MOD, archname, baty)
+
+
+def _read_dm_average_curve_rows(cfg: DmModule, archname: str) -> list[dict]:
+    cache_key = ("avg", archname)
+    with cfg.curve_cache_lock:
+        cached = cfg.curve_cache.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM_CURVE_CACHE_TTL:
+                return rows
+
+    # Try both schema variants in a single shadow copy to avoid two separate file copies.
+    try:
+        raw = _read_dm_ls_multi(cfg, [
+            ("SELECT baty, TIM, VOLT FROM ls_vtime WHERE archname = ? ORDER BY baty ASC, TIM ASC", (archname,)),
+            (
+                "SELECT dy, time1, time2, time3, time4, time5, time6, time7, time8, time9 FROM ls_vtime WHERE cdid = ?",
+                (archname,),
+            ),
+        ])
+    except (pyodbc.Error, HTTPException):
+        raw = []
+
+    # Detect which schema was returned: cdid-based rows contain a "dy" voltage column.
+    if raw and "dy" in raw[0]:
+        flattened: list[dict] = []
+        for row in raw:
+            volt = row.get("dy")
+            for idx in range(1, 10):
+                tim = row.get(f"time{idx}")
+                flattened.append({"TIM": tim, "VOLT": volt})
+        avg_rows = _compute_average_curve(flattened)
+    else:
+        avg_rows = _compute_average_curve(raw)
+
+    with cfg.curve_cache_lock:
+        _cache_set_with_cap(cfg.curve_cache, cache_key, (avg_rows, time.time()))
+    return avg_rows
+
+
+def _read_dm2000_average_curve_rows(archname: str) -> list[dict]:
+    """Backward-compat wrapper — DM2000 average curve rows."""
+    return _read_dm_average_curve_rows(DM2000_MOD, archname)
+
+
+def _parse_iso_date_param(value: str | None, field_name: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}, expected YYYY-MM-DD") from exc
+
+
+def _query_vidata_by_channel(mdb_path: str, channel: int) -> list[dict]:
+    """
+    Query vidata with fallback strategy for Access ODBC parameter quirks.
+    """
+    base_sql = "SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {placeholder} ORDER BY TIM ASC"
+
+    try:
+        return query_mdb(mdb_path, base_sql.format(placeholder="?"), (channel,))
+    except HTTPException:
+        raise
+    except Exception as exc1:
+        logger.debug("_query_vidata attempt1 (int param) failed: %s", exc1)
+
+    try:
+        return query_mdb(mdb_path, base_sql.format(placeholder="?"), (str(channel),))
+    except HTTPException:
+        raise
+    except Exception as exc2:
+        logger.debug("_query_vidata attempt2 (str param) failed: %s", exc2)
+
+    try:
+        return query_mdb(
+            mdb_path,
+            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = {int(channel)} ORDER BY TIM ASC",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc3:
+        logger.debug("_query_vidata attempt3 (inline int) failed: %s", exc3)
+
+    try:
+        return query_mdb(
+            mdb_path,
+            f"SELECT baty, TIM, VOLT, Im FROM vidata WHERE baty = '{int(channel)}' ORDER BY TIM ASC",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc4:
+        logger.debug("_query_vidata attempt4 (inline str) failed: %s", exc4)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot query vidata for channel {channel}: {exc4}",
+        ) from exc4
+
+
+def _read_telemetry(cdmc: str, channel: int) -> list[dict]:
+    cache_key = (cdmc, channel)
+    with _TELEMETRY_CACHE_LOCK:
+        cached = _TELEMETRY_CACHE.get(cache_key)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _TELEMETRY_CACHE_TTL:
+                logger.debug("_read_telemetry cache hit: cdmc=%r channel=%d", cdmc, channel)
+                return rows
+
+    mdb_path = resolve_data_file(cdmc)
+    try:
+        with shadow_copy(mdb_path) as copied:
+            rows = _query_vidata_by_channel(copied, channel)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("_read_telemetry: unexpected error for cdmc=%r channel=%d", cdmc, channel)
+        raise HTTPException(status_code=500, detail=f"Unexpected error reading telemetry: {exc}") from exc
+    for row in rows:
+        tim = row.get("TIM")
+        if tim is not None and tim != "--":
+            try:
+                row["TIM"] = round(float(tim) / 3600, 6)
+            except (TypeError, ValueError):
+                pass
+    with _TELEMETRY_CACHE_LOCK:
+        _TELEMETRY_CACHE[cache_key] = (rows, time.time())
+    return rows
+
+
+def _read_telemetry_multi(cdmc: str, channels: list[int]) -> dict[int, list[dict]]:
+    """Read vidata for multiple *channels* from a single *cdmc* file.
+
+    *channels* are battery/tray numbers (the ``baty`` column in the vidata
+    table, values 1-9), identical to the *channel* parameter of
+    :func:`_read_telemetry`.
+
+    Uses **one** shadow copy for all channels instead of one per channel, which
+    is the key performance optimisation for :func:`_dmp_compute_group_perf`:
+    all trays in a DMP batch typically share the same cdmc file, so batching
+    reduces N file-copy + ODBC-connect cycles to just 1.
+
+    Checks *_TELEMETRY_CACHE* first; only the cache-miss channels cause actual
+    database I/O.  All results are written to the cache before returning.
+
+    Returns a ``dict`` mapping ``channel → row-list`` (TIM already in hours).
+    Channels that fail silently return an empty list; they are still included in
+    the returned dict with ``[]`` so callers can detect the miss.
+    """
+    result: dict[int, list[dict]] = {}
+    cache_misses: list[int] = []
+    now = time.time()
+
+    for ch in channels:
+        cache_key = (cdmc, ch)
+        with _TELEMETRY_CACHE_LOCK:
+            cached = _TELEMETRY_CACHE.get(cache_key)
+            if cached is not None:
+                rows, ts = cached
+                if now - ts < _TELEMETRY_CACHE_TTL:
+                    logger.debug("_read_telemetry_multi cache hit: cdmc=%r ch=%d", cdmc, ch)
+                    result[ch] = rows
+                    continue
+        cache_misses.append(ch)
+
+    if not cache_misses:
+        return result
+
+    try:
+        mdb_path = resolve_data_file(cdmc)
+    except HTTPException as exc:
+        logger.warning("_read_telemetry_multi: cdmc %r not found: %s", cdmc, exc)
+        for ch in cache_misses:
+            result[ch] = []
+        return result
+
+    try:
+        with shadow_copy(mdb_path) as copied:
+            for ch in cache_misses:
+                try:
+                    rows = _query_vidata_by_channel(copied, ch)
+                except HTTPException as exc:
+                    logger.warning(
+                        "_read_telemetry_multi: query failed ch=%d cdmc=%r: %s", ch, cdmc, exc
+                    )
+                    rows = []
+                except Exception as exc:
+                    logger.warning(
+                        "_read_telemetry_multi: unexpected error ch=%d cdmc=%r: %s", ch, cdmc, exc
+                    )
+                    rows = []
+                # Convert TIM from seconds to hours (same as _read_telemetry)
+                for row in rows:
+                    tim = row.get("TIM")
+                    if tim is not None and tim != "--":
+                        try:
+                            row["TIM"] = round(float(tim) / 3600, 6)
+                        except (TypeError, ValueError):
+                            pass
+                with _TELEMETRY_CACHE_LOCK:
+                    _TELEMETRY_CACHE[(cdmc, ch)] = (rows, time.time())
+                result[ch] = rows
+    except HTTPException as exc:
+        logger.warning(
+            "_read_telemetry_multi: shadow copy failed for cdmc=%r: %s", cdmc, exc
+        )
+        for ch in cache_misses:
+            result.setdefault(ch, [])
+    except Exception as exc:
+        logger.warning(
+            "_read_telemetry_multi: unexpected error for cdmc=%r: %s", cdmc, exc
+        )
+        for ch in cache_misses:
+            result.setdefault(ch, [])
+
+    return result
+
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "service": "DMP Battery Data Bridge"}
+
+
+@app.get("/batches/years")
+def get_batch_years():
+    """Return a sorted list of distinct years found in para_pub.fdrq."""
+    try:
+        rows = _read_dmpdata("SELECT fdrq FROM para_pub")
+    except (pyodbc.Error, HTTPException) as exc:
+        logger.warning("get_batch_years: query failed: %s", exc)
+        return {"years": []}
+
+    years: set[int] = set()
+    for row in rows:
+        fdrq = row.get("fdrq")
+        if fdrq is None:
+            continue
+        try:
+            if hasattr(fdrq, "year"):
+                years.add(int(fdrq.year))
+            else:
+                yr = int(str(fdrq)[:4])
+                if 1990 <= yr <= 2100:
+                    years.add(yr)
+        except (TypeError, ValueError):
+            pass
+    return {"years": sorted(years, reverse=True)}
+
+
+def _dmp_is_empty(v) -> bool:
+    """Return True when a DMP field value should be treated as absent.
+
+    DMP databases use a single dash "-" as a null/empty placeholder for string
+    fields (distinct from the DM2000 double-dash "--").  The DMP software also
+    writes the integer/string 0 for flag fields like para_singl.smark when no
+    remark has been set, and the string "None" for unconfigured text fields.
+    """
+    if v is None:
+        return True
+    return str(v).strip() in ("", "-", "--", "0", "None", "none")
+
+
+@app.get("/batches")
+def get_batches(year: Optional[int] = None):
+    try:
+        rows = _read_dmpdata("SELECT * FROM para_pub ORDER BY fdrq DESC")
+    except pyodbc.Error:
+        try:
+            rows = _read_dmpdata("SELECT id, dcxh, fdrq, fdfs FROM para_pub ORDER BY fdrq DESC")
+        except pyodbc.Error as exc:
+            logger.error("get_batches: fallback query also failed: %s", exc)
+            raise HTTPException(status_code=500, detail="Database query failed") from exc
+
+    # Build a channel-count map from para_singl in a single query so every batch
+    # row can be annotated without an N+1 per-batch lookup.
+    # COUNT(*) is used so the query never depends on a specific column name.
+    # Some Access ODBC versions do not honour the alias and return the aggregate
+    # column under a generated name (e.g. "Expr1000").  When the alias lookup
+    # fails we fall back to the second column by ordinal position.
+    # _dm2000_get_value is used for all column lookups on pyodbc result rows so
+    # that Access databases that return column names in uppercase are handled
+    # identically to lowercase schemas.
+    channel_counts: dict[str, int] = {}
+    singl_cdmc_by_sid: dict[str, str] = {}
+    try:
+        cc_rows = _read_dmpdata("SELECT sid, COUNT(*) AS channel_count FROM para_singl GROUP BY sid")
+        for cc in cc_rows:
+            sid = _dm2000_get_value(cc, "sid")
+            cnt = _dm2000_get_value(cc, "channel_count")
+            # Fallback: some Access ODBC versions ignore the alias and return the
+            # aggregate under a generated name; get it by ordinal position instead.
+            if cnt is None:
+                vals = list(cc.values())
+                if len(vals) >= 2:
+                    cnt = vals[1]
+            if sid is not None and cnt is not None:
+                channel_counts[str(sid)] = int(cnt)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_batches: could not load channel counts from para_singl: %s", exc)
+
+    # Build a first-cdmc lookup from para_singl so the database path can be
+    # derived for batches where para_pub.cdmc is NULL.
+    # Uses a plain SELECT (no GROUP BY / MIN aggregate) to avoid a Microsoft
+    # Access ODBC driver quirk where aggregate column aliases (e.g.
+    # "MIN(cdmc) AS cdmc") are silently ignored and the column is returned
+    # under its expression form ("Min(cdmc)") rather than the alias.
+    try:
+        cdmc_rows = _read_dmpdata(
+            "SELECT sid, cdmc FROM para_singl WHERE sid IS NOT NULL AND cdmc IS NOT NULL",
+        )
+        for cr in cdmc_rows:
+            sid = _dm2000_get_value(cr, "sid")
+            cdmc = _dm2000_get_value(cr, "cdmc")
+            # Skip dash-placeholder values used by DMP software for empty fields.
+            if sid is not None and cdmc and not _dmp_is_empty(cdmc):
+                sid_str = str(sid)
+                if sid_str not in singl_cdmc_by_sid:  # keep first occurrence per sid
+                    singl_cdmc_by_sid[sid_str] = str(cdmc).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_batches: could not load para_singl cdmc: %s", exc)
+
+    # Load per-channel extras from para_singl.
+    # cdmc  = session archive file name (often equals para_pub.id in many schemas)
+    # scdw  = manufacturer, dcph = serial/battery id, dcmc = battery model name,
+    # scrq  = sample/start date, smark = per-channel remark.
+    # para_singl stores one row per channel; the first non-null value per sid is
+    # chosen in Python to avoid the Access ODBC aggregate-alias quirk.
+    # Note: jstj is a para_pub column (not para_singl) and is already present
+    # in each batch row from the SELECT * above.
+    #
+    # Two lookup dicts are built from the same rows:
+    #   singl_extras_by_sid  — keyed by str(para_singl.sid)
+    #   singl_extras_by_cdmc — keyed by para_singl.cdmc (archive name).
+    # Many DMP installations use a sequential integer for para_singl.sid that
+    # does NOT match para_pub.id.  In those schemas cdmc (the session archive
+    # filename) is the same value as para_pub.id, so the secondary lookup by
+    # cdmc can resolve the extras even when the sid lookup fails.
+    singl_extras_by_sid: dict[str, dict] = {}
+    singl_extras_by_cdmc: dict[str, dict] = {}
+    try:
+        extras_rows = _read_dmpdata(
+            "SELECT sid, cdmc, scdw, dcph, dcmc, scrq, smark"
+            " FROM para_singl WHERE sid IS NOT NULL",
+        )
+        for er in extras_rows:
+            sid = _dm2000_get_value(er, "sid")
+            if sid is None:
+                continue
+            sid_str = str(sid)
+
+            # Session archive name — used to key the secondary lookup.
+            cdmc_er = _dm2000_get_value(er, "cdmc")
+
+            # --- primary lookup: keyed by para_singl.sid ---
+            if sid_str not in singl_extras_by_sid:
+                singl_extras_by_sid[sid_str] = {}
+            entry = singl_extras_by_sid[sid_str]
+            for field_name in ("scdw", "dcph", "dcmc", "scrq", "smark"):
+                if not entry.get(field_name):
+                    field_value = _dm2000_get_value(er, field_name)
+                    # Ignore dash-placeholder values; treat them as absent so that
+                    # a later channel with a real value can fill the slot.
+                    if field_value is not None and not _dmp_is_empty(field_value):
+                        entry[field_name] = field_value
+
+            # --- secondary lookup: keyed by para_singl.cdmc (archive name) ---
+            if cdmc_er and not _dmp_is_empty(cdmc_er):
+                cdmc_key = str(cdmc_er).strip()
+                if cdmc_key not in singl_extras_by_cdmc:
+                    singl_extras_by_cdmc[cdmc_key] = {}
+                entry_c = singl_extras_by_cdmc[cdmc_key]
+                for field_name in ("scdw", "dcph", "dcmc", "scrq", "smark"):
+                    if not entry_c.get(field_name):
+                        field_value = _dm2000_get_value(er, field_name)
+                        if field_value is not None and not _dmp_is_empty(field_value):
+                            entry_c[field_name] = field_value
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_batches: could not load para_singl extras: %s", exc)
+
+    # Derive channel_counts_by_cdmc from the already-built dicts without an
+    # extra query.  This allows the channel count to be found via the archive
+    # name when para_singl.sid does not match para_pub.id.
+    channel_counts_by_cdmc: dict[str, int] = {
+        cdmc_v: channel_counts[sid_k]
+        for sid_k, cdmc_v in singl_cdmc_by_sid.items()
+        if sid_k in channel_counts
+    }
+
+    # Date fields in para_pub that need serialisation to string
+    _DATE_FIELDS = ("fdrq", "madedate", "scrq")
+
+    def _to_date_str(value):
+        if value is None:
+            return None
+        return _parse_access_date(value)
+
+    result = []
+    for row in rows:
+        fdrq = row.get("fdrq")
+        if fdrq is None:
+            row_year = None
+            row["fdrq"] = None
+        elif hasattr(fdrq, "strftime"):
+            row_year = int(fdrq.year)
+            row["fdrq"] = fdrq.strftime("%Y-%m-%d")
+        else:
+            date_str = str(fdrq)[:10]
+            row["fdrq"] = date_str
+            try:
+                row_year = int(date_str[:4])
+            except (TypeError, ValueError):
+                row_year = None
+
+        # Normalise other date columns that may arrive as datetime objects
+        for _df in _DATE_FIELDS:
+            if _df == "fdrq":
+                continue
+            val = row.get(_df)
+            if val is not None and hasattr(val, "strftime"):
+                row[_df] = val.strftime("%Y-%m-%d")
+
+        # Merge fields from para_singl extras: manufacturer, serial number,
+        # battery model name, and sample date.
+        batch_id = _dm2000_get_value(row, "id")
+        singl_ext = singl_extras_by_sid.get(str(batch_id)) if batch_id is not None else None
+        # Fallback 1: some schemas store para_singl.sid as the cdmc session filename,
+        # not the numeric batch id — try a cdmc-keyed lookup when the id lookup fails.
+        if singl_ext is None:
+            _cdmc_key = str(_dm2000_get_value(row, "cdmc") or "").strip()
+            if _cdmc_key:
+                singl_ext = singl_extras_by_sid.get(_cdmc_key)
+        # Fallback 2: try the secondary cdmc-keyed extras dict.  In schemas where
+        # para_singl.cdmc (archive name) equals para_pub.id this resolves extras
+        # even when para_singl.sid is a different sequential number.
+        if singl_ext is None and batch_id is not None:
+            singl_ext = singl_extras_by_cdmc.get(str(batch_id))
+        if singl_ext:
+            scdw_val = _dm2000_get_value(singl_ext, "scdw")
+            if scdw_val is not None and not _dmp_is_empty(scdw_val):
+                row["manufacturer"] = str(scdw_val).strip()
+            # dcmc is the battery model name stored per-channel; use it as the
+            # batch name when no name has been set yet.
+            dcmc_val_singl = _dm2000_get_value(singl_ext, "dcmc")
+            if dcmc_val_singl is not None and not _dmp_is_empty(dcmc_val_singl) and _dmp_is_empty(row.get("name")):
+                row["name"] = str(dcmc_val_singl).strip()
+            # scrq is the sample/start date from para_singl; use it as madedate.
+            scrq_val = _dm2000_get_value(singl_ext, "scrq")
+            if scrq_val is not None and _dmp_is_empty(row.get("madedate")):
+                row["madedate"] = _to_date_str(scrq_val)
+
+        # Serial No comes from para_singl.dcph.
+        if singl_ext:
+            dcph_val = _dm2000_get_value(singl_ext, "dcph")
+            if dcph_val is not None and not _dmp_is_empty(dcph_val) and _dmp_is_empty(row.get("serialno")):
+                row["serialno"] = str(dcph_val).strip()
+
+        # Remark: prefer para_pub.bz (batch-level remark); fall back to
+        # para_singl.smark (per-channel remark used by many DMP installations).
+        bz_pub = _dm2000_get_value(row, "bz")
+        if not _dmp_is_empty(bz_pub):
+            row["remarks"] = str(bz_pub).strip()
+        elif singl_ext:
+            smark_val = _dm2000_get_value(singl_ext, "smark")
+            if not _dmp_is_empty(smark_val):
+                row["remarks"] = str(smark_val).strip()
+
+        # para_pub does not have a cdmc column.  The session .mdb file name is
+        # stored in para_singl.cdmc and was pre-fetched into singl_cdmc_by_sid.
+        # Use that as the session identifier; fall back to the batch id itself.
+        cdmc_val = singl_cdmc_by_sid.get(str(batch_id), "") if batch_id is not None else ""
+        # Treat a dash placeholder from the database as absent so the batch-id
+        # fallback below can provide a meaningful session identifier.
+        if _dmp_is_empty(cdmc_val) and batch_id is not None:
+            cdmc_val = str(batch_id)
+        if cdmc_val:
+            if _dmp_is_empty(row.get("name")):
+                row["name"] = cdmc_val
+            if _dmp_is_empty(row.get("database")):
+                row["database"] = str(Path(DMP_DATA_DIR) / f"{cdmc_val}.mdb")
+
+        # Expose archname (= batch id) so the frontend keyword search can use it.
+        if not row.get("archname") and batch_id is not None:
+            row["archname"] = str(batch_id)
+
+        # Attach the pre-computed channel count for this batch.
+        # Try by numeric batch id first; fall back to cdmc key for schemas where
+        # para_singl.sid stores the session filename rather than the numeric id;
+        # finally try channel_counts_by_cdmc when cdmc (archive name) == batch_id.
+        _cc = channel_counts.get(str(batch_id)) if batch_id is not None else None
+        if _cc is None and cdmc_val:
+            _cc = channel_counts.get(cdmc_val)
+        if _cc is None and batch_id is not None:
+            _cc = channel_counts_by_cdmc.get(str(batch_id))
+        row["channel_count"] = _cc
+
+        if year is not None and row_year != year:
+            continue
+        result.append(row)
+    return {"batches": result}
+
+
+@app.get("/batches/{batch_id}/channels")
+def get_channels(batch_id: str):
+    """
+    Get the channel list for a batch.
+
+    DMP Access schema:
+    - para_pub.id = batch_id (batch identifier)
+    - para_singl.sid = para_pub.id (JOIN key)
+    - para_singl.baty = channel number
+    - para_singl.cdmc = session .mdb file name (the source of telemetry data)
+    """
+    rows: list[dict] = []
+    last_error: Exception | None = None
+    try:
+        rows = _read_dmpdata(
+            "SELECT baty, cdmc FROM para_singl WHERE sid = ?",
+            (batch_id,),
+        )
+    except Exception as exc:
+        logger.debug("get_channels: query with cdmc failed for %r: %s", batch_id, exc)
+        try:
+            rows = _read_dmpdata(
+                "SELECT baty FROM para_singl WHERE sid = ?",
+                (batch_id,),
+            )
+        except Exception as exc2:
+            logger.debug("get_channels: fallback query failed for %r: %s", batch_id, exc2)
+            last_error = exc2
+
+    if not rows and last_error is not None:
+        raise HTTPException(status_code=500, detail=f"Database query failed: {str(last_error)}")
+
+    return {"channels": rows}
+
+
+@app.get("/changes")
+def get_changes(since: float = 0):
+    with _WATCH_LOCK:
+        changed = [
+            (stem, changed_at)
+            for stem, changed_at in _WATCHED_CHANGES.items()
+            if changed_at > since
+        ]
+    changed.sort(key=lambda item: item[1])
+    return {"changes": [stem for stem, _ in changed], "timestamp": time.time()}
+
+
+@app.get("/telemetry")
+def get_telemetry(cdmc: str, channel: int):
+    return {"telemetry": _read_telemetry(cdmc, channel)}
+
+
+@app.get("/stats")
+def get_stats(cdmc: str, channel: int):
+    rows = _read_telemetry(cdmc, channel)
+    return compute_stats(rows)
+
+
+@app.get("/templates")
+def get_templates():
+    templates_dir = Path(DMP_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([f.name for f in templates_dir.iterdir() if f.is_file() and f.suffix.lower() == ".xlsx"])
+    return {"templates": templates}
+
+
+@app.post("/report")
+def generate_report(payload: ReportRequest):
+    batch_rows = _read_dmpdata(
+        "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id=?",
+        (payload.batch_id,),
+    )
+    if not batch_rows:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    telemetry = _read_telemetry(payload.cdmc, payload.channel)
+    stats = compute_stats(telemetry)
+    batch = batch_rows[0]
+
+    context = {
+        "BATCH_ID": batch.get("id"),
+        "MODEL": batch.get("dcxh"),
+        "DATE": str(batch.get("fdrq")),
+        "DISCHARGE_PATTERN": batch.get("fdfs"),
+        "CHANNEL": payload.channel,
+        **stats,
+        "HISTORY_DATA": telemetry,
+    }
+
+    template_path = _resolve_template_path(payload.template_name)
+    report_bytes = render_excel_template(template_path, context)
+    filename = f"dmp_report_{payload.batch_id}_{payload.channel}.xlsx"
+
+    return StreamingResponse(
+        BytesIO(report_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/report-simple")
+def generate_dmp_simple_report(payload: DMPSimpleReportRequest):
+    """Generate a "Battery Discharge Curve" Excel report for one or more DMP
+    channels.
+
+    Two modes are supported:
+
+    * **Multi-battery (DM2000-style preview)** — the request supplies ``batys``
+      (1 or more channel numbers). The output uses the shared
+      ``_build_preview_workbook`` so the file is identical in shape to the
+      DM2000 simple report (archive info header, OCV/FCV/SOt mAh per battery,
+      "Duration of Series Designated Voltage" rows, plus the discharge-curve
+      chart).
+    * **Single-channel (legacy)** — when ``batys`` is empty and ``channel`` is
+      supplied, the original tabular dump (stats + raw telemetry) is generated
+      so older callers continue to work.
+    """
+    safe_id = re.sub(r'[^\w\-]', '_', str(payload.batch_id))
+
+    # ── Legacy single-channel mode ─────────────────────────────────────────
+    if not payload.batys and payload.channel is not None:
+        if not (1 <= payload.channel <= 99):
+            raise HTTPException(status_code=400, detail="Invalid channel")
+        if not payload.cdmc:
+            raise HTTPException(status_code=400, detail="cdmc is required for single-channel report")
+
+        batch_rows = _read_dmpdata(
+            "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
+        if not batch_rows:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        batch = batch_rows[0]
+
+        telemetry = _read_telemetry(payload.cdmc, payload.channel)
+        stats = compute_stats(telemetry)
+
+        duration = None
+        if telemetry:
+            try:
+                duration = max(
+                    float(r.get("TIM") or 0)
+                    for r in telemetry
+                    if r.get("TIM") not in (None, "", "--")
+                )
+            except (TypeError, ValueError):
+                duration = None
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = f"CH{payload.channel}"
+
+        ws.column_dimensions["A"].width = 24
+        ws.column_dimensions["B"].width = 30
+        ws.column_dimensions["C"].width = 14
+        ws.column_dimensions["D"].width = 16
+
+        for label, value in [
+            ("Batch ID", str(batch.get("id") or "")),
+            ("Type / Model", str(batch.get("dcxh") or "")),
+            ("Date", str(batch.get("fdrq") or "")),
+            ("Discharge Pattern", str(batch.get("fdfs") or "")),
+            ("Channel", str(payload.channel)),
+        ]:
+            ws.append([label, value])
+        ws.append([])
+
+        ws.append(["Statistics"])
+        for label, value in [
+            ("Duration (h)", round(duration, 4) if duration is not None else None),
+            ("Voltage Max (V)", stats.get("VOLT_MAX")),
+            ("Voltage Min (V)", stats.get("VOLT_MIN")),
+            ("Voltage Avg (V)", stats.get("VOLT_AVG")),
+            ("Current Max (mA)", stats.get("IM_MAX")),
+            ("Current Min (mA)", stats.get("IM_MIN")),
+            ("Current Avg (mA)", stats.get("IM_AVG")),
+        ]:
+            ws.append([label, value])
+        ws.append([])
+
+        ws.append(["#", "Time (h)", "Voltage (V)", "Current (mA)"])
+        for idx, row in enumerate(telemetry, 1):
+            tim = row.get("TIM")
+            volt = row.get("VOLT") or row.get("volt") or row.get("Volt")
+            im = row.get("Im") or row.get("IM") or row.get("im")
+            ws.append([idx, tim, volt, im])
+
+        buf = BytesIO()
+        wb.save(buf)
+        filename = f"dmp_report_{safe_id}_{payload.channel}.xlsx"
+        return StreamingResponse(
+            BytesIO(buf.getvalue()),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # ── Multi-battery mode (DM2000-style preview) ──────────────────────────
+    batys = sorted({int(b) for b in payload.batys if isinstance(b, int) and 1 <= int(b) <= 99})
+    if not batys:
+        raise HTTPException(status_code=400, detail="batys must not be empty")
+
+    # Fetch batch metadata from para_pub. SELECT * so all available columns are
+    # available to map onto archive_fields irrespective of schema variations.
+    try:
+        batch_rows = _read_dmpdata(
+            "SELECT * FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
+    except pyodbc.Error:
+        batch_rows = _read_dmpdata(
+            "SELECT id, dcxh, fdrq, fdfs FROM para_pub WHERE id = ?",
+            (payload.batch_id,),
+        )
+    if not batch_rows:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    batch = batch_rows[0]
+
+    # Fetch para_singl rows for this batch to discover per-channel cdmc and
+    # additional metadata (manufacturer, dcph serial, dcmc model name, scrq date).
+    try:
+        singl_rows = _read_dmpdata(
+            "SELECT baty, cdmc, scdw, dcph, dcmc, scrq FROM para_singl WHERE sid = ?",
+            (payload.batch_id,),
+        )
+    except pyodbc.Error:
+        singl_rows = []
+
+    cdmc_by_baty: dict[int, str] = {}
+    first_singl: dict = {}
+    for row in singl_rows:
+        try:
+            b = int(float(str(row.get("baty"))))
+        except (TypeError, ValueError):
+            continue
+        if b <= 0:
+            continue
+        cdmc_val = row.get("cdmc")
+        if cdmc_val:
+            cdmc_by_baty[b] = str(cdmc_val).strip()
+        if not first_singl:
+            first_singl = {k: v for k, v in row.items() if v is not None}
+
+    def _to_date_text(v):
+        if v and hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)[:10] if v not in (None, "") else ""
+
+    def _apply_override(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
+
+    # Map para_pub / para_singl columns onto the archive_fields dict consumed
+    # by _build_preview_workbook.
+    archive_fields = {
+        "archname": str(batch.get("id") or payload.batch_id),
+        "name": str(batch.get("name") or first_singl.get("dcmc") or ""),
+        "startdate": _to_date_text(batch.get("fdrq")),
+        "enddate": _to_date_text(batch.get("jsrq") or batch.get("fdjssj")),
+        "dcxh": str(_apply_override(batch.get("dcxh"), payload.override_battery_type) or ""),
+        "fdfs": str(batch.get("fdfs") or ""),
+        # DMP does not store a precomputed uniform rate; let the workbook
+        # builder compute it from time-at-voltage data.
+        "unifrate": "",
+        "manufacturer": str(_apply_override(first_singl.get("scdw"), payload.override_manufacturer) or ""),
+        "madedate": _to_date_text(first_singl.get("scrq")),
+        "serialno": str(first_singl.get("dcph") or ""),
+        "remarks": str(batch.get("bz") or ""),
+        # Voltage type — para_pub.dylx; falls back to fdlx/jstj for older schemas.
+        "voltage_type": str(batch.get("dylx") or batch.get("fdlx") or ""),
+        "trademark": str(batch.get("sbmc") or batch.get("trademark") or ""),
+        "load_resistance": str(batch.get("fzdz") or batch.get("fz2") or ""),
+        "endpoint_voltage": str(batch.get("zzdy") or ""),
+        "dis_condition": str(batch.get("jstj") or batch.get("hjwd") or batch.get("wd") or ""),
+        "min_duration": str(batch.get("fdts") or ""),
+    }
+
+    # Fetch telemetry once per battery; reuse for stats, OCV/FCV, SOt mAh and
+    # synthesised time-at-voltage rows.
+    telemetry_by_baty: dict[int, list[dict]] = {}
+    for b in batys:
+        cdmc = cdmc_by_baty.get(b) or payload.cdmc
+        if not cdmc:
+            telemetry_by_baty[b] = []
+            continue
+        try:
+            telemetry_by_baty[b] = _read_telemetry(cdmc, b)
+        except HTTPException:
+            telemetry_by_baty[b] = []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DMP report: telemetry read failed for baty=%d: %s", b, exc)
+            telemetry_by_baty[b] = []
+
+    # Endpoint voltage parsed from para_pub.zzdy, used to bound thresholds.
+    ep_voltage: Optional[float] = None
+    raw_ep = (archive_fields["endpoint_voltage"] or "").strip()
+    if raw_ep:
+        parts = raw_ep.split()
+        token = (parts[0] if parts else raw_ep)[:32]
+        # Strip any trailing unit characters (e.g. "0.9V" → "0.9") without a
+        # regex to keep CodeQL happy and avoid any backtracking concern.
+        while token and token[-1] not in "0123456789.-":
+            token = token[:-1]
+        try:
+            ep_voltage = float(token)
+        except (TypeError, ValueError):
+            ep_voltage = None
+
+    thresholds = _derive_thresholds_from_curves(telemetry_by_baty, ep_voltage)
+
+    # Build OCV/FCV/SOt mAh and time-at-voltage data per battery.
+    stats_map: dict[int, dict] = {}
+    time_at_volt_map: dict[int, list[dict]] = {}
+    count_at_volt_map: dict[int, list[dict]] = {}
+    battery_params: dict[int, dict] = {}
+
+    try:
+        load_r = float(archive_fields["load_resistance"]) if archive_fields["load_resistance"] else None
+    except (TypeError, ValueError):
+        load_r = None
+
+    for b in batys:
+        rows = telemetry_by_baty.get(b) or []
+        s = compute_stats(rows)
+        # OCV = first voltage sample (open circuit, before discharge starts);
+        # FCV = last voltage sample (final closed-circuit). Fall back to
+        # max/min when the first/last samples are missing.
+        ocv: Optional[float] = None
+        fcv: Optional[float] = None
+        for r in rows:
+            v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    ocv = fv
+                    break
+            except (TypeError, ValueError):
+                continue
+        for r in reversed(rows):
+            v = r.get("VOLT") or r.get("volt") or r.get("Volt")
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    fcv = fv
+                    break
+            except (TypeError, ValueError):
+                continue
+        if ocv is None:
+            ocv = s.get("VOLT_MAX")
+        if fcv is None:
+            fcv = s.get("VOLT_MIN")
+        s["OCV"] = ocv
+        s["FCV"] = fcv
+        stats_map[b] = s
+
+        tav = _tav_from_dmp_telemetry(rows, thresholds)
+        time_at_volt_map[b] = tav
+        count_at_volt_map[b] = _count_at_volt_from_dmp_telemetry(rows, thresholds)
+        # Compute SOt mAh: prefer integration of measured current (Im in mA)
+        # over time, which is the most accurate. Fall back to TAV-based
+        # trapezoidal integration when Im samples are unavailable but a load
+        # resistance is configured.
+        sot_mah: Optional[float] = None
+        # Method 1: ∫ Im dt (mA · h = mAh).  Telemetry TIM is already in hours.
+        cur_points: list[tuple[float, float]] = []
+        for r in rows:
+            t = r.get("TIM")
+            im = r.get("Im") or r.get("IM") or r.get("im")
+            try:
+                tf = float(t)
+                im_f = float(im)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(tf) or math.isnan(im_f):
+                continue
+            cur_points.append((tf, im_f))
+        if len(cur_points) >= 2:
+            cur_points.sort(key=lambda p: p[0])
+            integ = 0.0
+            for i in range(len(cur_points) - 1):
+                t1, i1 = cur_points[i]
+                t2, i2 = cur_points[i + 1]
+                if t2 > t1:
+                    integ += (i1 + i2) / 2.0 * (t2 - t1)
+            if integ > 0:
+                sot_mah = round(integ, 3)
+        if sot_mah is None and load_r and load_r > 0:
+            sot_mah = _compute_sot_mah_from_tav(tav, load_r, fcv)
+
+        battery_params[b] = {
+            "baty": b,
+            "ocv": ocv,
+            "fcv": fcv,
+            "sot_mah": sot_mah,
+        }
+
+    try:
+        workbook_bytes = _build_preview_workbook(
+            archive_fields=archive_fields,
+            company=DM2000_COMPANY_NAME or "",
+            batys=batys,
+            stats_map=stats_map,
+            time_at_volt_map=time_at_volt_map,
+            battery_params=battery_params,
+            endpoint_cutoff=payload.endpoint_cutoff,
+            report_kind="dmp",
+            telemetry_by_baty=telemetry_by_baty,
+            count_at_volt_map=count_at_volt_map,
+        )
+    except Exception as exc:
+        logger.exception("Error building DMP preview workbook for batch=%s: %s", payload.batch_id, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}") from exc
+
+    filename = f"dmp_report_{safe_id}.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── DM2000 Historic Database Routes ────────────────────────────────────────
+
+def _build_dis_condition_display(cfg: DmModule, archive: dict) -> str:
+    """Build the human-readable Dis-condition string exactly as the frontend does.
+
+    Format: ``{value}<unit> {fdfs} to {endpoint_voltage}V`` where the unit is
+    ``ohm`` for DM2000 and ``mA`` for DM3000 (driven by ``cfg.unit_suffix``).
+    A bare numeric load_resistance/discharge-current is auto-suffixed with
+    the cfg unit; otherwise the raw string is used as-is so values that
+    already include a unit (e.g. ``620+10k``) are preserved.
+    """
+    raw_res = str(archive.get("load_resistance") or "").strip()
+    if raw_res and re.match(r'^\d+(\.\d+)?$', raw_res):
+        resistance = f"{raw_res}{cfg.unit_suffix}"
+    else:
+        resistance = raw_res
+    fdfs = str(archive.get("fdfs") or "").strip()
+    endpoint = str(archive.get("endpoint_voltage") or "").strip()
+    prefix = " ".join(p for p in [resistance, fdfs] if p)
+    suffix = f" to {endpoint}V" if endpoint else ""
+    return prefix + suffix
+
+
+@app.get("/dm3000/archives")
+@app.get("/dm2000/archives")
+def get_dm2000_archives(request: Request, 
+    date_from: str = None,
+    date_to: str = None,
+    type_filter: str = None,
+    name_filter: str = None,
+    mfr_filter: str = None,
+    serial_filter: str = None,
+    dis_condition_filter: str = None,
+    keyword: str = None,
+    limit: Optional[int] = None,
+):
+    cfg = _resolve_dm_module(request)
+    table_names_to_try = ["ls_jb_cs", "ls_pam2", "ls_cs", "ls_jbcs", "ls_archive"]
+    rows = None
+    cache_key = "all_archives"
+    with cfg.archives_cache_lock:
+        cached = cfg.archives_cache.get(cache_key)
+        if cached is not None:
+            cached_rows, ts = cached
+            if time.time() - ts < _DM_ARCHIVES_CACHE_TTL:
+                rows = cached_rows
+
+    if rows is None:
+        # Use a single shadow copy to try every candidate table name, avoiding
+        # the O(n) shadow-copy cost that previously caused proxy timeouts.
+        try:
+            rows = _read_dm_ls_multi(cfg, [
+                (f"SELECT * FROM {t}", ()) for t in table_names_to_try
+            ])
+        except (pyodbc.Error, HTTPException):
+            rows = None
+        if rows is None:
+            return {"archives": [], "total": 0, "warning": "Archive table not found in dmdata_ls.mdb"}
+        with cfg.archives_cache_lock:
+            _cache_set_with_cap(cfg.archives_cache, cache_key, (rows, time.time()))
+
+    date_from_parsed = _parse_iso_date_param(date_from, "date_from")
+    date_to_parsed = _parse_iso_date_param(date_to, "date_to")
+
+    def _to_date_text(value):
+        if value and hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d")
+        return str(value)[:10] if value not in (None, "") else ""
+
+    archives = []
+    for row in rows:
+        item = {
+            "archname": _dm2000_get_value(row, "archname", "cdid", "id"),
+            "startdate": _to_date_text(_dm2000_get_value(row, "startdate", "fdrq")),
+            "enddate": _to_date_text(_dm2000_get_value(row, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date", "fzrq", "stopdate", "fdend", "jsrq", "jdrq", "wcrq", "zwrq")),
+            "dcxh": _dm2000_get_value(row, "dcxh"),
+            "name": _dm2000_get_value(row, "name", "dcmc"),
+            "fdfs": _dm2000_get_value(row, "fdfs"),
+            "duration": _dm2000_get_value(row, "duration", "fdts"),
+            # unifrate: try percentage column (hl=合格率) first, then the integer
+            # index (yfws=匀放系数 0-9).  DM2000 may store either depending on version.
+            "unifrate": _dm2000_get_value(row, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
+            "manufacturer": _dm2000_get_value(row, "manufacturer", "scdw"),
+            "madedate": _to_date_text(_dm2000_get_value(row, "madedate", "scrq")),
+            "serialno": _dm2000_get_value(row, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no"),
+            "remarks": _dm2000_get_value(row, "remarks", "remark", "bz", "note", "memo", "bzh"),
+            # Additional fields for report preview.
+            # Multiple aliases cover different DM2000 schema versions.
+            "voltage_type": _dm2000_get_value(
+                row,
+                "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+                "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+                "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
+            ),
+            "trademark": _dm2000_get_value(row, "trademark", "shangbiao", "sbmc", "pinpai"),
+            "load_resistance": _dm2000_get_value(row, "load_resistance", "fzdz", "fzlkdz", "dw"),
+            "endpoint_voltage": _dm2000_get_value(
+                row,
+                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+            ),
+            "dis_condition": _dm2000_get_value(
+                row,
+                "dis_condition", "wd", "fdwd", "hjwd", "wendu",
+                "fdtj", "hjtj", "temperature", "temp_c",
+                "temp", "hjt", "qw", "t", "csh", "jchj",
+            ),
+            "min_duration": _dm2000_get_value(row, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts"),
+            "company": cfg.company_name or None,
+        }
+        # Build database file path from archname and data directory
+        archname_val = item.get("archname") or ""
+        item["database"] = str(Path(cfg.data_dir) / f"{archname_val}.mdb") if archname_val else None
+        # Pre-compute the human-readable Dis-condition display string (same formula
+        # as the frontend renderer) so keyword and dis_condition_filter can match it.
+        item["_dis_condition_display"] = _build_dis_condition_display(cfg, item)
+        archives.append(item)
+
+    def _contains(value, pattern):
+        if not pattern:
+            return True
+        return pattern.lower() in str(value or "").lower()
+
+    filtered = []
+    for row in archives:
+        row_date = None
+        if row["startdate"]:
+            try:
+                row_date = date.fromisoformat(str(row["startdate"])[:10])
+            except ValueError:
+                row_date = None
+        if date_from_parsed and row_date and row_date < date_from_parsed:
+            continue
+        if date_to_parsed and row_date and row_date > date_to_parsed:
+            continue
+        if not _contains(row.get("dcxh"), type_filter):
+            continue
+        if not _contains(row.get("name"), name_filter):
+            continue
+        if not _contains(row.get("manufacturer"), mfr_filter):
+            continue
+        if not _contains(row.get("serialno"), serial_filter):
+            continue
+        if not _contains(row.get("_dis_condition_display"), dis_condition_filter):
+            continue
+        if keyword:
+            kw = keyword.lower()
+            if not any(
+                kw in str(row.get(field) or "").lower()
+                for field in (
+                    "dcxh", "name", "manufacturer", "serialno", "archname",
+                    "remarks", "dis_condition", "fdfs",
+                    "load_resistance", "endpoint_voltage", "_dis_condition_display",
+                )
+            ):
+                continue
+        filtered.append(row)
+
+    filtered.sort(key=lambda r: str(r.get("startdate") or ""), reverse=True)
+    if limit is not None and limit > 0:
+        filtered = filtered[:limit]
+    return {"archives": filtered, "total": len(filtered)}
+
+
+@app.get("/dm3000/dis-condition-options")
+@app.get("/dm2000/dis-condition-options")
+def get_dm2000_dis_condition_options(request: Request):
+    """Return unique Dis-condition display strings derived from the archive cache.
+
+    The strings are computed with the same formula used by the frontend renderer
+    (load_resistance + fdfs + endpoint_voltage) so they exactly match what users
+    see in the table, making them useful as autocomplete suggestions.
+    """
+    result = get_dm2000_archives(request)
+    options: list[str] = []
+    seen: set[str] = set()
+    for archive in result.get("archives", []):
+        val = str(archive.get("_dis_condition_display") or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            options.append(val)
+    options.sort()
+    return {"options": options}
+
+
+def _derive_dm2000_batteries_from_vtime(cfg, archname: str) -> list[dict]:
+    """Fallback: derive active battery channels from ls_vtime time1..time9 columns.
+
+    For cdid-based ls_vtime, each row holds one voltage threshold with elapsed
+    time per battery in time{n}. A battery channel is considered active when at
+    least one of its time{n} values is non-null/non-empty.
+
+    For archname-based ls_vtime (which uses a baty column instead of time1..time9),
+    falls back to querying DISTINCT baty values directly.
+    """
+    select_cols = ", ".join(f"time{i}" for i in range(1, 10))
+    try:
+        rows = _read_dm_ls(cfg, 
+            f"SELECT {select_cols} FROM ls_vtime WHERE cdid = ?",
+            (archname,),
+        )
+    except (pyodbc.Error, HTTPException):
+        # cdid-based schema failed; try archname-based schema
+        try:
+            baty_rows = _read_dm_ls(cfg, 
+                "SELECT DISTINCT baty FROM ls_vtime WHERE archname = ? ORDER BY baty ASC",
+                (archname,),
+            )
+        except (pyodbc.Error, HTTPException):
+            return []
+        result = []
+        for row in baty_rows:
+            val = _dm2000_get_value(row, "baty")
+            try:
+                num = int(float(val))
+                if num > 0:
+                    result.append({"baty": num})
+            except (TypeError, ValueError):
+                pass
+        return result
+
+    active: set[int] = set()
+    for row in rows:
+        for i in range(1, 10):
+            if _is_valid_battery_time(row.get(f"time{i}")):
+                active.add(i)
+    return [{"baty": i} for i in sorted(active)]
+
+
+@app.get("/dm3000/archives/{archname}/batteries")
+@app.get("/dm2000/archives/{archname}/batteries")
+def get_dm2000_batteries(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+
+    with cfg.batteries_cache_lock:
+        cached = cfg.batteries_cache.get(archname)
+        if cached is not None:
+            rows, ts = cached
+            if time.time() - ts < _DM_BATTERIES_CACHE_TTL:
+                return {"batteries": rows, "archname": archname}
+
+    try:
+        rows = _read_dm_ls_multi(cfg, [
+            ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
+            ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        rows = []
+    for row in rows:
+        if "baty" not in row:
+            row["baty"] = _dm2000_get_value(row, "baty", "gpp")
+        # Normalise OCV / FCV / SOt to well-known keys so the frontend can
+        # find them regardless of the original Access column name casing or
+        # abbreviation variant used by this DM2000 version.
+        if "ocv" not in row:
+            row["ocv"] = _dm2000_get_value(row, "ocv", "OCV")
+        if "fcv" not in row:
+            row["fcv"] = _dm2000_get_value(row, "fcv", "FCV")
+        # SOt (actual discharged capacity in mAh).  DM2000 uses several
+        # column names across versions: sh (实耗), fdrl (放电容量), rl (容量),
+        # rql, sot, capacity, sl, sc, dcrl, fdl.
+        row["sot_mah"] = _dm2000_get_value(
+            row,
+            "sh", "sot", "SOT", "sot_mah", "sotmah",
+            "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl",
+            "fdsh", "sh_mah", "fdmah", "actual_cap", "shrc", "fdrc",
+        )
+
+    # If ls_pam2 has no usable rows (e.g. discharge in progress, or pam2 not
+    # populated for this cdid), derive the battery list from ls_vtime so the
+    # dropdown still shows each individual pin instead of being empty.
+    def _baty_int(value):
+        try:
+            num = int(float(value))
+            return num if num > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    has_battery = any(_baty_int(row.get("baty")) is not None for row in rows)
+    if not has_battery:
+        rows = _derive_dm2000_batteries_from_vtime(cfg, archname)
+    # In the cdid-based schema the DM2000 stores the pre-discharge OCV and
+    # the initial loaded FCV as dedicated rows in ls_evolt (dy='OCV'/'FCV')
+    # with per-pin voltages in volt1..volt9.  ls_pam2 does not carry these
+    # per-pin measured values in the cdid schema.
+    try:
+        evolt_ocv_fcv = _read_dm_ls(cfg, 
+            "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
+            " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+            (archname,),
+        )
+        evolt_map: dict[int, dict[str, float]] = {}
+        for er in evolt_ocv_fcv:
+            dy = str(er.get("dy") or "").strip().upper()
+            if dy not in ("OCV", "FCV"):
+                continue
+            for i in range(1, 10):
+                raw = er.get(f"volt{i}")
+                if raw in (None, "", "--"):
+                    continue
+                try:
+                    fv = float(raw)
+                    if not math.isnan(fv):
+                        evolt_map.setdefault(i, {})[dy] = fv
+                except (TypeError, ValueError):
+                    pass
+    except (pyodbc.Error, HTTPException):
+        evolt_map = {}
+
+    if evolt_map:
+        for row in rows:
+            b = _baty_int(row.get("baty"))
+            if b is None or b not in evolt_map:
+                continue
+            if row.get("ocv") is None:
+                row["ocv"] = evolt_map[b].get("OCV")
+            if row.get("fcv") is None:
+                row["fcv"] = evolt_map[b].get("FCV")
+
+    with cfg.batteries_cache_lock:
+        _cache_set_with_cap(cfg.batteries_cache, archname, (rows, time.time()))
+    return {"batteries": rows, "archname": archname}
+
+
+@app.get("/dm3000/archives/{archname}/curve")
+@app.get("/dm2000/archives/{archname}/curve")
+def get_dm2000_curve(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+    rows = _read_dm_curve_rows(cfg, archname, baty)
+    # Prepend the initial loaded voltage (FCV) at t=0 so the chart shows the
+    # full discharge curve starting from the actual measured starting voltage.
+    if not rows or rows[0].get("TIM", 0) > 0:
+        pam2 = _get_pam2_ocv_fcv(archname, baty)
+        if pam2:
+            fcv = pam2.get("VOLT_MIN")  # _get_pam2_ocv_fcv maps FCV → VOLT_MIN, OCV → VOLT_MAX
+            if fcv is not None:
+                rows = [{"TIM": 0.0, "VOLT": round(float(fcv), 6)}] + rows
+    return {"curve": rows, "archname": archname, "baty": baty, "time_unit": "minutes"}
+
+
+@app.get("/dm3000/archives/{archname}/average-curve")
+@app.get("/dm2000/archives/{archname}/average-curve")
+def get_dm2000_average_curve(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+    avg = _read_dm_average_curve_rows(cfg, archname)
+    return {"curve": avg, "archname": archname, "baty": "average", "time_unit": "minutes"}
+
+
+@app.get("/dm3000/archives/{archname}/stats")
+@app.get("/dm2000/archives/{archname}/stats")
+def get_dm2000_stats(request: Request, archname: str, baty: int = 0):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+    cache_key = (archname, baty)
+    with cfg.stats_cache_lock:
+        cached = cfg.stats_cache.get(cache_key)
+        if cached is not None:
+            result, ts = cached
+            if time.time() - ts < _DM_STATS_CACHE_TTL:
+                return result
+
+    if baty == 0:
+        rows = _read_dm_average_curve_rows(cfg, archname)
+    else:
+        rows = _read_dm_curve_rows(cfg, archname, baty)
+    stats = compute_dm2000_stats(rows)
+    # Override VOLT_MAX/VOLT_MIN with the true OCV/FCV stored in ls_pam2.
+    # ls_pam2 holds the instrument-measured open-circuit voltage (OCV, before
+    # discharge) and loaded voltage (FCV, at discharge start) — the values
+    # DM2000 reports in its own Excel export.  The ls_vtime curve data uses
+    # fixed voltage thresholds, not real measurements.
+    if baty > 0:
+        pam2_stats = _get_pam2_ocv_fcv(archname, baty)
+        if pam2_stats:
+            stats.update(pam2_stats)
+            # Expose as dedicated keys so the frontend and templates can use
+            # OCV/FCV independently of the curve VOLT_MAX/VOLT_MIN stats.
+            stats["OCV"] = pam2_stats["VOLT_MAX"]
+            stats["FCV"] = pam2_stats["VOLT_MIN"]
+
+    with cfg.stats_cache_lock:
+        _cache_set_with_cap(cfg.stats_cache, cache_key, (stats, time.time()))
+    return stats
+
+
+@app.get("/dm3000/archives/{archname}/daily-voltage")
+@app.get("/dm2000/archives/{archname}/daily-voltage")
+def get_dm2000_daily_voltage(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm_ls(cfg, 
+            "SELECT * FROM ls_evolt WHERE archname = ? AND baty = ? ORDER BY date ASC",
+            (archname, baty),
+        )
+        for row in rows:
+            d = row.get("date")
+            if d and hasattr(d, "strftime"):
+                row["date"] = d.strftime("%Y-%m-%d")
+        return {"daily_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        if baty <= 0 or baty > 99:
+            raise HTTPException(status_code=400, detail="Invalid baty")
+        volt_col = f"volt{baty}"
+        try:
+            rows = _read_dm_ls(cfg, 
+                f"SELECT daytime, {volt_col} AS volt FROM ls_evolt WHERE cdid = ? ORDER BY daytime ASC",
+                (archname,),
+            )
+        except pyodbc.Error:
+            return {"daily_voltage": [], "archname": archname, "baty": baty}
+        normalized = []
+        for row in rows:
+            d = row.get("daytime")
+            v = row.get("volt")
+            if d and hasattr(d, "strftime"):
+                d = d.strftime("%Y-%m-%d")
+            normalized.append({"date": str(d)[:10] if d not in (None, "") else None, "volt": v})
+        return {"daily_voltage": normalized, "archname": archname, "baty": baty}
+
+
+@app.get("/dm3000/archives/{archname}/time-at-voltage")
+@app.get("/dm2000/archives/{archname}/time-at-voltage")
+def get_dm2000_time_at_voltage(request: Request, archname: str, baty: int):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm_ls(cfg, 
+            "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+            (archname, baty),
+        )
+        if rows:
+            return {"time_at_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        pass
+
+    if baty <= 0 or baty > 99:
+        raise HTTPException(status_code=400, detail="Invalid baty")
+    tim_col = f"tim_vot{baty}"
+    try:
+        rows = _read_dm_ls(cfg, 
+            f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+            (archname,),
+        )
+        if rows:
+            return {"time_at_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        pass
+
+    # Final fallback: ls_vtime stores the same time-at-voltage data for the cdid-based
+    # schema using dy (voltage threshold) and time1..time9 columns (values in minutes).
+    time_col = f"time{baty}"
+    try:
+        rows = _read_dm_ls(cfg, 
+            f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+            (archname,),
+        )
+        return {"time_at_voltage": rows, "archname": archname, "baty": baty}
+    except pyodbc.Error:
+        return {"time_at_voltage": [], "archname": archname, "baty": baty}
+
+
+@app.get("/dm3000/config")
+@app.get("/dm2000/config")
+def get_dm2000_config(request: Request):
+    cfg = _resolve_dm_module(request)
+    """Return station-level configuration (e.g. company name) for use in report previews."""
+    return {"company": cfg.company_name or ""}
+
+
+@app.get("/dm3000/archives/{archname}/schema")
+@app.get("/dm2000/archives/{archname}/schema")
+def get_dm2000_archive_schema(request: Request, archname: str):
+    cfg = _resolve_dm_module(request)
+    """Return raw column names and non-null values for an archive row from ls_jb_cs.
+
+    This diagnostic endpoint helps identify the actual column names used in the
+    local DM2000 database when expected fields (e.g. voltage_type, endpoint_voltage)
+    are missing from report previews.
+    """
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm_ls_multi(cfg, [
+            ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (archname,)),
+            ("SELECT * FROM ls_jb_cs WHERE archname = ?", (archname,)),
+        ])
+    except (pyodbc.Error, HTTPException) as exc:
+        raise HTTPException(status_code=500, detail=f"Schema query failed: {exc}") from exc
+    if not rows:
+        raise HTTPException(status_code=404, detail="Archive not found in ls_jb_cs")
+    row = rows[0]
+    columns = []
+    for k, v in row.items():
+        columns.append({
+            "column": k,
+            "value": str(v) if v not in (None, "") else None,
+            "is_null_like": v in (None, "", "--"),
+        })
+    return {"archname": archname, "columns": columns}
+
+
+@app.post("/dm3000/refresh-archives")
+@app.post("/dm2000/refresh-archives")
+def refresh_dm2000_archives(request: Request):
+    cfg = _resolve_dm_module(request)
+    """Force-refresh the DM2000 archives in-memory cache.
+
+    Clears the in-memory archives cache and attempts to re-copy the source
+    database file. If the copy fails (e.g. the file is currently locked by
+    Microsoft Access), the service falls back to reading directly from the
+    source path so updated records are visible immediately.
+
+    Call this endpoint after manually editing dmdata_ls.mdb in Access to see
+    changes without waiting for the next auto-refresh cycle.
+    """
+    # Attempt a forced file-copy refresh (skips the mtime short-circuit).
+    _dm_refresh_ls_cache(cfg, force=True)
+    # Always clear the in-memory archives cache regardless of whether the
+    # file copy succeeded, so the very next query reads fresh data from DB.
+    with cfg.archives_cache_lock:
+        cfg.archives_cache.clear()
+    with cfg.tav_cache_lock:
+        cfg.tav_cache.clear()
+    return {"status": "ok", "cache_path": DM2000_MOD.ls_cache_path}
+
+
+@app.get("/dm3000/perf-debug")
+@app.get("/dm2000/perf-debug")
+def dm2000_perf_debug(request: Request, archname: str, battery_type: str = ""):
+    cfg = _resolve_dm_module(request)
+    """Diagnostic endpoint: show how an archive's raw fields are translated into
+    a Performance-Report condition label and which IEC frequency group it maps to.
+
+    Use this to investigate why a discharge condition is appearing under
+    "Other" in the Performance Report.  Returns the raw ``fdfs`` / ``fzdz``
+    (load resistance) / ``zzdy`` (endpoint voltage) values from ``ls_jb_cs``,
+    the combined label produced by ``_build_dm2000_condition_label``, and the
+    matched frequency group ("everyday" / "everyweek" / "everymonth" /
+    "other") for the supplied (or auto-detected) battery family.
+    """
+    _validate_dm2000_archname(archname)
+    try:
+        rows = _read_dm_ls(cfg, 
+            "SELECT * FROM ls_jb_cs WHERE cdid = ?", (archname,)
+        )
+        if not rows:
+            rows = _read_dm_ls(cfg, 
+                "SELECT * FROM ls_jb_cs WHERE archname = ?", (archname,)
+            )
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"DB error: {exc}")
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Archive not found: {archname}")
+    arch = rows[0]
+    fdfs_raw = str(_dm2000_get_value(arch, "fdfs") or "").strip()
+    load_res = str(_dm2000_get_value(
+        arch,
+        "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+    ) or "").strip()
+    ep_raw = _dm2000_get_value(
+        arch,
+        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+    )
+    ep_str = str(ep_raw or "").strip()
+    label = _build_dm2000_condition_label(fdfs_raw, load_res, ep_str, archname)
+    bt_raw = battery_type.strip() or str(_dm2000_get_value(arch, "dcxh") or "").strip()
+    # Best-effort battery family detection for fallback when not supplied.
+    bt_norm = bt_raw.upper()
+    family = ""
+    for fam in ("LR03", "LR61", "6LR61", "9V", "LR6"):
+        if fam in bt_norm:
+            family = "9V" if fam == "6LR61" else fam
+            break
+    freq = _get_condition_freq_group(label, family) if family else ""
+    return {
+        "archname": archname,
+        "raw": {
+            "fdfs": fdfs_raw,
+            "load_resistance": load_res,
+            "endpoint_voltage": ep_str,
+            "dcxh": str(_dm2000_get_value(arch, "dcxh") or "").strip(),
+        },
+        "built_label": label,
+        "battery_type": bt_raw,
+        "battery_family": family,
+        "freq_group": freq,
+    }
+
+
+@app.post("/dm3000/update-archive-meta")
+@app.post("/dm2000/update-archive-meta")
+def update_dm2000_archive_meta(request: Request, payload: DM2000UpdateArchiveMetaRequest):
+    cfg = _resolve_dm_module(request)
+    """Write remarks (bz) and/or serialno (dcph) directly to the live dmdata_ls.mdb.
+
+    Updates the LIVE Access database file (not the local read-cache) so that the
+    change persists across cache refreshes.  After a successful write the
+    local read-cache is force-refreshed and all in-memory caches are cleared
+    so subsequent reads immediately see the updated values.
+
+    Returns ``{"status": "ok", "updated": N}`` where N is the number of rows
+    updated (0 means the archive was not found, which is non-fatal).
+    """
+    _validate_dm2000_archname(payload.archname)
+
+    ls_path = Path(cfg.get_ls_path())
+    if not ls_path.exists():
+        raise HTTPException(status_code=404, detail="dmdata_ls.mdb not found")
+
+    # Build the SET clause from whichever fields were provided.
+    # None means "do not update this field"; "" means "clear the field".
+    set_parts: list[str] = []
+    params_list: list = []
+    if payload.remarks is not None:
+        set_parts.append("bz = ?")
+        params_list.append(payload.remarks)
+    if payload.serialno is not None:
+        set_parts.append("dcph = ?")
+        params_list.append(payload.serialno)
+
+    if not set_parts:
+        return {"status": "ok", "updated": 0, "message": "Nothing to update"}
+
+    conn_str = (
+        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={str(ls_path)};"
+    )
+    archname = payload.archname
+    params_with_id = tuple(params_list) + (archname,)
+
+    rows_updated = 0
+    try:
+        with _acquire_query_lock():
+            with pyodbc.connect(conn_str, autocommit=True, timeout=10) as conn:
+                cursor = conn.cursor()
+                # Primary: match by cdid (DM2000's internal archive identifier)
+                sql_cdid = f"UPDATE ls_jb_cs SET {', '.join(set_parts)} WHERE cdid = ?"
+                try:
+                    cursor.execute(sql_cdid, params_with_id)
+                    rc = cursor.rowcount
+                    # rc == -1 means the Access ODBC driver does not report the
+                    # number of affected rows.  The UPDATE executed without error
+                    # (autocommit=True), so treat -1 as "likely succeeded" rather
+                    # than falling through to an incorrect archname fallback.
+                    rows_updated = rc if rc >= 0 else 1
+                    # rc == 0 with no error can mean the string archname didn't
+                    # match a numeric cdid column.  Retry with an explicit int so
+                    # Access performs a numeric comparison.
+                    if rows_updated == 0 and archname.isdigit():
+                        try:
+                            params_with_int = tuple(params_list) + (int(archname),)
+                            cursor = conn.cursor()
+                            cursor.execute(sql_cdid, params_with_int)
+                            rc2 = cursor.rowcount
+                            rows_updated = rc2 if rc2 >= 0 else 1
+                        except pyodbc.Error:
+                            pass  # fall through to archname fallback below
+                except pyodbc.Error as inner_exc:
+                    err_str = str(inner_exc)
+                    if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                        # Access ODBC driver doesn't support parameterised queries;
+                        # inline params directly.  For digit-only archnames pass as
+                        # int so the WHERE clause works for numeric cdid columns.
+                        archname_inline: int | str = int(archname) if archname.isdigit() else archname
+                        try:
+                            cursor = conn.cursor()
+                            cursor.execute(_inline_params(sql_cdid, tuple(params_list) + (archname_inline,)))
+                            rc = cursor.rowcount
+                            rows_updated = rc if rc >= 0 else 1
+                        except (pyodbc.Error, ValueError) as fallback_exc:
+                            logger.warning(
+                                "update_dm2000_archive_meta: inline-params fallback failed for %s: %s",
+                                archname, fallback_exc,
+                            )
+                    else:
+                        raise
+
+                # Fallback: match by archname column when cdid found nothing
+                if rows_updated == 0:
+                    sql_arch = f"UPDATE ls_jb_cs SET {', '.join(set_parts)} WHERE archname = ?"
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute(sql_arch, params_with_id)
+                        rows_updated = max(0, cursor.rowcount)
+                    except pyodbc.Error as arch_exc:
+                        logger.warning(
+                            "update_dm2000_archive_meta: archname fallback failed for %s: %s",
+                            archname, arch_exc,
+                        )
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"Access write failed: {exc}") from exc
+
+    # Force-refresh the local read-cache so the next query sees the updated value
+    _dm_refresh_ls_cache(cfg, force=True)
+    with cfg.archives_cache_lock:
+        cfg.archives_cache.clear()
+    with cfg.tav_cache_lock:
+        cfg.tav_cache.clear()
+
+    return {"status": "ok", "updated": rows_updated}
+
+
+@app.post("/update-batch-meta")
+def update_dmp_batch_meta(payload: DMPUpdateBatchMetaRequest):
+    """Write remarks (bz) and/or serialno (dcph) directly to the live DMPDATA.mdb.
+
+    Updates the LIVE Access database file (not the local read-cache) so that the
+    change persists across cache refreshes.  After a successful write the
+    local read-cache is force-refreshed so subsequent reads immediately see the
+    updated values.
+
+    Returns ``{"status": "ok", "updated": N}`` where N is the number of tables
+    updated (0 means the batch was not found, which is non-fatal).
+    """
+    batch_id = payload.batch_id
+    if not re.match(r'^[A-Za-z0-9_./ \-]+$', batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch_id")
+
+    dmpdata_path = Path(get_dmpdata_path())
+    if not dmpdata_path.exists():
+        raise HTTPException(status_code=404, detail="DMPDATA.mdb not found")
+
+    if payload.remarks is None and payload.serialno is None:
+        return {"status": "ok", "updated": 0, "message": "Nothing to update"}
+
+    conn_str = (
+        r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={str(dmpdata_path)};"
+    )
+
+    rows_updated = 0
+    try:
+        with _acquire_query_lock():
+            with pyodbc.connect(conn_str, autocommit=True, timeout=10) as conn:
+                # Update para_pub.bz (batch-level remark) WHERE id = batch_id
+                if payload.remarks is not None:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE para_pub SET bz = ? WHERE id = ?", (payload.remarks, batch_id))
+                        rc = cursor.rowcount
+                        if rc == 0 and batch_id.isdigit():
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE para_pub SET bz = ? WHERE id = ?", (payload.remarks, int(batch_id)))
+                            rc = cursor.rowcount
+                        if rc != 0 and rc != -1:
+                            rows_updated += 1
+                        elif rc == -1:
+                            rows_updated += 1  # Access ODBC does not report rowcount
+                    except pyodbc.Error as exc:
+                        err_str = str(exc)
+                        if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                            try:
+                                id_inline: int | str = int(batch_id) if batch_id.isdigit() else batch_id
+                                cursor = conn.cursor()
+                                cursor.execute(_inline_params(
+                                    "UPDATE para_pub SET bz = ? WHERE id = ?",
+                                    (payload.remarks, id_inline),
+                                ))
+                                rows_updated += 1
+                            except (pyodbc.Error, ValueError) as fb_exc:
+                                logger.warning("update_dmp_batch_meta: para_pub inline fallback failed: %s", fb_exc)
+                        else:
+                            logger.warning("update_dmp_batch_meta: para_pub update failed: %s", exc)
+
+                # Update para_singl.dcph (serial number) for all channels WHERE sid = batch_id
+                if payload.serialno is not None:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE para_singl SET dcph = ? WHERE sid = ?", (payload.serialno, batch_id))
+                        rc = cursor.rowcount
+                        if rc == 0 and batch_id.isdigit():
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE para_singl SET dcph = ? WHERE sid = ?", (payload.serialno, int(batch_id)))
+                            rc = cursor.rowcount
+                        if rc != 0 and rc != -1:
+                            rows_updated += 1
+                        elif rc == -1:
+                            rows_updated += 1
+                    except pyodbc.Error as exc:
+                        err_str = str(exc)
+                        if "HYC00" in err_str or "SQLBindParameter" in err_str or "07002" in err_str:
+                            try:
+                                id_inline: int | str = int(batch_id) if batch_id.isdigit() else batch_id
+                                cursor = conn.cursor()
+                                cursor.execute(_inline_params(
+                                    "UPDATE para_singl SET dcph = ? WHERE sid = ?",
+                                    (payload.serialno, id_inline),
+                                ))
+                                rows_updated += 1
+                            except (pyodbc.Error, ValueError) as fb_exc:
+                                logger.warning("update_dmp_batch_meta: para_singl inline fallback failed: %s", fb_exc)
+                        else:
+                            logger.warning("update_dmp_batch_meta: para_singl update failed: %s", exc)
+
+    except pyodbc.Error as exc:
+        raise HTTPException(status_code=500, detail=f"Access write failed: {exc}") from exc
+
+    # Force-refresh the local read-cache so the next query sees the updated values
+    _dmpdata_refresh_cache(force=True)
+
+    return {"status": "ok", "updated": rows_updated}
+
+
+def get_dm2000_templates():
+    templates_dir = Path(DM2000_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.get("/dm3000/perf-templates")
+@app.get("/dm2000/perf-templates")
+def get_dm2000_perf_templates(request: Request):
+    cfg = _resolve_dm_module(request)
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.post("/dm3000/perf-template/upload")
+@app.post("/dm2000/perf-template/upload")
+async def upload_dm2000_perf_template(request: Request, file: UploadFile = File(...)):
+    cfg = _resolve_dm_module(request)
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
+    # Extract only the basename (no directory components)
+    raw_name = Path(file.filename).name
+    # Sanitize: replace any characters not in [A-Za-z0-9_-] in the stem with underscores
+    stem = raw_name[:-5]
+    sanitized_stem = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)
+    # Remove consecutive underscores and strip leading/trailing underscores
+    sanitized_stem = re.sub(r'_+', '_', sanitized_stem).strip('_')
+    if not sanitized_stem:
+        sanitized_stem = "template"
+    safe_name = sanitized_stem + ".xlsx"
+    templates_dir = Path(cfg.perf_templates_dir).resolve()
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    # Re-join using only the validated basename to prevent any path traversal
+    dest = templates_dir / safe_name
+    if not str(dest).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    contents = await file.read()
+    dest.write_bytes(contents)
+    return {"ok": True, "name": safe_name}
+
+
+@app.post("/dm3000/report")
+@app.post("/dm2000/report")
+def generate_dm2000_report(request: Request, payload: DM2000ReportRequest):
+    cfg = _resolve_dm_module(request)
+    _validate_dm2000_archname(payload.archname)
+
+    try:
+        archive_rows = _read_dm_ls(cfg, "SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,))
+    except pyodbc.Error:
+        archive_rows = []
+    if not archive_rows:
+        try:
+            archive_rows = _read_dm_ls(cfg, "SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,))
+        except pyodbc.Error:
+            archive_rows = []
+    if not archive_rows:
+        raise HTTPException(status_code=404, detail="Archive not found")
+    archive = archive_rows[0]
+
+    if payload.baty == 0:
+        curve_data = _read_dm_average_curve_rows(cfg, payload.archname)
+        baty_label = "Average"
+    else:
+        curve_data = _read_dm_curve_rows(cfg, payload.archname, payload.baty)
+        baty_label = str(payload.baty)
+
+    def _apply_override(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
+
+    stats = compute_dm2000_stats(curve_data)
+    # Override VOLT_MAX/VOLT_MIN with the true OCV/FCV stored in ls_pam2.
+    # ls_pam2 holds the instrument-measured open-circuit voltage (OCV, before
+    # discharge) and loaded voltage (FCV, at discharge start) — the values
+    # DM2000 reports in its own Excel export.  The ls_vtime curve data uses
+    # fixed voltage thresholds, not real measurements.
+    if payload.baty > 0:
+        pam2_stats = _get_pam2_ocv_fcv(payload.archname, payload.baty)
+        if pam2_stats:
+            stats.update(pam2_stats)
+            # Expose as dedicated keys for templates using {{OCV}} / {{FCV}}
+            stats["OCV"] = pam2_stats["VOLT_MAX"]
+            stats["FCV"] = pam2_stats["VOLT_MIN"]
+    context = {
+        "ARCHNAME": _apply_override(_dm2000_get_value(archive, "archname", "cdid", "id"), payload.override_archname),
+        "START_DATE": _apply_override(str(_dm2000_get_value(archive, "startdate", "fdrq", "fdkssj", "qyrq", "fdrq") or ""), payload.override_start_date),
+        "BATTERY_TYPE": _apply_override(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type),
+        "BATCH_NAME": _apply_override(_dm2000_get_value(archive, "name", "dcmc"), payload.override_batch_name),
+        "DISCHARGE_CONDITION": _apply_override(_dm2000_get_value(archive, "fdfs"), payload.override_discharge_condition),
+        "DURATION": _dm2000_get_value(archive, "duration", "fdts"),
+        "UNIFORMITY_RATE": _dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws"),
+        "MANUFACTURER": _apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer),
+        "MADE_DATE": _apply_override(str(_dm2000_get_value(archive, "madedate", "scrq") or ""), payload.override_made_date),
+        "SERIAL_NO": _apply_override(_dm2000_get_value(archive, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no"), payload.override_serial_no),
+        "REMARKS": _apply_override(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh"), payload.override_remarks),
+        "BATTERY_NO": baty_label,
+        # Extra fields for full template support
+        "COMPANY": cfg.company_name or "",
+        "END_DATE": str(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date", "fzrq", "stopdate", "fdend") or ""),
+        "VOLTAGE_TYPE": str(_dm2000_get_value(
+            archive,
+            "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+            "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+            "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
+        ) or ""),
+        "TRADEMARK": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
+        "LOAD_RESISTANCE": _append_unit(str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""), "ohm"),
+        "ENDPOINT_VOLTAGE": _append_unit(str(_dm2000_get_value(
+            archive,
+            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+        ) or ""), "V"),
+        "DIS_CONDITION": str(_dm2000_get_value(
+            archive,
+            "dis_condition", "wd", "fdwd", "hjwd", "wendu",
+            "fdtj", "hjtj", "temperature", "temp_c",
+            "temp", "hjt", "qw", "t", "csh", "jchj",
+        ) or ""),
+        "MIN_DURATION": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts") or ""),
+        **stats,
+        "HISTORY_DATA": curve_data,
+    }
+
+    template_path = _resolve_dm_template_path(cfg, payload.template_name)
+    report_bytes = render_excel_template(template_path, context)
+    filename = f"dm2000_report_{payload.archname}_{baty_label}.xlsx"
+    return StreamingResponse(
+        BytesIO(report_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _compute_uniform_rate_from_tav(
+    endpoint_voltage_str: str,
+    time_at_volt_map: dict,
+    batys: list,
+) -> Optional[float]:
+    """Compute Uniform Rate = (1 - (Max - Min) / Avg) * 100 at endpoint voltage.
+
+    Uses the time-at-voltage data (ls_vtime/ls_timev) at the endpoint voltage
+    threshold for all active batteries.  Returns a percentage rounded to 2 decimal
+    places, or None when insufficient data is available.
+    """
+    try:
+        ep = float(str(endpoint_voltage_str or "").strip().split()[0])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+    times: list[float] = []
+    for b in batys:
+        rows = time_at_volt_map.get(b) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - ep) < 0.001:
+                    mins = row.get("minutes") or row.get("MINUTES")
+                    if mins is not None:
+                        f = float(mins)
+                        if not math.isnan(f) and f >= 0:
+                            times.append(f)
+                    break
+            except (TypeError, ValueError):
+                pass
+
+    if len(times) < 2:
+        return None
+
+    max_t = max(times)
+    min_t = min(times)
+    avg_t = sum(times) / len(times)
+    if avg_t <= 0:
+        return None
+
+    return round((1.0 - (max_t - min_t) / avg_t) * 100.0, 2)
+
+
+def _append_unit(val: str, unit: str) -> str:
+    """Append a physical unit to a value string if not already present."""
+    if not val or val == "-":
+        return val or ""
+    val_stripped = val.strip()
+    if val_stripped.lower().endswith(unit.lower()):
+        return val_stripped
+    return f"{val_stripped} {unit}"
+
+
+def _build_preview_workbook(  # noqa: C901
+    archive_fields: dict,
+    company: str,
+    batys: list,
+    stats_map: dict,
+    time_at_volt_map: dict,
+    battery_params: dict,
+    endpoint_cutoff: Optional[float] = None,
+    *,
+    report_kind: str = "dm2000",
+    telemetry_by_baty: Optional[dict] = None,
+    count_at_volt_map: Optional[dict] = None,
+) -> bytes:
+    """Build a simple Excel workbook matching the ReportPreview HTML format.
+
+    ``report_kind`` selects the layout. ``"dm2000"`` (default) keeps the legacy
+    DM2000 layout (OCV/FCV/SOt mAh rows, "Unit: hour" durations and an average
+    discharge curve). ``"dmp"`` switches to the DMP variant matching the
+    DMP-1 sample report: only OCV/CCV rows, "Unit: times" with integer
+    sample counts, DMP-specific archive labels and a per-channel chart built
+    from ``telemetry_by_baty``.
+    """
+    is_dmp = report_kind == "dmp"
+    is_dm3000 = report_kind == "dm3000"
+    from openpyxl import Workbook as _Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter as _get_col_letter
+
+    # Derive voltage thresholds dynamically from actual time-at-voltage data,
+    # sorted descending, so all available rows are shown regardless of range.
+    sj_set: set[float] = set()
+    for tav_rows in time_at_volt_map.values():
+        for row in (tav_rows or []):
+            sj_raw = row.get("sj") or row.get("SJ")
+            try:
+                if sj_raw is not None:
+                    sj_set.add(round(float(sj_raw), 4))
+            except (TypeError, ValueError):
+                pass
+    if is_dmp and count_at_volt_map:
+        for cnt_rows in count_at_volt_map.values():
+            for row in (cnt_rows or []):
+                sj_raw = row.get("sj") or row.get("SJ")
+                try:
+                    if sj_raw is not None:
+                        sj_set.add(round(float(sj_raw), 4))
+                except (TypeError, ValueError):
+                    pass
+    THRESHOLDS = sorted(sj_set, reverse=True)  # descending
+    # Apply optional cutoff: only show thresholds >= endpoint_cutoff
+    if endpoint_cutoff is not None:
+        THRESHOLDS = [t for t in THRESHOLDS if t >= endpoint_cutoff - 0.0001]
+    thin = Side(style="thin")
+    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill_header = PatternFill("solid", fgColor="FAFAFA")
+    fill_label = PatternFill("solid", fgColor="F5F5F5")
+    fill_section = PatternFill("solid", fgColor="EFF4FF")
+
+    wb = _Workbook()
+    ws = wb.active
+    ws.title = "Battery Discharge Curve"
+
+    num_batys = len(batys)
+    total_cols = 1 + num_batys + 3  # label + No.1..N + Max + Min + Avge
+
+    def _safe_float(v):
+        if v is None or v in ("", "--"):
+            return None
+        try:
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    def _fmt_num(v, decimals=3):
+        f = _safe_float(v)
+        return round(f, decimals) if f is not None else "-"
+
+    def _agg(vals):
+        vs = [_safe_float(v) for v in vals]
+        vs = [x for x in vs if x is not None]
+        if not vs:
+            return "-", "-", "-"
+        return round(max(vs), 3), round(min(vs), 3), round(sum(vs) / len(vs), 3)
+
+    def _set(row, col, value, bold=False, fill=None, align="center", merge_to=None, italic=False, size=10):
+        c = ws.cell(row=row, column=col, value=value)
+        c.border = bdr
+        c.font = Font(bold=bold, italic=italic, name="Arial", size=size)
+        c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=False)
+        if fill:
+            c.fill = fill
+        if merge_to and merge_to > col:
+            ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=merge_to)
+        return c
+
+    half = total_cols // 2
+    r = 1
+
+    # Title
+    _set(r, 1, "Battery Discharge Curve", bold=True, merge_to=total_cols, size=14)
+    r += 1
+
+    # Company
+    if company:
+        _set(r, 1, company, merge_to=total_cols)
+        r += 1
+
+    # Archive info pairs
+    # Compute Uniform Rate from time-at-voltage data when the stored value is not
+    # already a proper percentage (the raw DB column yfws holds an integer 0-9).
+    _unifrate_raw = archive_fields.get("unifrate") or ""
+    try:
+        _unifrate_val = float(str(_unifrate_raw).replace("%", "").strip())
+        # yfws is stored as a whole integer in [0, 9]; any other value is a percentage
+        _unifrate_is_pct = not (_unifrate_val == int(_unifrate_val) and 0 <= _unifrate_val <= 9)
+    except (TypeError, ValueError):
+        _unifrate_val = None
+        _unifrate_is_pct = False
+
+    if not _unifrate_is_pct:
+        _computed = _compute_uniform_rate_from_tav(
+            archive_fields.get("endpoint_voltage") or "",
+            time_at_volt_map,
+            batys,
+        )
+        if _computed is not None:
+            _unifrate_display = f"{_computed:.2f} %"
+        elif _unifrate_raw:
+            _unifrate_display = str(_unifrate_raw)
+        else:
+            _unifrate_display = "-"
+    else:
+        _unifrate_display = f"{_unifrate_val:.2f} %" if _unifrate_val is not None else str(_unifrate_raw)
+
+    _voltage_type_val = archive_fields.get("voltage_type") or "-"
+    _load_resistance_val = _append_unit(archive_fields.get("load_resistance") or "", "mA" if is_dm3000 else "ohm")
+    _endpoint_voltage_val = _append_unit(archive_fields.get("endpoint_voltage") or "", "V")
+
+    if is_dmp:
+        info_rows_data = [
+            ("Battery Name", archive_fields.get("name") or "-", "Archive Name", archive_fields.get("archname") or "-"),
+            ("Battery Type", archive_fields.get("dcxh") or "-", "Voltage Type", _voltage_type_val),
+            ("Dis-Pattern", archive_fields.get("fdfs") or "-", "Uniformity", _unifrate_display),
+            ("Trademark", archive_fields.get("trademark") or "-", "Manufacturer", archive_fields.get("manufacturer") or "-"),
+            ("Start Date", archive_fields.get("startdate") or "-", "Made date", archive_fields.get("madedate") or "-"),
+            ("Last Date", archive_fields.get("enddate") or "-", "Minimum Duration", archive_fields.get("min_duration") or "-"),
+            ("Dis-Surroundings", archive_fields.get("dis_condition") or "-", "End-point Voltage", _endpoint_voltage_val),
+        ]
+    else:
+        info_rows_data = [
+            ("Name", archive_fields.get("name") or "-", "Record Name", archive_fields.get("archname") or "-"),
+            ("Type", archive_fields.get("dcxh") or "-", "Discharge Pattern", archive_fields.get("fdfs") or "-"),
+            ("Voltage Type", _voltage_type_val, "Load Resistance", _load_resistance_val),
+            ("Trademark", archive_fields.get("trademark") or "-", "End-point Voltage", _endpoint_voltage_val),
+            ("Serial No", archive_fields.get("serialno") or "-", "Uniform Rate", _unifrate_display),
+            ("Manufacturer", archive_fields.get("manufacturer") or "-", "Start Date", archive_fields.get("startdate") or "-"),
+            ("Made date", archive_fields.get("madedate") or "-", "Last Date", archive_fields.get("enddate") or "-"),
+            ("Minimum Duration", archive_fields.get("min_duration") or "-", "Dis-condition", archive_fields.get("dis_condition") or "-"),
+        ]
+    for left_lbl, left_val, right_lbl, right_val in info_rows_data:
+        _set(r, 1, left_lbl, fill=fill_label, align="left")
+        _set(r, 2, left_val, align="left", merge_to=half)
+        _set(r, half + 1, right_lbl, fill=fill_label, align="left")
+        _set(r, half + 2, right_val, align="left", merge_to=total_cols)
+        r += 1
+
+    # Instrument row (full width, italic)
+    if is_dmp:
+        _set(r, 1, "Testing equipment: Type DMP-1 Power Discharge Analyzer (V7.00)",
+             italic=True, align="left", merge_to=total_cols)
+    elif is_dm3000:
+        _set(r, 1, "Measure Instrument: Type DM3000 Automatic Discharge Test System (V2.49)",
+             italic=True, align="left", merge_to=total_cols)
+    else:
+        _set(r, 1, "Measure Instrument: Type DM2000 Automatic Discharge Test System (V6.22)",
+             italic=True, align="left", merge_to=total_cols)
+    r += 1
+
+    # Battery column headers
+    _set(r, 1, "", fill=fill_header)
+    for i, b in enumerate(batys):
+        _set(r, 2 + i, f"No.{b}", bold=True, fill=fill_header)
+    _set(r, 2 + num_batys, "Max", bold=True, fill=fill_header)
+    _set(r, 3 + num_batys, "Min", bold=True, fill=fill_header)
+    _set(r, 4 + num_batys, "Avge", bold=True, fill=fill_header)
+    r += 1
+
+    def _get_batt_field(baty, *keys):
+        row = battery_params.get(baty) or {}
+        for k in keys:
+            for kk in (k, k.upper(), k.lower()):
+                v = row.get(kk)
+                if v not in (None, "", "--"):
+                    return v
+        return None
+
+    # OCV row
+    ocv_vals = [_safe_float(_get_batt_field(b, "ocv", "OCV")) for b in batys]
+    mx, mn, av = _agg(ocv_vals)
+    _set(r, 1, "OCV V", fill=fill_label, align="left")
+    for i, v in enumerate(ocv_vals):
+        _set(r, 2 + i, _fmt_num(v))
+    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+    r += 1
+
+    # FCV/CCV row
+    fcv_vals = [_safe_float(_get_batt_field(b, "fcv", "FCV")) for b in batys]
+    mx, mn, av = _agg(fcv_vals)
+    _set(r, 1, "CCV V" if is_dmp else "FCV V", fill=fill_label, align="left")
+    for i, v in enumerate(fcv_vals):
+        _set(r, 2 + i, _fmt_num(v))
+    _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+    r += 1
+
+    # SOt mAh row (omitted for DMP per sample report)
+    if not is_dmp:
+        sot_vals = [_safe_float(_get_batt_field(b, "sot_mah", "sot", "SOT", "sh", "rql", "fdrl")) for b in batys]
+        mx, mn, av = _agg(sot_vals)
+        _set(r, 1, "SOt mAh", fill=fill_label, align="left")
+        for i, v in enumerate(sot_vals):
+            _set(r, 2 + i, _fmt_num(v))
+        _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        r += 1
+
+    # Duration section header
+    _duration_unit_label = "times" if is_dmp else ("minute" if is_dm3000 else "hour")
+    _set(r, 1, f"The Duration of Series Designated Voltage (Unit: {_duration_unit_label})",
+         fill=fill_section, merge_to=total_cols, italic=True, align="left")
+    r += 1
+
+    def _get_tav(baty, threshold):
+        rows = time_at_volt_map.get(baty) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - threshold) < 0.001:
+                    mins = row.get("minutes") or row.get("MINUTES")
+                    if mins is not None:
+                        f = float(mins)
+                        if math.isnan(f):
+                            return None
+                        # DM3000 reports duration in minutes; DM2000 converts to hours.
+                        return f if is_dm3000 else f / 60.0
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    def _get_count(baty, threshold):
+        rows = (count_at_volt_map or {}).get(baty) or []
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                if sj is not None and abs(float(sj) - threshold) < 0.001:
+                    cnt = row.get("count") or row.get("COUNT")
+                    if cnt is not None:
+                        return int(cnt)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    for threshold in THRESHOLDS:
+        if is_dmp:
+            cell_vals = [_get_count(b, threshold) for b in batys]
+        else:
+            cell_vals = [_get_tav(b, threshold) for b in batys]
+        # Skip rows where no battery has data for this threshold
+        if all(v is None for v in cell_vals):
+            continue
+        if is_dmp:
+            numeric = [v for v in cell_vals if v is not None]
+            if numeric:
+                mx = max(numeric)
+                mn = min(numeric)
+                av = int(round(sum(numeric) / len(numeric)))
+            else:
+                mx, mn, av = "-", "-", "-"
+            _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
+            for i, v in enumerate(cell_vals):
+                _set(r, 2 + i, v if v is not None else "-")
+            _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        else:
+            mx, mn, av = _agg(cell_vals)
+            _set(r, 1, round(threshold, 3), fill=fill_label, align="left")
+            for i, v in enumerate(cell_vals):
+                _set(r, 2 + i, round(v, 3) if v is not None else "-")
+            _set(r, 2 + num_batys, mx); _set(r, 3 + num_batys, mn); _set(r, 4 + num_batys, av)
+        r += 1
+
+    # Remarks
+    _set(r, 1, "Remark", fill=fill_label, align="left")
+    _set(r, 2, archive_fields.get("remarks") or "-", align="left", merge_to=total_cols)
+
+    # ── Discharge-curve chart ────────────────────────────────────────────────
+    chart_img_buf: Optional[BytesIO] = None
+    if is_dmp:
+        # DMP: plot every channel's raw VOLT vs TIM curve
+        _dmp_series: list[tuple[int, list[float], list[float]]] = []
+        for b in batys:
+            _rows = (telemetry_by_baty or {}).get(b) or []
+            _pts: list[tuple[float, float]] = []
+            for rec in _rows:
+                _t = rec.get("TIM")
+                _v = rec.get("VOLT") or rec.get("volt") or rec.get("Volt")
+                try:
+                    _tf, _vf = float(_t), float(_v)
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(_tf) or math.isnan(_vf):
+                    continue
+                _pts.append((_tf, _vf))
+            if len(_pts) >= 2:
+                _pts.sort(key=lambda p: p[0])
+                _dmp_series.append((b, [p[0] for p in _pts], [p[1] for p in _pts]))
+
+        if _dmp_series:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+            from openpyxl.drawing.image import Image as _XLImage
+
+            _palette = [
+                "#1677ff", "#f5222d", "#52c41a", "#faad14", "#722ed1",
+                "#13c2c2", "#eb2f96", "#fa8c16", "#a0d911", "#2f54eb",
+            ]
+            _fig, _ax = plt.subplots(figsize=(11, 6), dpi=150)
+            _fig.patch.set_facecolor("#ffffff")
+            _ax.set_facecolor("#f8faff")
+
+            for _idx, (_b, _xs, _ys) in enumerate(_dmp_series):
+                _col = _palette[_idx % len(_palette)]
+                _ax.plot(_xs, _ys, color=_col, linewidth=1.6, alpha=0.90,
+                         label=f"No.{_b}", zorder=3)
+                _ax.scatter(_xs[-1], _ys[-1], color=_col, s=28, zorder=5)
+
+            _all_y = [v for _, _, ys in _dmp_series for v in ys]
+            _all_x = [t for _, xs, _ in _dmp_series for t in xs]
+            if _all_y:
+                _ax.set_ylim(max(0, min(_all_y) - 0.15), max(_all_y) + 0.25)
+            if _all_x:
+                _ax.set_xlim(left=0, right=max(_all_x) * 1.02)
+
+            _ax.set_xlabel("Time (h)", fontsize=11, labelpad=6, color="#333333")
+            _ax.set_ylabel("Voltage (V)", fontsize=11, labelpad=6, color="#333333")
+            _ax.tick_params(axis="both", labelsize=9, colors="#555555")
+            _ax.grid(which="major", linestyle="--", linewidth=0.6,
+                     color="#c8d4e8", alpha=0.8, zorder=1)
+            _ax.grid(which="minor", linestyle=":", linewidth=0.4,
+                     color="#dde6f0", alpha=0.5, zorder=1)
+            _ax.minorticks_on()
+            for _spine in _ax.spines.values():
+                _spine.set_edgecolor("#b0c0d8")
+                _spine.set_linewidth(0.8)
+            _ax.set_title("Battery Discharge Curve", fontsize=14,
+                          fontweight="bold", color="#1a2e4a", pad=12)
+            _leg = _ax.legend(loc="upper right", fontsize=8,
+                              ncol=min(len(_dmp_series), 5),
+                              framealpha=0.92, edgecolor="#b0c0d8",
+                              fancybox=True, title="Channel", title_fontsize=8)
+            _leg.get_frame().set_linewidth(0.7)
+            _fig.tight_layout(pad=1.5)
+
+            chart_img_buf = BytesIO()
+            _fig.savefig(chart_img_buf, format="png", dpi=150, bbox_inches="tight")
+            plt.close(_fig)
+            chart_img_buf.seek(0)
+
+            xl_img = _XLImage(chart_img_buf)
+            xl_img.width = 800
+            xl_img.height = 440
+            ws.add_image(xl_img, f"A{r + 2}")
+
+    else:
+        # DM2000 / DM3000: per-battery TAV curves + bold average curve
+        _time_unit = "Minute" if is_dm3000 else "Hour"
+
+        # Build per-battery series from time_at_volt_map
+        _baty_series: dict[int, list[tuple[float, float]]] = {}
+        for _b in batys:
+            _pts2: list[tuple[float, float]] = []
+            for _row in (time_at_volt_map.get(_b) or []):
+                _sj = _row.get("sj") or _row.get("SJ")
+                _mn = _row.get("minutes") or _row.get("MINUTES")
+                try:
+                    _vf2, _tf2 = float(_sj), float(_mn)
+                    if not math.isnan(_vf2) and not math.isnan(_tf2) and _tf2 >= 0:
+                        _xv = _tf2 if is_dm3000 else _tf2 / 60.0
+                        _pts2.append((_xv, _vf2))
+                except (TypeError, ValueError):
+                    pass
+            if len(_pts2) >= 2:
+                _pts2.sort(key=lambda p: p[0])
+                _baty_series[_b] = _pts2
+
+        # Build average curve (TAV aggregates + FCV at t=0)
+        _avg_pts: list[tuple[float, float]] = []
+        _, _, _avg_fcv_raw = _agg(fcv_vals)
+        _avg_fcv = _safe_float(_avg_fcv_raw)
+        if _avg_fcv is not None:
+            _avg_pts.append((0.0, round(_avg_fcv, 4)))
+        for _thr in THRESHOLDS:
+            _tav_vs = [_get_tav(_b, _thr) for _b in batys]
+            if all(_v is None for _v in _tav_vs):
+                continue
+            _, _, _av = _agg(_tav_vs)
+            if isinstance(_av, (int, float)):
+                _avg_pts.append((round(_av, 4), round(_thr, 3)))
+
+        _has_data = len(_avg_pts) >= 2 or len(_baty_series) >= 1
+        if _has_data:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+            from openpyxl.drawing.image import Image as _XLImage
+
+            _palette2 = [
+                "#aec6e8", "#b8e0b8", "#f5c6a0", "#d4b0d4", "#a0d4d4",
+                "#e8c8a8", "#c8b8e0", "#b8d8a8", "#e0b8c8", "#c8e0b8",
+            ]
+            _fig2, _ax2 = plt.subplots(figsize=(10, 5.5), dpi=150)
+            _fig2.patch.set_facecolor("#ffffff")
+            _ax2.set_facecolor("#f8faff")
+
+            _all_x2: list[float] = []
+            _all_y2: list[float] = []
+
+            # Faint individual battery curves
+            for _idx2, (_b2, _pts3) in enumerate(_baty_series.items()):
+                _bx = [p[0] for p in _pts3]
+                _by = [p[1] for p in _pts3]
+                _all_x2.extend(_bx)
+                _all_y2.extend(_by)
+                _ax2.plot(_bx, _by,
+                          color=_palette2[_idx2 % len(_palette2)],
+                          linewidth=1.1, alpha=0.75,
+                          label=f"No.{_b2}", zorder=2)
+
+            # Bold average curve with spline smoothing
+            if len(_avg_pts) >= 2:
+                _ax_vals = [p[0] for p in _avg_pts]
+                _ay_vals = [p[1] for p in _avg_pts]
+                _all_x2.extend(_ax_vals)
+                _all_y2.extend(_ay_vals)
+
+                _ax_plot, _ay_plot = _ax_vals, _ay_vals
+                try:
+                    import numpy as _np
+                    from scipy.interpolate import make_interp_spline as _mks
+                    if len(_ax_vals) >= 4:
+                        _xa = _np.array(_ax_vals)
+                        _ya = _np.array(_ay_vals)
+                        _xs_sm = _np.linspace(_xa.min(), _xa.max(), 300)
+                        _spl = _mks(_xa, _ya, k=min(3, len(_xa) - 1))
+                        _ax_plot = _xs_sm.tolist()
+                        _ay_plot = _spl(_xs_sm).tolist()
+                except Exception:
+                    pass
+
+                _ax2.fill_between(_ax_plot, _ay_plot,
+                                  alpha=0.13, color="#1677ff", zorder=1)
+                _ax2.plot(_ax_plot, _ay_plot,
+                          color="#1677ff", linewidth=2.4,
+                          label="Average", zorder=4)
+                _ax2.scatter(_ax_vals, _ay_vals,
+                             color="#1255c0", s=38, zorder=5, clip_on=True)
+
+                for (_xp, _yp) in zip(_ax_vals, _ay_vals):
+                    if _xp == 0.0:
+                        continue
+                    _ax2.annotate(
+                        f"{_yp:.2f}V",
+                        xy=(_xp, _yp),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=6.5, color="#1a4a80",
+                        clip_on=True,
+                    )
+
+            # Axis limits & styling
+            if _all_y2:
+                _ax2.set_ylim(max(0, min(_all_y2) - 0.2), max(_all_y2) + 0.3)
+            if _all_x2:
+                _ax2.set_xlim(left=0, right=max(_all_x2) * 1.03)
+
+            _ax2.set_xlabel(_time_unit, fontsize=11, labelpad=6, color="#333333")
+            _ax2.set_ylabel("Voltage (V)", fontsize=11, labelpad=6, color="#333333")
+            _ax2.tick_params(axis="both", labelsize=9, colors="#555555")
+            _ax2.yaxis.set_minor_locator(mticker.AutoMinorLocator())
+            _ax2.xaxis.set_minor_locator(mticker.AutoMinorLocator())
+            _ax2.grid(which="major", linestyle="--", linewidth=0.6,
+                      color="#c8d4e8", alpha=0.8, zorder=0)
+            _ax2.grid(which="minor", linestyle=":", linewidth=0.35,
+                      color="#dde6f0", alpha=0.5, zorder=0)
+            for _spine in _ax2.spines.values():
+                _spine.set_edgecolor("#b0c0d8")
+                _spine.set_linewidth(0.8)
+
+            _ax2.set_title(
+                f"The Duration of Series Designated Voltage  ({_time_unit})",
+                fontsize=13, fontweight="bold", color="#1a2e4a", pad=10,
+            )
+
+            _hs, _ls = _ax2.get_legend_handles_labels()
+            if _hs:
+                _leg2 = _ax2.legend(_hs, _ls, loc="upper right", fontsize=8,
+                                    ncol=min(len(_hs), 6),
+                                    framealpha=0.92, edgecolor="#b0c0d8",
+                                    fancybox=True)
+                _leg2.get_frame().set_linewidth(0.7)
+
+            _fig2.tight_layout(pad=1.5)
+
+            chart_img_buf = BytesIO()
+            _fig2.savefig(chart_img_buf, format="png", dpi=150, bbox_inches="tight")
+            plt.close(_fig2)
+            chart_img_buf.seek(0)
+
+            xl_img = _XLImage(chart_img_buf)
+            xl_img.width = 720
+            xl_img.height = 400
+            ws.add_image(xl_img, f"A{r + 2}")
+
+    # Column widths
+    ws.column_dimensions["A"].width = 22
+    for col_idx in range(2, total_cols + 1):
+        ltr = _get_col_letter(col_idx)
+        ws.column_dimensions[ltr].width = 10
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@app.post("/dm3000/report-simple")
+@app.post("/dm2000/report-simple")
+def generate_dm2000_simple_report(request: Request, payload: DM2000SimpleReportRequest):
+    cfg = _resolve_dm_module(request)
+    """Generate a preview-style Excel report without requiring a template file."""
+    _validate_dm2000_archname(payload.archname)
+
+    if not payload.batys:
+        raise HTTPException(status_code=400, detail="batys must not be empty")
+
+    batys = [b for b in payload.batys if isinstance(b, int) and 1 <= b <= 99]
+    if not batys:
+        raise HTTPException(status_code=400, detail="No valid battery numbers provided")
+
+    # Fetch archive metadata
+    try:
+        archive_rows = _read_dm_ls_multi(cfg, [
+            ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (payload.archname,)),
+            ("SELECT * FROM ls_jb_cs WHERE archname = ?", (payload.archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        archive_rows = []
+    archive = archive_rows[0] if archive_rows else {}
+
+    def _to_date_text(v):
+        if v and hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)[:10] if v not in (None, "") else ""
+
+    def _apply_override(db_val, override_val):
+        return override_val if override_val is not None and str(override_val).strip() != "" else db_val
+
+    archive_fields = {
+        "archname": str(_dm2000_get_value(archive, "archname", "cdid", "id") or payload.archname),
+        "name": str(_dm2000_get_value(archive, "name", "dcmc") or ""),
+        "startdate": _to_date_text(_dm2000_get_value(archive, "startdate", "fdrq")),
+        "enddate": _to_date_text(_dm2000_get_value(archive, "enddate", "fzdq", "jssj", "endrq", "endate", "end_date", "fzrq", "stopdate", "fdend", "jsrq", "jdrq", "wcrq", "zwrq")),
+        "dcxh": str(_apply_override(_dm2000_get_value(archive, "dcxh"), payload.override_battery_type) or ""),
+        "fdfs": str(_dm2000_get_value(archive, "fdfs") or ""),
+        "unifrate": str(_dm2000_get_value(archive, "unifrate", "hl", "hlfd", "yfws_pct", "yfws") or ""),
+        "manufacturer": str(_apply_override(_dm2000_get_value(archive, "manufacturer", "scdw"), payload.override_manufacturer) or ""),
+        "madedate": _to_date_text(_dm2000_get_value(archive, "madedate", "scrq")),
+        "serialno": str(_dm2000_get_value(archive, "serialno", "dcph", "ph", "scph", "pch", "lot", "lot_no", "batchno", "batch_no") or ""),
+        "remarks": str(_dm2000_get_value(archive, "remarks", "remark", "bz", "note", "memo", "bzh") or ""),
+        "voltage_type": str(_dm2000_get_value(
+            archive,
+            "dylx", "voltage_type", "bcdv", "dcdy", "dxy", "edy",
+            "nominal_voltage", "dianxin_leixing", "dianxin", "nominal_v",
+            "lxdy", "vtype", "battv", "lx", "dctype", "v_type", "jstj",
+        ) or ""),
+        "trademark": str(_dm2000_get_value(archive, "trademark", "shangbiao", "sbmc", "pinpai") or ""),
+        "load_resistance": str(_dm2000_get_value(archive, "load_resistance", "fzdz", "fzlkdz", "dw") or ""),
+        "endpoint_voltage": str(_dm2000_get_value(
+            archive,
+            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+        ) or ""),
+        "dis_condition": str(_dm2000_get_value(
+            archive,
+            "dis_condition", "wd", "fdwd", "hjwd", "wendu",
+            "fdtj", "hjtj", "temperature", "temp_c",
+            "temp", "hjt", "qw", "t", "csh", "jchj",
+        ) or ""),
+        "min_duration": str(_dm2000_get_value(archive, "min_duration", "zdts", "min_ts", "minduration", "zdsc", "zxfdts") or ""),
+    }
+
+    # Fetch per-battery params (OCV/FCV/SOt)
+    try:
+        batt_rows = _read_dm_ls_multi(cfg, [
+            ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (payload.archname,)),
+            ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (payload.archname,)),
+        ])
+    except (pyodbc.Error, HTTPException):
+        batt_rows = []
+
+    battery_params: dict = {}
+    for row in batt_rows:
+        b_raw = _dm2000_get_value(row, "baty", "gpp")
+        try:
+            b = int(float(str(b_raw)))
+        except (TypeError, ValueError):
+            continue
+        if b <= 0:
+            continue
+        if "ocv" not in row:
+            row["ocv"] = _dm2000_get_value(row, "ocv", "OCV")
+        if "fcv" not in row:
+            row["fcv"] = _dm2000_get_value(row, "fcv", "FCV")
+        row["sot_mah"] = _dm2000_get_value(row, "sh", "sot", "SOT", "sot_mah", "sotmah", "rql", "fdrl", "rl", "dcrl", "capacity", "sl", "sc", "fdl", "fdsh", "sh_mah", "fdmah", "actual_cap", "shrc", "fdrc")
+        battery_params[b] = row
+
+    # Supplement OCV/FCV from ls_evolt
+    try:
+        evolt_rows = _read_dm_ls(cfg, 
+            "SELECT dy, volt1, volt2, volt3, volt4, volt5, volt6, volt7, volt8, volt9"
+            " FROM ls_evolt WHERE cdid = ? AND (dy = 'OCV' OR dy = 'FCV')",
+            (payload.archname,),
+        )
+        evolt_map: dict = {}
+        for er in evolt_rows:
+            dy = str(er.get("dy") or "").strip().upper()
+            if dy not in ("OCV", "FCV"):
+                continue
+            for i in range(1, 10):
+                raw_v = er.get(f"volt{i}")
+                if raw_v in (None, "", "--"):
+                    continue
+                try:
+                    fv = float(raw_v)
+                    if not math.isnan(fv):
+                        evolt_map.setdefault(i, {})[dy] = fv
+                except (TypeError, ValueError):
+                    pass
+        for b, evolt_data in evolt_map.items():
+            row = battery_params.setdefault(b, {"baty": b})
+            if row.get("ocv") is None:
+                row["ocv"] = evolt_data.get("OCV")
+            if row.get("fcv") is None:
+                row["fcv"] = evolt_data.get("FCV")
+    except (pyodbc.Error, HTTPException):
+        pass
+
+    stats_map: dict = {}
+    time_at_volt_map: dict = {}
+    for b in batys:
+        try:
+            stats_map[b] = compute_dm2000_stats(_read_dm_curve_rows(cfg, payload.archname, b))
+            pam2 = _get_pam2_ocv_fcv(payload.archname, b)
+            if pam2:
+                stats_map[b].update(pam2)
+                stats_map[b]["OCV"] = pam2["VOLT_MAX"]
+                stats_map[b]["FCV"] = pam2["VOLT_MIN"]
+        except (pyodbc.Error, HTTPException):
+            stats_map[b] = {}
+
+        row = battery_params.setdefault(b, {"baty": b})
+        if row.get("ocv") is None and stats_map[b].get("OCV") is not None:
+            row["ocv"] = stats_map[b]["OCV"]
+        if row.get("fcv") is None and stats_map[b].get("FCV") is not None:
+            row["fcv"] = stats_map[b]["FCV"]
+
+        tav: list = []
+        try:
+            tav = _read_dm_ls(cfg, "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?", (payload.archname, b))
+        except (pyodbc.Error, HTTPException):
+            pass
+        if not tav:
+            tim_col = f"tim_vot{b}"
+            try:
+                tav = _read_dm_ls(cfg, 
+                    f"SELECT sj, {tim_col} AS minutes FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                    (payload.archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        if not tav:
+            time_col = f"time{b}"
+            try:
+                tav = _read_dm_ls(cfg, 
+                    f"SELECT dy AS sj, {time_col} AS minutes FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+                    (payload.archname,),
+                )
+            except (pyodbc.Error, HTTPException):
+                pass
+        time_at_volt_map[b] = tav
+
+    # Compute SOt mAh from time-at-voltage data for batteries missing it in ls_pam2
+    load_r_str = archive_fields.get("load_resistance", "")
+    try:
+        load_r = float(load_r_str) if load_r_str else None
+    except (TypeError, ValueError):
+        load_r = None
+    if load_r and load_r > 0:
+        for b in batys:
+            row = battery_params.setdefault(b, {"baty": b})
+            if row.get("sot_mah") is None:
+                if cfg.name == "dm3000":
+                    # DM3000: constant-current discharge; load_r is current in mA.
+                    # SOt(mAh) = I(mA) × total_time(min) / 60
+                    tav_rows = time_at_volt_map.get(b, [])
+                    valid_mins = []
+                    for tr in tav_rows:
+                        raw = tr.get("minutes") or tr.get("MINUTES")
+                        if raw is None:
+                            continue
+                        try:
+                            val = float(raw)
+                            if not math.isnan(val):
+                                valid_mins.append(val)
+                        except (TypeError, ValueError):
+                            pass
+                    if valid_mins:
+                        max_min = max(valid_mins)
+                        if max_min > 0:
+                            row["sot_mah"] = round(load_r * max_min / 60.0, 3)
+                else:
+                    fcv = row.get("fcv")
+                    sot = _compute_sot_mah_from_tav(time_at_volt_map.get(b, []), load_r, fcv)
+                    if sot is not None:
+                        row["sot_mah"] = sot
+
+    try:
+        workbook_bytes = _build_preview_workbook(
+            archive_fields=archive_fields,
+            company=cfg.company_name or "",
+            batys=batys,
+            stats_map=stats_map,
+            time_at_volt_map=time_at_volt_map,
+            battery_params=battery_params,
+            endpoint_cutoff=payload.endpoint_cutoff,
+            report_kind=cfg.name,
+        )
+    except Exception as exc:
+        logger.exception("Error building preview workbook for archname=%s: %s", payload.archname, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}") from exc
+    filename = f"dm2000_preview_{payload.archname}.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── Performance Monitoring Report ──────────────────────────────────────────
+
+# ── Unified battery-time validation ──────────────────────────────────────────
+# Both DM2000 and DM3000 machines record per-channel discharge time in the
+# wide-format ``ls_vtime``/``ls_timev`` tables (one column per battery slot).
+# Like the DMP machine's ``para_singl.recordnum`` for phantom tray slots, the
+# DM2000/DM3000 machine writes NULL, an empty string, ``"--"``, or (in rare
+# firmware variants) ``0.0`` for slots that had no battery loaded.
+#
+# _is_valid_battery_time is the DM2000/DM3000 analogue of the DMP check
+# ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.  It must be used wherever a raw
+# time-at-voltage value is tested to decide whether a battery slot is active.
+# This guarantees the exact same "validate first, then split" algorithm is
+# applied consistently across DMP, DM2000, and DM3000.
+
+
+def _is_valid_battery_time(val: Any) -> bool:
+    """Return True iff a raw battery time-at-voltage value represents real data.
+
+    A valid time value is a finite float that is strictly positive.  Any of the
+    following are treated as phantom/placeholder (no battery loaded):
+
+    * ``None`` / empty string / ``"--"`` / ``"None"`` → no value written
+    * non-numeric text → unparseable, treated as absent
+    * ``NaN`` or ``0.0`` → physically impossible discharge time / not started
+    * negative values → measurement artefact, not real discharge
+
+    This is the DM2000/DM3000 equivalent of the DMP phantom check
+    ``recordnum > _DMP_PHANTOM_RECORDNUM_MAX``.
+    """
+    if val is None:
+        return False
+    s = str(val).strip()
+    if s in ("", "--", "None"):
+        return False
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return False
+    return not math.isnan(f) and f > 0.0
+
+
+def _load_vtime_for_archive(cfg, archname: str) -> dict[int, list[dict]]:
+    """Load ALL time-at-voltage data for an archive in a single ODBC query.
+
+    Returns a dict mapping battery channel number → [{sj, minutes}, ...] where
+    each entry is one voltage threshold row.  Rows where the time column is NULL,
+    empty, or ``"--"`` are omitted so callers see only meaningful data points.
+
+    Results are cached (TTL=``_DM_TAV_CACHE_TTL`` s) so repeated calls for
+    the same archive within the same request — e.g. ``_get_batys_for_archive``
+    followed by ``_get_tav_for_batteries`` — hit the cache instead of querying
+    the database again.
+
+    Schema tried (in order):
+    1. ``ls_vtime cdid-based`` — SELECT dy, time1..time9 WHERE cdid=? (primary)
+    2. ``ls_timev cdid-based`` — SELECT sj, tim_vot1..tim_vot9 WHERE cdid=?
+    """
+    with cfg.tav_cache_lock:
+        cached = cfg.tav_cache.get(archname)
+        if cached is not None:
+            data, ts = cached
+            if time.time() - ts < _DM_TAV_CACHE_TTL:
+                return data
+
+    full_data: dict[int, list[dict]] = {}
+
+    # Try 1: ls_vtime cdid-based — fetch all time columns in one query.
+    # This replaces the original loop that issued one SELECT per battery channel.
+    vtime_cols = ", ".join(f"time{i}" for i in range(1, 10))
+    try:
+        rows = _read_dm_ls(cfg, 
+            f"SELECT dy, {vtime_cols} FROM ls_vtime WHERE cdid = ? ORDER BY dy DESC",
+            (archname,),
+        )
+        if rows:
+            for i in range(1, 10):
+                tav: list[dict] = []
+                for row in rows:
+                    val = row.get(f"time{i}")
+                    if not _is_valid_battery_time(val):
+                        continue
+                    tav.append({"sj": row.get("dy"), "minutes": float(val)})
+                if tav:
+                    full_data[i] = tav
+    except (pyodbc.Error, HTTPException):
+        pass
+
+    if not full_data:
+        # Try 2: ls_timev cdid-based — same single-query bulk approach.
+        timev_cols = ", ".join(f"tim_vot{i}" for i in range(1, 10))
+        try:
+            rows = _read_dm_ls(cfg, 
+                f"SELECT sj, {timev_cols} FROM ls_timev WHERE cdid = ? ORDER BY sj DESC",
+                (archname,),
+            )
+            if rows:
+                for i in range(1, 10):
+                    tav = []
+                    for row in rows:
+                        val = row.get(f"tim_vot{i}")
+                        if not _is_valid_battery_time(val):
+                            continue
+                        tav.append({"sj": row.get("sj"), "minutes": float(val)})
+                    if tav:
+                        full_data[i] = tav
+        except (pyodbc.Error, HTTPException):
+            pass
+
+    # Cache the result (empty dict is also cached to avoid re-querying on
+    # archives whose cdid schemas are absent; legacy archname path is handled
+    # outside this function).
+    with cfg.tav_cache_lock:
+        _cache_set_with_cap(cfg.tav_cache, archname, (full_data, time.time()))
+
+    return full_data
+
+
+def _get_batys_for_archive(cfg, archname: str) -> list[int]:
+    """Return sorted list of battery numbers that have data in the archive.
+
+    Uses ``_load_vtime_for_archive`` so the TAV data is also cached for the
+    subsequent ``_get_tav_for_batteries`` call, eliminating a redundant query.
+    Falls back to ``ls_pam2`` when no vtime data is found for the archive.
+    """
+    full_data = _load_vtime_for_archive(cfg, archname)
+    if full_data:
+        return sorted(b for b, tav in full_data.items() if tav)
+
+    # Fallback: derive from _derive_dm2000_batteries_from_vtime (archname schema)
+    # then from ls_pam2.
+    rows = _derive_dm2000_batteries_from_vtime(cfg, archname)
+    if not rows:
+        try:
+            rows = _read_dm_ls_multi(cfg, [
+                ("SELECT * FROM ls_pam2 WHERE archname = ? ORDER BY baty ASC", (archname,)),
+                ("SELECT * FROM ls_pam2 WHERE cdid = ? ORDER BY gpp ASC", (archname,)),
+            ])
+        except (pyodbc.Error, HTTPException):
+            rows = []
+    result: list[int] = []
+    for row in rows:
+        raw = _dm2000_get_value(row, "baty", "gpp")
+        try:
+            b = int(float(str(raw)))
+            if b > 0:
+                result.append(b)
+        except (TypeError, ValueError):
+            pass
+    return sorted(set(result))
+
+
+def _get_tav_for_batteries(cfg, archname: str, batys: list[int]) -> dict[int, list[dict]]:
+    """Return time-at-voltage data for each battery number in batys.
+
+    Prefers the TAV cache populated by ``_load_vtime_for_archive`` (cdid-based
+    schemas) so that within the same request the ls_vtime table is queried only
+    once per archive instead of once per battery.
+
+    Falls back to the legacy per-battery ``ls_timev archname``-based query when
+    both cdid schemas returned no data (rare, older DM2000 installations).
+    """
+    if not batys:
+        return {}
+
+    # Use cache populated by _load_vtime_for_archive (cdid-based schemas).
+    with cfg.tav_cache_lock:
+        cached = cfg.tav_cache.get(archname)
+        if cached is not None:
+            full_data, ts = cached
+            if time.time() - ts < _DM_TAV_CACHE_TTL:
+                if full_data:
+                    return {b: full_data.get(b, []) for b in batys}
+                # Cache contains empty dict → cdid schemas absent; fall through
+                # to legacy per-battery queries below.
+
+    # Cache miss: load cdid-based data now.
+    full_data = _load_vtime_for_archive(cfg, archname)
+    if full_data:
+        return {b: full_data.get(b, []) for b in batys}
+
+    # Legacy fallback: ls_timev archname-based schema (one query per battery).
+    result: dict[int, list[dict]] = {}
+    for b in batys:
+        tav: list[dict] = []
+        try:
+            tav = _read_dm_ls(cfg, 
+                "SELECT * FROM ls_timev WHERE archname = ? AND baty = ?",
+                (archname, b),
+            )
+        except (pyodbc.Error, HTTPException):
+            pass
+        result[b] = tav
+    return result
+
+
+def _compute_perf_values(
+    endpoint_voltage_str: str,
+    tav_map: dict[int, list[dict]],
+    batys: list[int],
+) -> dict:
+    """Compute average discharge time at endpoint voltage and uniform rate.
+
+    Returns a dict with keys:
+      ``avg_hours``    — average time in hours (None when unavailable)
+      ``avg_minutes``  — average time in minutes (None when unavailable)
+      ``uniform_rate`` — uniform rate % (None when < 2 batteries)
+
+    When *endpoint_voltage_str* is empty or cannot be parsed the function
+    falls back to the **minimum (last) voltage threshold** present in the
+    time-at-voltage data, which corresponds to the final milestone of
+    "The Duration of Series Designated Voltage".
+    """
+    # Parse endpoint voltage, stripping any unit character (e.g. "0.9V" → 0.9)
+    ep: Optional[float] = None
+    raw_ep = str(endpoint_voltage_str or "").strip()
+    if raw_ep:
+        token = raw_ep.split()[0] if raw_ep.split() else raw_ep
+        # Remove all trailing non-numeric chars (e.g. "mV", "Volts" → numeric part)
+        token = re.sub(r"[^0-9.\-]+$", "", token)
+        try:
+            ep = float(token)
+        except (TypeError, ValueError):
+            ep = None
+
+    # Fallback: use the minimum voltage that has at least one battery with valid data.
+    # Using plain min(all_sj) would pick the lowest threshold voltage even when all
+    # batteries have null data there (e.g. a 0.600V row where no battery reached that
+    # voltage), which then causes the tolerance check to fail for batteries whose curve
+    # only goes down to 0.900V.  We therefore find the lowest voltage where at least
+    # one battery actually has a finite, non-negative discharge time recorded.
+    if ep is None:
+        _fb_ep: Optional[float] = None
+        for _fb_b in batys:
+            for _fb_row in (tav_map.get(_fb_b) or []):
+                _fb_sj = _fb_row.get("sj") or _fb_row.get("SJ")
+                _fb_m = _fb_row.get("minutes") or _fb_row.get("MINUTES")
+                try:
+                    _fb_sv = float(_fb_sj)
+                    _fb_mv = float(_fb_m)
+                    if not math.isnan(_fb_mv) and _fb_mv >= 0:
+                        if _fb_ep is None or _fb_sv < _fb_ep:
+                            _fb_ep = _fb_sv
+                except (TypeError, ValueError):
+                    pass
+        if _fb_ep is not None:
+            ep = _fb_ep
+        else:
+            return {
+                "avg_hours": None,
+                "avg_minutes": None,
+                "avg_count": None,
+                "uniform_rate": None,
+                "is_dmp": False,
+            }
+
+    # For each battery find the TAV row whose voltage is closest to ep.
+    # A tolerance of 0.05 V is used to handle minor rounding differences
+    # between the stored endpoint voltage (e.g. "0.9") and the TAV row
+    # voltage thresholds (which may be stored as 0.90, 0.900, etc.).
+    TOLERANCE = 0.05
+    minutes_list: list[float] = []
+    for b in batys:
+        rows = tav_map.get(b) or []
+        best_mins: Optional[float] = None
+        best_diff: float = float("inf")
+        for row in rows:
+            sj = row.get("sj") or row.get("SJ")
+            try:
+                diff = abs(float(sj) - ep)
+                if diff < best_diff:
+                    mins = row.get("minutes") or row.get("MINUTES")
+                    if mins is not None:
+                        f = float(mins)
+                        if not math.isnan(f) and f >= 0:
+                            best_diff = diff
+                            best_mins = f
+            except (TypeError, ValueError):
+                pass
+        if best_mins is not None and best_diff <= TOLERANCE:
+            minutes_list.append(best_mins)
+
+    if not minutes_list:
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": False,
+        }
+
+    avg_min = sum(minutes_list) / len(minutes_list)
+    avg_hours = round(avg_min / 60.0, 3)
+    avg_minutes = round(avg_min, 3)
+
+    uniform_rate: Optional[float] = None
+    if len(minutes_list) >= 2:
+        max_t = max(minutes_list)
+        min_t = min(minutes_list)
+        if avg_min > 0:
+            uniform_rate = round((1.0 - (max_t - min_t) / avg_min) * 100.0, 2)
+
+    return {
+        "avg_hours": avg_hours,
+        "avg_minutes": avg_minutes,
+        "avg_count": None,
+        "uniform_rate": uniform_rate,
+        "is_dmp": False,
+    }
+
+
+def _build_perf_workbook(groups: dict) -> bytes:  # noqa: C901
+    """Build the performance monitoring Excel workbook.
+
+    ``groups`` structure::
+
+        {
+            sheet_name: {                           # e.g. "LR6 501"
+                (date_str, battery_type): {         # e.g. ("2026-01-06", "UD")
+                    fdfs_label: {
+                        "avg_hours": float | None,
+                        "avg_minutes": float | None,
+                        "avg_count": int | None,        # cycle count (DMP only)
+                        "uniform_rate": float | None,
+                        "is_dmp": bool,                 # True for DMP, False for DM2000
+                    },
+                    ...
+                },
+                ...
+            },
+            ...
+        }
+    """
+    from openpyxl import Workbook as _Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter as _gcl
+
+    thin = Side(style="thin")
+    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    fill_title = PatternFill("solid", fgColor="1F4E79")   # dark blue
+    fill_header1 = PatternFill("solid", fgColor="2E75B6")  # blue
+    fill_header2 = PatternFill("solid", fgColor="BDD7EE")  # light blue
+    fill_hp = PatternFill("solid", fgColor="FFF2CC")       # light yellow
+    fill_ud = PatternFill("solid", fgColor="E2EFDA")       # light green
+    fill_udplus = PatternFill("solid", fgColor="FCE4D6")   # light orange
+
+    TYPE_FILLS = {"HP": fill_hp, "UD": fill_ud, "UD+": fill_udplus}
+
+    wb = _Workbook()
+    wb.remove(wb.active)
+
+    # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
+    # then by production-line (chuyen) number within each family.
+    sorted_groups = dict(sorted(groups.items(), key=lambda x: _sheet_model_sort_key(x[0])))
+
+    for sheet_name_key, date_type_map in sorted_groups.items():
+        # Use the first candidate (before any "|") as the sheet title
+        sheet_name = sheet_name_key.split("|")[0].strip()[:_EXCEL_MAX_SHEET_NAME]
+        ws = wb.create_sheet(title=sheet_name)
+
+        # Collect all unique fdfs labels in this sheet (sorted for consistency)
+        all_fdfs: list[str] = []
+        seen_fdfs: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen_fdfs:
+                    seen_fdfs.add(lbl)
+                    all_fdfs.append(lbl)
+        all_fdfs.sort()
+
+        # Column layout: col1=Date, col2=Type, then 2 cols per fdfs
+        num_fdfs = len(all_fdfs)
+        total_cols = 2 + num_fdfs * 2
+
+        def _cell(row, col, value="", bold=False, fill=None, font_color="000000",
+                  align="center", merge_to_col=None, wrap=False, size=10, italic=False):
+            c = ws.cell(row=row, column=col, value=value)
+            c.border = bdr
+            c.font = Font(bold=bold, italic=italic, name="Arial", size=size,
+                          color=font_color)
+            c.alignment = Alignment(horizontal=align, vertical="center",
+                                    wrap_text=wrap)
+            if fill:
+                c.fill = fill
+            if merge_to_col and merge_to_col > col:
+                ws.merge_cells(start_row=row, start_column=col,
+                               end_row=row, end_column=merge_to_col)
+            return c
+
+        # Row 1: Title
+        title_text = f"BẢNG THEO DÕI HIỆU SUẤT PIN - {sheet_name}"
+        _cell(1, 1, title_text, bold=True, fill=fill_title, font_color="FFFFFF",
+              size=13, merge_to_col=total_cols)
+        ws.row_dimensions[1].height = 24
+
+        # Row 2: "Ngày", "Loại", then fdfs headers (each spans 2 cols)
+        _cell(2, 1, "Ngày", bold=True, fill=fill_header1, font_color="FFFFFF", size=11)
+        _cell(2, 2, "Loại", bold=True, fill=fill_header1, font_color="FFFFFF", size=11)
+        for i, lbl in enumerate(all_fdfs):
+            col_start = 3 + i * 2
+            _cell(2, col_start, lbl, bold=True, fill=fill_header1, font_color="FFFFFF",
+                  size=9, wrap=True, merge_to_col=col_start + 1)
+        ws.row_dimensions[2].height = 40
+
+        # Row 3: Sub-headers ("Kết quả (h)", "Tỉ lệ (%)" per fdfs)
+        _cell(3, 1, "", fill=fill_header2)
+        _cell(3, 2, "", fill=fill_header2)
+        for i in range(num_fdfs):
+            col_r = 3 + i * 2
+            col_u = col_r + 1
+            _cell(3, col_r, "Kết quả (h)", bold=True, fill=fill_header2, size=9)
+            _cell(3, col_u, "Tỉ lệ (%)", bold=True, fill=fill_header2, size=9)
+        ws.row_dimensions[3].height = 18
+
+        # Data rows — sort by (date, battery_type)
+        sorted_keys = sorted(date_type_map.keys(), key=lambda k: (k[0], k[1]))
+        for row_key in sorted_keys:
+            row_data = date_type_map[row_key]
+            date_str, btype = row_key
+            excel_row = ws.max_row + 1
+
+            row_fill = TYPE_FILLS.get(btype.upper()) if btype.upper() in TYPE_FILLS else None
+            _cell(excel_row, 1, date_str, fill=row_fill, align="left")
+            _cell(excel_row, 2, btype, fill=row_fill)
+
+            for i, lbl in enumerate(all_fdfs):
+                col_r = 3 + i * 2
+                col_u = col_r + 1
+                entry = row_data.get(lbl, {})
+                avg_h = entry.get("avg_hours")
+                ur = entry.get("uniform_rate")
+                _cell(excel_row, col_r, avg_h if avg_h is not None else "", fill=row_fill)
+                _cell(excel_row, col_u, ur if ur is not None else "", fill=row_fill)
+
+        # Column widths
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 8
+        for i in range(num_fdfs):
+            col_r = 3 + i * 2
+            col_u = col_r + 1
+            ws.column_dimensions[_gcl(col_r)].width = 13
+            ws.column_dimensions[_gcl(col_u)].width = 10
+
+    if not wb.sheetnames:
+        wb.create_sheet("Empty")
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@app.post("/dm3000/perf-report")
+@app.post("/dm2000/perf-report")
+def generate_dm2000_perf_report(request: Request, payload: PerfReportRequest):  # noqa: C901
+    cfg = _resolve_dm_module(request)
+    """Generate a performance monitoring report (Bảng theo dõi hiệu suất pin).
+
+    For each entry the caller specifies the archive name, battery type label
+    (HP/UD/UD+) and optionally a subset of battery channel numbers.  The
+    endpoint computes the average discharge hours at the endpoint voltage and
+    the uniform rate for the chosen batteries, then generates a multi-sheet
+    Excel workbook grouped by sheet_name.
+
+    Sheet name resolution (when not manually specified):
+      1. ``dcxh + trademark``   — "[Type] [Manufacturer]" as required by template
+      2. ``dcxh + serialno``    — legacy / production-line-number format
+      3. ``dcxh + manufacturer``
+      4. ``dcxh`` alone
+    Multiple candidates are stored "|"-joined so the template engine can try
+    each one against the actual workbook sheet names.
+
+    Test-method (fdfs) resolution:
+      Uses the ``fdfs`` column from the archive record.  When that is empty,
+      falls back to ``load_resistance`` so the column-header matching logic
+      (whole-word check on leading token) can still find the right column.
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    # groups[sheet_name][(date_str, battery_type)][fdfs_label] =
+    #   {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}
+    groups: dict[str, dict] = {}
+
+    for entry in payload.entries:
+        _validate_dm2000_archname(entry.archname)
+
+        # Fetch archive metadata
+        try:
+            archive_rows = _read_dm_ls(cfg, 
+                "SELECT * FROM ls_jb_cs WHERE cdid = ?", (entry.archname,)
+            )
+        except pyodbc.Error:
+            archive_rows = []
+        if not archive_rows:
+            try:
+                archive_rows = _read_dm_ls(cfg, 
+                    "SELECT * FROM ls_jb_cs WHERE archname = ?", (entry.archname,)
+                )
+            except pyodbc.Error:
+                archive_rows = []
+        if not archive_rows:
+            raise HTTPException(
+                status_code=404, detail=f"Archive not found: {entry.archname}"
+            )
+        archive = archive_rows[0]
+
+        def _to_date_text(v):
+            if v and hasattr(v, "strftime"):
+                return v.strftime("%Y-%m-%d")
+            return str(v)[:10] if v not in (None, "") else ""
+
+        startdate = _to_date_text(
+            _dm2000_get_value(archive, "startdate", "fdrq")
+        )
+        fdfs_raw = str(_dm2000_get_value(archive, "fdfs") or "").strip()
+        dcxh = str(_dm2000_get_value(archive, "dcxh") or "").strip()
+        serialno_override = entry.override_serial_no if (entry.override_serial_no is not None and entry.override_serial_no != "") else None
+        serialno = str(serialno_override if serialno_override is not None else (_dm2000_get_value(archive, "serialno", "dcph") or "")).strip()
+        trademark = str(_dm2000_get_value(archive, "trademark", "shangbiao", "sb") or "").strip()
+        manufacturer_db = str(_dm2000_get_value(archive, "manufacturer", "changshang", "cs") or "").strip()
+        load_resistance = str(_dm2000_get_value(
+            archive,
+            "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+        ) or "").strip()
+        endpoint_voltage_raw = _dm2000_get_value(
+            archive,
+            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+        )
+        endpoint_voltage_str = str(endpoint_voltage_raw or "").strip()
+
+        # fdfs label used to identify the test-method column in the template.
+        # Priority: stored fdfs → load_resistance (leading-token match) → archname
+        if fdfs_raw:
+            fdfs = fdfs_raw
+        elif load_resistance:
+            # Use load resistance as a partial fdfs key; _perf_fdfs_matches_header
+            # will match it against the column header via whole-word check.
+            fdfs = load_resistance
+        else:
+            fdfs = entry.archname
+
+        # Sheet name candidates in priority order:
+        #   1. dcxh + trademark  ("Type Manufacturer" per user requirement)
+        #   2. dcxh + serialno   (production-line / legacy format)
+        #   3. dcxh + manufacturer_db
+        #   4. dcxh alone
+        # Multiple candidates are stored "|"-joined so _render_perf_template and
+        # _build_perf_workbook can try them in order.
+        if entry.sheet_name:
+            sheet_name = entry.sheet_name.strip()[:_EXCEL_MAX_SHEET_NAME]
+        else:
+            seen_cands: set[str] = set()
+            raw_cands: list[str] = []
+            for suffix in (trademark, serialno, manufacturer_db):
+                if suffix:
+                    cand = f"{dcxh} {suffix}".strip()[:_EXCEL_MAX_SHEET_NAME] if dcxh else suffix[:_EXCEL_MAX_SHEET_NAME]
+                    if cand and cand not in seen_cands:
+                        seen_cands.add(cand)
+                        raw_cands.append(cand)
+            if dcxh and dcxh[:_EXCEL_MAX_SHEET_NAME] not in seen_cands:
+                raw_cands.append(dcxh[:_EXCEL_MAX_SHEET_NAME])
+            if not raw_cands:
+                raw_cands = [entry.archname[:_EXCEL_MAX_SHEET_NAME]]
+            sheet_name = "|".join(raw_cands)
+
+        # Resolve battery list
+        batys = [b for b in entry.batys if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+        if not batys:
+            batys = _get_batys_for_archive(cfg, entry.archname)
+        if not batys:
+            continue
+
+        # Get time-at-voltage data
+        tav_map = _get_tav_for_batteries(cfg, entry.archname, batys)
+
+        # Compute performance values
+        perf = _compute_perf_values(endpoint_voltage_str, tav_map, batys)
+
+        # Insert into groups structure
+        sheet_group = groups.setdefault(sheet_name, {})
+        row_key = (startdate, entry.battery_type)
+        row_data = sheet_group.setdefault(row_key, {})
+        row_data[fdfs] = perf
+
+    if not groups:
+        raise HTTPException(
+            status_code=422, detail="No data could be extracted for any entry"
+        )
+
+    if payload.template_name:
+        template_path = _resolve_dm_perf_template_path(cfg, payload.template_name)
+        workbook_bytes = _render_perf_template(template_path, groups)
+        filename = payload.template_name
+    else:
+        workbook_bytes = _build_perf_workbook(groups)
+        filename = "perf_report.xlsx"
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── DMP Performance Report (Bảng theo dõi hiệu suất pin) ────────────────────
+
+
+def _resolve_dmp_perf_template_path(template_name: str) -> str:
+    if not _is_valid_template_name(template_name):
+        raise HTTPException(status_code=400, detail="Invalid template name")
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    allowed = {
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and _is_valid_template_name(f.name)
+    } if templates_dir.exists() else set()
+    if template_name not in allowed:
+        raise HTTPException(status_code=404, detail=f"Template not found: {template_name}")
+    result = (templates_dir / template_name).resolve()
+    if not str(result).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    return str(result)
+
+
+# NOTE: tray assignment is *purely* derived at runtime from the list of trays
+# that actually contain valid measurement data — no hardcoded `1-4` / `5-8` /
+# `6-9` mappings are allowed anywhere in this module.  Operators may move a
+# battery to any spare tray when one is damaged, so the physical tray index a
+# group lands on is not knowable in advance.  The single source of truth is
+# :func:`_split_active_trays_for_group_count`, which slices the sequentially
+# filtered active-tray list into per-line slots.
+
+# Standard sheet ordering for all reports: LR6 → LR03 → LR61 → 9V → 6LR61 → others
+_SHEET_MODEL_ORDER: list[str] = ["LR6", "LR03", "LR61", "9V", "6LR61"]
+
+
+def _sheet_model_sort_key(sheet_key: str) -> tuple:
+    """Return a sort key that orders sheet keys by model family then chuyền number.
+
+    Family order: LR6 → LR03 → LR61 → 9V → 6LR61 → (unknown, sorted alphabetically).
+    Within each family, numeric chuyền values are sorted ascending.
+    """
+    clean = sheet_key.split("|")[0].strip()
+    parts = clean.split()
+    m = parts[0].upper() if parts else ""
+    fam = _SHEET_MODEL_ORDER.index(m) if m in _SHEET_MODEL_ORDER else len(_SHEET_MODEL_ORDER)
+    try:
+        ch = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, TypeError):
+        ch = 0
+    return (fam, ch, clean)
+
+def _sort_eff_groups_for_tray_assignment(eff_groups: list[dict]) -> list[dict]:
+    """Sort eff_groups by production-line (chuyen) number for correct tray assignment.
+
+    The positional tray split maps group index → active physical trays
+    (for two lines: group 0 → first 4 active trays, group 1 → next 4).  The only way to
+    guarantee the right batteries are read for each production-line group is to
+    always sort groups by **chuyen number** (ascending) before the positional
+    assignment runs:
+
+      • lower chuyen number  →  lower physical tray slots
+      • chuyen 501 → index 0 → first 4 active trays
+      • chuyen 503 → index 1 → next 4 active trays
+
+    Sorting by battery grade (loai) was wrong: a remark like "HP501 UDP503"
+    puts HP on the lower-numbered line, so "UD/UD+ before HP" ordering would
+    swap the tray assignment.
+
+    When every group already has explicit trays the positional assignment is
+    bypassed, so the sort has no effect and is skipped for efficiency.
+    """
+    if any(g.get("trays") for g in eff_groups):
+        return eff_groups
+
+    def _chuyen_sort_key(g: dict) -> tuple:
+        c = str(g.get("chuyen") or "")
+        try:
+            return (0, int(c), c)
+        except (ValueError, TypeError):
+            return (1, 0, c)
+
+    return sorted(eff_groups, key=_chuyen_sort_key)
+
+
+def _split_active_trays_for_group_count(n_groups: int, active_trays: list[int]) -> list[list[int]]:
+    """Split valid-data trays into N production-line slots — pure sequential.
+
+    The DMP machine has up to ``MAX_BATTERY_NUMBER`` (= 9) physical tray
+    positions.  Operators may freely move a battery to any spare tray when
+    one is damaged, so the physical tray index a production line lands on is
+    not knowable in advance.  The only invariant the report can rely on is:
+
+        scan tray 1 → tray ``MAX_BATTERY_NUMBER``,
+        keep only trays that actually contain valid measurement data,
+        then assign those valid trays to production lines in order.
+
+    Fully dynamic — no hardcoded scenarios
+    --------------------------------------
+    The algorithm works for **every** possible tray-failure combination
+    (2^9 = 512 subsets when N = 2).  There is no table of pre-listed cases,
+    no special handling for individual tray indices, and no assumption that
+    any particular tray (1, 5, 9, …) is always present or always missing.
+    Slot ``i`` is always exactly ``active[i*per_line : (i+1)*per_line]``,
+    derived purely from ``len(active_trays)`` and ``n_groups``.
+
+    Caller contract
+    ---------------
+    ``active_trays`` MUST already contain only the trays whose measurement
+    data is valid (this module gets that list from
+    :func:`_get_dmp_active_trays`, which checks each ``para_singl`` row for a
+    non-empty ``cdmc`` value).  Anything else — fixed tray ranges, the old
+    ``1-4`` / ``5-8`` / ``6-9`` fallbacks, "always skip tray 5", "always skip
+    tray 9" — is forbidden and has been removed from this module.
+
+    Slot rules (driven by ``n_groups``, the number of production lines parsed
+    from the bz remark):
+
+      * 1 group  → all valid trays go to that single line.
+      * 2 groups → first 4 valid trays to line 1, next 4 valid trays to
+        line 2.  Any 9th valid tray is dropped automatically because each
+        line only has room for 4 batteries (the 8-tray cap).  When fewer
+        than 8 trays are valid the trailing line(s) are simply shorter
+        (e.g. 7 valid trays → ``[4, 3]``; 4 valid trays → ``[4, 0]``).
+      * 3 groups → first 3, next 3, next 3 over the valid trays.
+      * N > 3 groups → ``len(active) // N`` valid trays per line in order.
+
+    When fewer valid trays exist than a line needs the trailing line(s)
+    receive a shorter list (or an empty list).  Returning empty rather than
+    falling back to a hardcoded tray range is intentional: the caller skips
+    rendering with ``if not trays: continue`` instead of fabricating data on
+    an unmeasured tray.  Whether a partial-line dataset is rejected,
+    flagged, or rendered as-is is a downstream business-rule decision —
+    this helper only expresses the slot geometry.
+
+    Examples (n_groups == 2) — these are illustrations, not the full set of
+    supported cases.  The same first-4/next-4 rule applies to every one of
+    the 512 possible subsets:
+
+      * active = [1, 2, 3, 4, 5, 6, 7, 8, 9]    (all 9 valid)
+        → [[1, 2, 3, 4], [5, 6, 7, 8]]          (tray 9 ignored)
+      * active = [2, 3, 4, 5, 6, 7, 8, 9]       (tray 1 damaged)
+        → [[2, 3, 4, 5], [6, 7, 8, 9]]
+      * active = [1, 3, 4, 5, 6, 7, 8, 9]       (tray 2 damaged)
+        → [[1, 3, 4, 5], [6, 7, 8, 9]]
+      * active = [1, 2, 3, 4, 6, 7, 8, 9]       (tray 5 damaged)
+        → [[1, 2, 3, 4], [6, 7, 8, 9]]
+      * active = [1, 2, 3, 4, 5, 6, 8, 9]       (tray 7 damaged)
+        → [[1, 2, 3, 4], [5, 6, 8, 9]]
+      * active = [1, 3, 4, 6, 7, 8, 9]          (trays 2 & 5 damaged)
+        → [[1, 3, 4, 6], [7, 8, 9]]             (line 2 incomplete: 3 trays)
+      * active = [5, 6, 7, 8]                   (only trays 5-8 valid)
+        → [[5, 6, 7, 8], []]                    (line 2 has no data)
+    """
+    if n_groups <= 0:
+        return []
+
+    active = sorted(
+        {
+            t
+            for t in active_trays
+            if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+        }
+    )
+
+    if n_groups == 1:
+        # Single-line mode: deliver whatever valid trays exist (no per-line
+        # cap — operators choose how many batteries to load).
+        return [active]
+
+    # Multi-line mode: caller has parsed the bz remark and knows there are
+    # ``n_groups`` production lines.  Each line gets ``per_line`` consecutive
+    # valid trays, in scanning order.
+    if n_groups == 2:
+        per_line = 4
+    elif n_groups == 3:
+        per_line = 3
+    else:
+        # Generic N-line case: distribute valid trays evenly.  Guarantee at
+        # least 1 tray per line so a degenerate ``len(active) < n_groups``
+        # configuration still produces ``n_groups`` slots (possibly empty
+        # for the trailing lines).
+        per_line = max(1, len(active) // n_groups)
+
+    return [active[i * per_line : (i + 1) * per_line] for i in range(n_groups)]
+
+
+def _get_dmp_active_trays(batch_id: str) -> list[int]:
+    """Return DMP tray numbers that have real measurement data for a batch.
+
+    The DMP machine always creates a ``para_singl`` row for every tray slot
+    (1–9) at the start of a session, filling ``cdmc`` with the session
+    archive filename even for trays that had no battery loaded.  Those
+    phantom rows carry a tiny ``recordnum`` value (≤ ``_DMP_PHANTOM_RECORDNUM_MAX``)
+    — the machine's default placeholder written before any real discharge
+    starts.  Genuine measurements always accumulate at least 5 records.
+
+    Two-stage validation:
+
+    1. ``cdmc`` must be non-empty (the archive file exists).
+    2. ``recordnum`` must be > ``_DMP_PHANTOM_RECORDNUM_MAX`` when the column
+       is present.  If the column is absent (older schema) the check is
+       skipped and the tray is treated as active (safe fallback).
+    """
+    try:
+        rows = _read_dmpdata(
+            "SELECT baty, cdmc, recordnum FROM para_singl WHERE sid = ?",
+            (batch_id,),
+        )
+    except pyodbc.Error:
+        rows = []
+    active: list[int] = []
+    for row in rows or []:
+        cdmc = _dm2000_get_value(row, "cdmc")
+        if _dmp_is_empty(cdmc):
+            continue
+        # Exclude phantom tray slots: para_singl rows whose recordnum is at or
+        # below the placeholder threshold have no real discharge data.  When
+        # recordnum is missing from the result (older schema or column lookup
+        # failure) we fall back to the cdmc-only check so existing deployments
+        # are not broken.
+        raw_recordnum = _dm2000_get_value(row, "recordnum")
+        if raw_recordnum is not None:
+            try:
+                rnum = int(str(raw_recordnum).split(".")[0])
+                if rnum <= _DMP_PHANTOM_RECORDNUM_MAX:
+                    continue
+            except (TypeError, ValueError):
+                pass  # unparseable recordnum → fall through and include the tray
+        raw_baty = _dm2000_get_value(row, "baty")
+        try:
+            baty = int(raw_baty)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= baty <= MAX_BATTERY_NUMBER:
+            active.append(baty)
+    return sorted(set(active))
+
+
+def _resolve_dmp_canonical_split(
+    batch_bz: Optional[str],
+    entry_clean_remark: str,
+    eff_groups: list[dict],
+    active_trays: list[int],
+    batch_line_idx: Optional[int] = None,
+) -> tuple[list[list[int]], dict[str, int]]:
+    """Compute positional tray split for a single DMP batch.
+
+    The matched batch's ``bz`` field (the operator-edited master record on
+    ``para_pub``) is the canonical and sole source of multi-line structure.
+    The left-to-right order of production-line tokens in ``bz`` is the
+    physical tray order: the DMP machine loads batteries in remark order,
+    so the first token occupies slot 0 (lowest-numbered active trays) and
+    subsequent tokens occupy successive slots.
+
+    When the perf-entry's own ``raw_remark`` is a partial token (e.g.
+    ``"LR6 UD501"`` while the master ``bz`` is ``"LR6 UD501 UD502"``) the
+    positional split follows the master record so each group lands on the
+    correct slot.
+
+    The ``bz`` is always preferred over ``entry_clean_remark`` when lengths
+    are equal (``>=``), ensuring a reversed entry remark does not override
+    the authoritative bz order stored in the database.
+
+    ``scdw`` is not used for routing.  When the caller knows that the
+    current batch is a per-line record (one of several records that share
+    the same composite bz, each covering only one production line), it
+    passes ``batch_line_idx`` — the 0-based position of this batch in the
+    matched batch list.  In that mode ALL of the batch's active trays are
+    assigned to the canonical slot at ``batch_line_idx`` and every other
+    slot is left empty, so the correct production line gets its data and the
+    other lines are skipped cleanly.
+
+    Returns ``(auto_trays, chuyen_to_pos)`` where:
+
+    * ``auto_trays`` is the per-slot tray list.
+    * ``chuyen_to_pos`` maps each canonical chuyen to its slot index, used
+      by :func:`_resolve_dmp_tray_list` to look up the correct trays for
+      each production-line group.
+
+    Explicit per-group ``trays`` configuration in the entry bypasses the
+    positional remap entirely (handled by :func:`_resolve_dmp_tray_list`).
+    """
+    n_eff = len(eff_groups)
+    no_explicit_trays = not any(g.get("trays") for g in eff_groups)
+
+    # Parse groups from both possible canonical sources.
+    entry_groups: list[dict] = (
+        _parse_bz_groups(entry_clean_remark) if entry_clean_remark else []
+    )
+    bz_clean = ""
+    if batch_bz:
+        bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
+    bz_groups: list[dict] = _parse_bz_groups(bz_clean) if bz_clean else []
+
+    # Pick canonical source: prefer batch bz when it has at least as many
+    # groups as the entry remark.  The batch bz is the operator-saved master
+    # record; its left-to-right token order is the authoritative physical
+    # tray order.  Using ``>=`` (not the previous strict ``>``) ensures the
+    # bz is chosen even when both sources have the same group count, so an
+    # entry remark typed in reverse order does not override the bz layout.
+    canonical = bz_groups if len(bz_groups) >= len(entry_groups) else entry_groups
+    canon_n = len(canonical)
+
+    # Build chuyen_to_pos from canonical's **remark order** (not sorted by
+    # chuyen number).  The DMP machine assigns physical tray slots strictly
+    # left-to-right as production lines appear in the bz string:
+    #   "LR6 UD501 UD502"  →  501 = slot 0 (trays 1-4),  502 = slot 1 (trays 5-8)
+    #   "LR6 UD502 UD501"  →  502 = slot 0 (trays 1-4),  501 = slot 1 (trays 5-8)
+    # Sorting by chuyen number was wrong whenever the operator typed lines in
+    # non-ascending order because the sort always placed the lower-numbered
+    # line first regardless of its actual physical tray slot.
+    #
+    # ``max(canon_n, n_eff)`` ensures the split covers at least as many
+    # slots as the effective groups require.  In the normal case
+    # ``canon_n >= n_eff`` (bz canonical preferred), so ``max`` resolves to
+    # ``canon_n``.  When ``n_eff > canon_n`` (entry has more configured
+    # groups than the matched bz parses — unusual, but safe) the split
+    # creates ``n_eff`` slots so every configured group gets a slot; the
+    # extra chuyen_to_pos entries derived from canonical still bind the
+    # known lines to their correct slots and the extra groups fall through
+    # to ``g_idx``-based assignment.
+    chuyen_to_pos: dict[str, int] = {}
+    if canonical and no_explicit_trays:
+        for _i, _rg in enumerate(canonical):
+            _c = str(_rg.get("chuyen", "") or "")
+            if _c and _c not in chuyen_to_pos:
+                chuyen_to_pos[_c] = _i
+
+        if batch_line_idx is not None:
+            # Per-batch positional mode: this batch covers exactly one
+            # canonical line (the one at position batch_line_idx in the bz).
+            # Assign ALL of the batch's active trays to that slot and leave
+            # every other slot empty so the correct chuyen gets its data and
+            # the remaining groups are skipped cleanly.
+            n_total = max(canon_n, n_eff)
+            _active_sorted = sorted(
+                {t for t in active_trays if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER}
+            )
+            auto_trays = [[] for _ in range(n_total)]
+            if batch_line_idx < n_total:
+                auto_trays[batch_line_idx] = _active_sorted
+        else:
+            auto_trays = _split_active_trays_for_group_count(
+                max(canon_n, n_eff), active_trays
+            )
+    else:
+        auto_trays = _split_active_trays_for_group_count(n_eff, active_trays)
+
+    return auto_trays, chuyen_to_pos
+
+
+def _resolve_dmp_canonical_loai_map(
+    batch_bz: Optional[str],
+    entry_clean_remark: str,
+) -> dict[str, str]:
+    """Build the ``chuyen → loai`` map for a single DMP batch.
+
+    The matched batch's ``bz`` is the canonical source: it represents the
+    master record edited by the operator on the DM management page, so any
+    chuyen present in ``bz`` carries an authoritative loai (battery grade)
+    that overrides whatever stale value the perf-entry was originally saved
+    with.  Falls back to ``entry_clean_remark`` for chuyen that appear only
+    in the entry remark (rare but possible when the master record was
+    edited after the perf-entry was saved).
+    """
+    mapping: dict[str, str] = {}
+    if entry_clean_remark:
+        for rg in _parse_bz_groups(entry_clean_remark):
+            if rg.get("chuyen"):
+                mapping[str(rg["chuyen"])] = rg["loai"]
+    if batch_bz:
+        bz_clean, _, _ = _strip_remark_suffixes(str(batch_bz))
+        if bz_clean:
+            for rg in _parse_bz_groups(bz_clean):
+                if rg.get("chuyen"):
+                    # Master record wins over entry-derived value.
+                    mapping[str(rg["chuyen"])] = rg["loai"]
+    return mapping
+
+
+def _resolve_dmp_tray_list(
+    orig_group,  # DmpPerfGroup — may have an explicit .trays list
+    dmp_grp: dict,
+    g_idx: int,
+    auto_trays: list,
+    remark_chuyen_to_pos: dict,
+) -> list:
+    """Return the physical tray list for one DMP group.
+
+    Priority:
+    1. explicit ``orig_group.trays`` (user-configured in the UI)
+    2. positional slot derived from ``remark_chuyen_to_pos`` — maps each
+       chuyen to its physical tray slot based on the bz remark's left-to-right
+       order (the sole source of truth for slot assignment per requirement).
+       For example, bz="LR6 UD502 UD501" → chuyen_to_pos={"502":0,"501":1} so
+       chuyen 502 gets slot 0 (trays 1-4) and chuyen 501 gets slot 1 (trays 5-8).
+    3. plain ``auto_trays[g_idx]`` fallback (used when ``remark_chuyen_to_pos``
+       is empty, e.g. when the bz cannot be parsed; ``g_idx`` reflects the
+       entry's group order which mirrors the bz order since the frontend parses
+       the remark left-to-right)
+    """
+    if getattr(orig_group, "trays", None):
+        return orig_group.trays
+    if remark_chuyen_to_pos:
+        dg_chuyen = str(dmp_grp.get("chuyen") or "").strip()
+        dg_pos = remark_chuyen_to_pos.get(dg_chuyen, g_idx)
+        return auto_trays[dg_pos] if dg_pos < len(auto_trays) else []
+    return auto_trays[g_idx] if g_idx < len(auto_trays) else []
+
+
+# Map special_type → row label for column-A matching in Excel template
+_SPECIAL_TYPE_LABEL: dict[str, str] = {
+    "6020": "6020",
+    "3thang": "3 THÁNG",
+    "6thang": "6 THÁNG",
+}
+
+
+def _dm2000_archive_matches_chuyen(arch_meta: dict, chuyen: str) -> bool:
+    """Return True if *chuyen* (production-line code) is contained in the
+    archive's **remark (bz)**, **archive name**, or **serial number** fields.
+
+    Deliberately does *not* check the manufacturer/cs field (``scdw``): that
+    field often covers a range of production lines (e.g. ``"501-502"``) and
+    would match archives for a completely different line — making the match
+    ambiguous when two archives share the same manufacturer range.
+
+    Handles exact tokens (e.g. ``"501"`` in ``"UDP501"``) and bare numeric
+    tokens (e.g. ``"501"``).  Tokens with a non-digit prefix are stripped
+    (e.g. ``"HP503"`` → ``"503"``).
+
+    Returns ``False`` when *chuyen* is empty so that groups without a
+    production-line filter are never incorrectly matched to all archives.
+    """
+    chuyen = str(chuyen).strip()
+    if not chuyen:
+        return False  # cannot match without a production-line code
+    for field_val in (
+        _dm2000_get_value(arch_meta, "bz", "remark"),           # remark / ghi chú
+        _dm2000_get_value(arch_meta, "archname", "cdmc"),        # archive name
+        _dm2000_get_value(arch_meta, "serialno", "dcph"),        # serial number
+    ):
+        if not field_val:
+            continue
+        for tok in re.split(r"[\-,/\s]+", str(field_val).strip()):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok == chuyen:
+                return True
+            # Strip leading non-digit prefix (e.g. "HP503" → "503", "UDP501" → "501")
+            stripped = re.sub(r"^[^0-9]+", "", tok)
+            if stripped and stripped == chuyen:
+                return True
+    return False
+
+
+def _normalize_dm2000_load_resistance(load_res: str) -> str:
+    """Normalise a raw DM2000 load-resistance value into a template-style label.
+
+    Examples:
+      "10"             -> "10ohm"
+      "3.9"            -> "3.9ohm"
+      "620+10K"        -> "620ohm+10Kohm"
+      "1+0.5K"         -> "1ohm+0.5Kohm"
+      "620ohm+10Kohm"  -> "620ohm+10Kohm"   (already has units)
+      "1000mA"         -> "1000mA"          (different unit; pass through)
+      "(1500mW2s,650mW28s)" -> "(1500mW2s,650mW28s)"  (compound; pass through)
+      ""               -> ""
+
+    DM2000 stores compound resistors (e.g. "620 ohm in series with a 10 kohm
+    bypass for 9V batteries) as a "+"-joined number string.  We append "ohm"
+    to each bare numeric token (with optional decimal and optional ``K``/``k``
+    SI prefix) so the resulting label matches the IEC 60086-2 template entry
+    used by ``_perf_fdfs_matches_template``.
+    """
+    if not load_res:
+        return ""
+    s = load_res.strip()
+    if not s:
+        return ""
+    # Compound expressions wrapped in parentheses (e.g. "(1500mW2s,650mW28s)")
+    # are passed through verbatim — they already encode their own unit info.
+    if "(" in s or ")" in s:
+        return s
+    # Simple bare number, possibly with decimal: append "ohm".
+    if re.match(r"^\d+(\.\d+)?$", s):
+        return f"{s}ohm"
+    # "+"-joined compound resistor string: process each token separately so a
+    # value like "620+10K" becomes "620ohm+10Kohm".
+    if "+" in s:
+        tokens = s.split("+")
+        out_tokens: list[str] = []
+        for tok in tokens:
+            tok_s = tok.strip()
+            if not tok_s:
+                out_tokens.append(tok_s)
+                continue
+            # Bare number with optional decimal and optional K/k suffix
+            # (e.g. "620", "10K", "0.5k", "3.9") gets "ohm" appended.  We also
+            # uppercase the SI prefix so that the rendered label matches the
+            # IEC 60086-2 template style ("10Kohm" rather than "10kohm").
+            if re.match(r"^\d+(\.\d+)?[Kk]?$", tok_s):
+                if tok_s.endswith("k"):
+                    tok_s = tok_s[:-1] + "K"
+                out_tokens.append(f"{tok_s}ohm")
+            else:
+                # Already carries a unit (mA, mW, ohm, …) — keep verbatim.
+                out_tokens.append(tok_s)
+        return "+".join(out_tokens)
+    # Anything else (already has a unit suffix like "mA"/"mW"/"ohm", etc.)
+    return s
+
+
+def _build_dm2000_condition_label(fdfs_raw: str, load_res: str, ep_str: str, fallback: str) -> str:
+    """Build a combined DM2000 condition label like '10ohm 24h/d-0.900V'.
+
+    Uses the same format as DMP's para_pub.jstj (e.g. "(1500mW2s,650mW28s)10T/h,24h/d-1.05V")
+    so that _perf_fdfs_matches_template can correctly locate the label in the IEC
+    60086-2 template and assign the right column order.
+
+      resistance = load_res normalised to template style (see
+                   ``_normalize_dm2000_load_resistance``).  Compound values like
+                   ``620+10K`` become ``620ohm+10Kohm``.
+      prefix     = resistance + fdfs joined by a space (empty parts omitted)
+      suffix     = "-<ep_str>V" when endpoint voltage is present
+    """
+    resistance = _normalize_dm2000_load_resistance(load_res)
+    parts = [p for p in (resistance, fdfs_raw) if p]
+    prefix = " ".join(parts)
+    suffix = f"-{ep_str}V" if ep_str else ""
+    return (prefix + suffix) or fallback
+
+
+def _dmp_compute_group_perf(
+    batch_id: str,
+    trays: list[int],
+    endpoint_voltage: Optional[float],
+) -> dict:
+    """Compute avg discharge hours and uniformity rate for a set of DMP trays.
+
+    Reads vidata for each tray from the cached DMPDATA.mdb (via para_singl to
+    resolve the correct per-batch MDB path), then interpolates the discharge
+    duration to *endpoint_voltage* for each tray.
+
+    Returns a dict with keys ``avg_hours``, ``avg_minutes``, ``avg_count``,
+    ``uniform_rate`` and ``is_dmp`` (always ``True``).
+
+    The ``avg_count`` field is the average number of discharge cycles (1-based
+    index of the first telemetry sample whose voltage drops to/below the
+    endpoint).  This matches the on-screen DMP report (Unit: times) and is the
+    value that should be written to template columns whose header ends with
+    ``(t)`` (number of cycles).  See ``_render_perf_template`` for unit
+    selection details.
+
+    For DMP, ``uniform_rate`` is computed from the cycle counts so that the
+    figure on the report is consistent with the displayed cycle averages.
+    """
+    if not trays:
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": True,
+        }
+
+    # Look up cdmc (MDB path) for each tray from para_singl
+    try:
+        singl_rows = _read_dmpdata(
+            "SELECT baty, cdmc FROM para_singl WHERE sid = ?", (batch_id,)
+        )
+    except pyodbc.Error as exc:
+        logger.warning("_dmp_compute_group_perf: para_singl read failed: %s", exc)
+        singl_rows = []
+
+    cdmc_by_baty: dict[int, str] = {}
+    for row in singl_rows:
+        baty = _dm2000_get_value(row, "baty")
+        cdmc = _dm2000_get_value(row, "cdmc")
+        if baty is not None and cdmc:
+            cdmc_by_baty[int(baty)] = str(cdmc).strip()
+
+    # Compute time-at-endpoint and cycle-count-at-endpoint for each tray.
+    # ``hours_list`` holds the interpolated discharge time (hours) for the
+    # ``(h)``/``(m)`` columns, while ``count_list`` holds the cycle count
+    # (1-based index of the first sample whose voltage drops to/below the
+    # endpoint) used for DMP ``(t)`` columns ("số lần phóng điện").
+    #
+    # Batch telemetry reads by cdmc file: all trays that share the same cdmc
+    # are fetched with ONE shadow copy, avoiding N separate file-copy cycles.
+    cdmc_to_trays: dict[str, list[int]] = {}
+    for tray in trays:
+        cdmc_val = cdmc_by_baty.get(tray)
+        if cdmc_val:
+            cdmc_to_trays.setdefault(cdmc_val, []).append(tray)
+        else:
+            logger.debug(
+                "_dmp_compute_group_perf: no cdmc for tray %d in batch %s", tray, batch_id
+            )
+
+    telemetry_by_tray: dict[int, list[dict]] = {}
+    for cdmc_val, cdmc_trays in cdmc_to_trays.items():
+        batch = _read_telemetry_multi(cdmc_val, cdmc_trays)
+        telemetry_by_tray.update(batch)
+
+    hours_list: list[float] = []
+    count_list: list[int] = []
+    for tray in trays:
+        telemetry = telemetry_by_tray.get(tray, [])
+        if not telemetry:
+            continue
+
+        # Determine effective endpoint voltage
+        ep = endpoint_voltage
+        if ep is None:
+            # Fall back to minimum voltage in this curve
+            volt_vals = [
+                float(r.get("VOLT") or r.get("volt") or 0)
+                for r in telemetry
+                if r.get("VOLT") not in (None, "", "--")
+            ]
+            ep = min(volt_vals) if volt_vals else None
+        if ep is None:
+            continue
+
+        # Interpolate time and capture cycle count when VOLT first crosses ep
+        # from above.  Both metrics use the same time-sorted point list so the
+        # results stay aligned with the on-screen DMP report (which uses the
+        # 1-based index of the crossing sample as its cycle count).
+        points = sorted(
+            [
+                (float(r["TIM"]), float(r.get("VOLT") or r.get("volt") or 0))
+                for r in telemetry
+                if r.get("TIM") not in (None, "", "--")
+                and r.get("VOLT") not in (None, "", "--")
+            ],
+            key=lambda p: p[0],
+        )
+        crossed_h: Optional[float] = None
+        cycle_count: Optional[int] = None
+        for i in range(1, len(points)):
+            t1, v1 = points[i - 1]
+            t2, v2 = points[i]
+            if v1 >= ep and v2 <= ep:
+                if v1 == v2:
+                    crossed_h = t1
+                else:
+                    crossed_h = t1 + (t2 - t1) * (v1 - ep) / (v1 - v2)
+                # Match the frontend ``countAtVoltage`` convention: the cycle
+                # count is the 1-based position of the crossing sample (i + 1
+                # because ``i`` starts at 1 in this loop, indexing the second
+                # point of the pair).
+                cycle_count = i + 1
+                break
+        if crossed_h is not None:
+            hours_list.append(crossed_h)
+        if cycle_count is not None:
+            count_list.append(cycle_count)
+
+    if not hours_list and not count_list:
+        return {
+            "avg_hours": None,
+            "avg_minutes": None,
+            "avg_count": None,
+            "uniform_rate": None,
+            "is_dmp": True,
+        }
+
+    avg_h: Optional[float] = None
+    avg_m: Optional[float] = None
+    if hours_list:
+        avg_h = sum(hours_list) / len(hours_list)
+        avg_m = avg_h * 60.0
+
+    avg_count: Optional[int] = None
+    if count_list:
+        # Round to the nearest integer to match the frontend display
+        # (``Math.round`` of the mean cycle count).
+        avg_count = int(round(sum(count_list) / len(count_list)))
+
+    # Uniform rate for DMP is computed from the cycle counts so the figure
+    # printed in the report stays consistent with the displayed cycle
+    # averages ("số lần phóng điện").  Fall back to the time-based formula
+    # when cycle counts are unavailable.
+    uniform_rate: Optional[float] = None
+    if len(count_list) >= 2:
+        avg_c = sum(count_list) / len(count_list)
+        if avg_c > 0:
+            uniform_rate = round(
+                (1.0 - (max(count_list) - min(count_list)) / avg_c) * 100.0, 2
+            )
+    elif len(hours_list) >= 2 and avg_h and avg_h > 0:
+        uniform_rate = round(
+            (1.0 - (max(hours_list) - min(hours_list)) / avg_h) * 100.0, 2
+        )
+
+    return {
+        "avg_hours": round(avg_h, 3) if avg_h is not None else None,
+        "avg_minutes": round(avg_m, 3) if avg_m is not None else None,
+        "avg_count": avg_count,
+        "uniform_rate": uniform_rate,
+        "is_dmp": True,
+    }
+
+
+@app.get("/dmp-perf-templates")
+def get_dmp_perf_templates():
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    if not templates_dir.exists():
+        return {"templates": []}
+    templates = sorted([
+        f.name for f in templates_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".xlsx"
+    ])
+    return {"templates": templates}
+
+
+@app.post("/dmp-perf-template/upload")
+async def upload_dmp_perf_template(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are accepted")
+    raw_name = Path(file.filename).name
+    stem = raw_name[:-5]
+    sanitized_stem = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)
+    sanitized_stem = re.sub(r'_+', '_', sanitized_stem).strip('_')
+    if not sanitized_stem:
+        sanitized_stem = "template"
+    safe_name = sanitized_stem + ".xlsx"
+    templates_dir = Path(DMP_PERF_TEMPLATES_DIR).resolve()
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    dest = templates_dir / safe_name
+    if not str(dest).startswith(str(templates_dir)):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    contents = await file.read()
+    dest.write_bytes(contents)
+    return {"ok": True, "name": safe_name}
+
+
+def _parse_bz_groups(bz: str) -> list[dict]:
+    """Parse a DM2000 remark like ``'LR6 UDP501 HP503'`` into group tokens.
+
+    Recognises the same token formats as the frontend ``parseRemark`` function:
+
+    * ``UDP{n}``  →  ``{"loai": "UD+", "chuyen": "{n}"}``
+    * ``HP{n}``   →  ``{"loai": "HP",  "chuyen": "{n}"}``
+    * ``UD{n}``   →  ``{"loai": "UD",  "chuyen": "{n}"}``
+
+    Unrecognised tokens (e.g. model names like ``'LR6'``) are silently
+    ignored.  Returns ``[]`` when no group tokens are found.
+    """
+    groups: list[dict] = []
+    tokens = (bz or "").strip().upper().split()
+    for tok in tokens:
+        if re.fullmatch(r"UDP\d*", tok):
+            groups.append({"loai": "UD+", "chuyen": tok[3:]})
+        elif re.fullmatch(r"HP\d*", tok):
+            groups.append({"loai": "HP", "chuyen": tok[2:]})
+        elif re.fullmatch(r"UD\d*", tok):
+            groups.append({"loai": "UD", "chuyen": tok[2:]})
+    return groups
+
+
+def _escape_sql_wildcards(s: str) -> str:
+    """Escape Access SQL LIKE wildcard characters in *s* so they are treated literally.
+
+    The application connects to Access databases using pyodbc with ANSI-92
+    query mode (``ANSI-92``), which means LIKE patterns use ``%`` (any
+    sequence of characters) and ``_`` (any single character) as wildcards —
+    the same convention as standard SQL, NOT the native Access ``*``/``?``
+    wildcards.  Wrapping each in square brackets (``[%]``, ``[_]``) causes
+    Access to match them as literal characters rather than wildcards.
+    """
+    return s.replace("%", "[%]").replace("_", "[_]")
+
+
+def _group_to_bz_token(loai: str, chuyen: str) -> str:
+    """Return the bz search token for a production-line group — inverse of *_parse_bz_groups*.
+
+    This is used to build a ``WHERE bz LIKE "%{token}%"`` query that finds
+    DM2000 archives belonging to a specific group, regardless of whether the
+    archive uses a composite remark (``"LR6 UDP501 HP503"``) or a per-grade
+    remark (``"LR6 UDP501"``).
+
+    Mapping (mirrors *_parse_bz_groups* token patterns):
+
+    * ``loai="UD+"`` → ``"UDP{chuyen}"``   e.g. ``chuyen="501"`` → ``"UDP501"``
+    * ``loai="HP"``  → ``"HP{chuyen}"``    e.g. ``chuyen="503"`` → ``"HP503"``
+    * ``loai="UD"``  → ``"UD{chuyen}"``    e.g. ``chuyen="501"`` → ``"UD501"``
+    * other          → ``chuyen`` (bare number as last resort)
+    """
+    loai_upper = str(loai or "").strip().upper()
+    chuyen_str = str(chuyen or "").strip()
+    if not chuyen_str:
+        return ""
+    if loai_upper == "UD+":
+        return f"UDP{chuyen_str}"
+    if loai_upper == "HP":
+        return f"HP{chuyen_str}"
+    if loai_upper == "UD":
+        return f"UD{chuyen_str}"
+    return chuyen_str
+
+
+def _compute_dmp_perf_groups(  # noqa: C901
+    payload: DmpPerfReportRequest,
+    skip_not_found: bool = False,
+) -> "dict[str, dict]":
+    """Compute performance groups dict from DMP entries.
+
+    Returns ``groups[sheet_key][(row_label, loai)][fdfs_label] =
+    {avg_hours, avg_minutes, avg_count, uniform_rate, is_dmp}``.
+
+    This shared helper is used by both the Excel report generator and the JSON
+    preview endpoint so the computation logic lives in exactly one place.
+    """
+
+    def _to_date(v) -> str:
+        """Normalise an Access date value to ``YYYY-MM-DD``; returns ``""`` on failure.
+
+        Delegates to the module-level ``_parse_access_date`` helper which handles
+        all Access date string formats including ``M/D/YYYY``, ``YYYY/M/D``,
+        ``YYYY-MM-DD``, partial ``YYYY/M`` (→ 1st of month), and range-notation
+        day components like ``"2025/3/15-17"`` (→ start date ``"2025-03-15"``).
+        """
+        return _parse_access_date(v) or ""
+
+    groups: dict[str, dict] = {}
+    # All DM2000-archive reads in this function (both the dm2000_archname direct
+    # path and the DMP→DM2000 fallback path) always target the DM2000 module.
+    cfg = DM2000_MOD
+
+    for entry in payload.entries:
+        if (
+            not (entry.batch_id or "").strip()
+            and not (entry.raw_remark or "").strip()
+            and not entry.dm2000_archname
+        ):
+            continue
+
+        # Resolve operator-input remark suffixes (``Q`` / ``15``) into flags.
+        # ``_clean_remark`` is the remark with those suffixes stripped and is
+        # what every downstream ``bz`` LIKE / equality lookup must use, so the
+        # ~200 existing master-Remark records (which never carry suffixes)
+        # still match.  ``_is_quarter`` and ``_is_15d`` drive the routing
+        # decisions for the LR6 daily-vs-15-day column split and for the
+        # quarterly all-conditions semantics.
+        _clean_remark, _is_quarter, _is_15d = _resolve_entry_flags(entry)
+
+        # ── DM2000 path: when dm2000_archname is set, read from DM2000 instead of DMP ──
+        if entry.dm2000_archname and entry.dm2000_archname.strip():
+            _dm2k_arch = entry.dm2000_archname.strip()
+            try:
+                _validate_dm2000_archname(_dm2k_arch)
+            except HTTPException:
+                logger.warning("_compute_dmp_perf_groups: invalid dm2000_archname: %s", _dm2k_arch)
+                continue
+
+            # ── When explicit groups are configured: DMP-mirroring per-group path ──────────
+            # This mirrors the DMP batch path exactly:
+            #   DMP:    one batch + entry.groups → for each group, pick trays → _dmp_compute_group_perf
+            #   DM2000: for each group → search archive by bz token → determine batys from archive.bz → compute_perf
+            #
+            # Search strategy (applied independently for each group):
+            #   1. Primary:  WHERE bz LIKE "%{token}%"  (DM History style, e.g. "%UDP501%")
+            #      Finds both per-grade archives (bz="LR6 UDP501") and composite archives
+            #      (bz="LR6 UDP501 HP503").
+            #   2. Fallback: composite archname queries (bz exact → bz LIKE → cdid → archname)
+            #      Used when the group token search finds nothing.
+            #
+            # Tray assignment per archive (mirrors DMP's DMP_TRAY_ASSIGNMENT logic):
+            #   • Per-grade archive (bz has only 1 group token) → ALL batteries in the archive
+            #   • Composite archive (bz has 2+ group tokens)    → positional DMP_TRAY_ASSIGNMENT split
+            #   • Explicit trays configured                      → use those directly
+            if entry.groups:
+                _dm2k_model_up = entry.model.strip().upper()
+                _dm2k_no_ch = {"LR61", "9V", "6LR61"}
+                # Re-derive loai from archname remark (mirrors DMP's _remark_loai_by_chuyen)
+                _dm2k_loai_map: dict[str, str] = {
+                    str(_rg["chuyen"]): _rg["loai"]
+                    for _rg in _parse_bz_groups(_dm2k_arch)
+                    if _rg.get("chuyen")
+                }
+                # Build eff_groups with corrected loai; preserve remark-position order
+                # (do NOT sort by chuyen — remark position determines physical tray slot).
+                _dm2k_eff_gs = [
+                    {
+                        "loai": _dm2k_loai_map.get(str(grp.chuyen or "").strip(), grp.loai),
+                        "chuyen": grp.chuyen,
+                        "trays": list(grp.trays or []),
+                    }
+                    for grp in entry.groups
+                ]
+                # Reusable: run four composite archname searches (bz exact → bz LIKE → cdid → archname)
+                def _dm2k_search_archname(key: str) -> list[dict]:
+                    for _sql, _par in [
+                        ("SELECT * FROM ls_jb_cs WHERE bz = ?", (key,)),
+                        ("SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
+                         (f"%{_escape_sql_wildcards(key)}%",)),
+                        ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (key,)),
+                        ("SELECT * FROM ls_jb_cs WHERE archname = ?", (key,)),
+                    ]:
+                        try:
+                            _r = _read_dm2000_ls(_sql, _par)
+                            if _r:
+                                return _r
+                        except pyodbc.Error:
+                            pass
+                    return []
+                _dm2k_seen_pairs: set[tuple] = set()  # (resolved_id, chuyen) dedup guard
+                for _dm2k_eg in _dm2k_eff_gs:
+                    # Step 1: search archives for this group
+                    _eg_token = _group_to_bz_token(_dm2k_eg["loai"], _dm2k_eg["chuyen"])
+                    _eg_rows: list[dict] = []
+                    if _eg_token:
+                        _eg_esc = _escape_sql_wildcards(_eg_token)
+                        try:
+                            _eg_rows = _read_dm2000_ls(
+                                "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_eg_esc}%",)
+                            )
+                        except pyodbc.Error:
+                            pass
+                    if not _eg_rows:
+                        _eg_rows = _dm2k_search_archname(_dm2k_arch)
+                    if not _eg_rows:
+                        if skip_not_found:
+                            continue
+                    for _eg_arch in (_eg_rows or [{}]):
+                        _eg_resolved = (
+                            str(_dm2000_get_value(_eg_arch, "cdid", "archname") or _dm2k_arch).strip()
+                            or _dm2k_arch
+                        )
+                        _eg_dedup = (_eg_resolved, str(_dm2k_eg["chuyen"] or ""))
+                        if _eg_dedup in _dm2k_seen_pairs:
+                            continue
+                        _dm2k_seen_pairs.add(_eg_dedup)
+                        # Step 2: archive metadata (mirrors DMP batch.fdfs / batch.zzdy)
+                        _eg_fdfs_raw = str(_dm2000_get_value(_eg_arch, "fdfs") or "").strip()
+                        _eg_load_res = str(_dm2000_get_value(
+                            _eg_arch, "load_resistance", "fzdz", "fzlkdz", "dw",
+                            "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                        ) or "").strip()
+                        _eg_ep_raw = _dm2000_get_value(
+                            _eg_arch,
+                            "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                            "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                            "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                        )
+                        _eg_ep_str = str(_eg_ep_raw or "").strip()
+                        _eg_fdfs = _build_dm2000_condition_label(
+                            _eg_fdfs_raw, _eg_load_res, _eg_ep_str, _dm2k_arch,
+                        )
+                        _eg_scrq_raw = _dm2000_get_value(_eg_arch, "scrq") or _dm2000_get_value(_eg_arch, "startdate", "fdrq")
+                        _eg_fdrq = _to_date(_eg_scrq_raw) if _eg_scrq_raw else ""
+                        if entry.special_type in _SPECIAL_TYPE_LABEL:
+                            _eg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                        elif _eg_fdrq:
+                            _eg_row_label = _eg_fdrq
+                        elif entry.report_date:
+                            _eg_row_label = _to_date(entry.report_date) or entry.report_date
+                        else:
+                            _eg_row_label = _dm2k_arch
+                        # Step 3: determine batys (mirrors DMP trays logic)
+                        _eg_all_batys = _get_batys_for_archive(cfg, _eg_resolved)
+                        _eg_arch_bz = str(_dm2000_get_value(
+                            _eg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                        ) or "").strip()
+                        _eg_arch_bz_gs = _parse_bz_groups(_eg_arch_bz)
+                        if _dm2k_eg["trays"]:
+                            _eg_batys = [
+                                b for b in _dm2k_eg["trays"]
+                                if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                            ]
+                        elif len(_eg_arch_bz_gs) <= 1:
+                            # Per-grade archive: the archive covers only this one group
+                            _eg_batys = _eg_all_batys
+                        else:
+                            # Composite archive: positional split by remark order.
+                            # Use _parse_bz_groups left-to-right order (remark position),
+                            # not chuyen-number-sorted order, so that remarks like
+                            # "LR6 UD502 HP503 UD501" correctly map 502→[1-3], 503→[4-6], 501→[7-9].
+                            _eg_chuyen_str = str(_dm2k_eg["chuyen"] or "").strip()
+                            _eg_g_idx = next(
+                                (i for i, bg in enumerate(_eg_arch_bz_gs)
+                                 if str(bg.get("chuyen", "")) == _eg_chuyen_str),
+                                0,
+                            )
+                            _eg_split = _split_active_trays_for_group_count(
+                                len(_eg_arch_bz_gs), _eg_all_batys
+                            )
+                            _eg_batys = (
+                                _eg_split[_eg_g_idx] if _eg_g_idx < len(_eg_split) else _eg_all_batys
+                            )
+                        if not _eg_batys:
+                            continue
+                        # Step 4: compute and write (mirrors DMP _dmp_compute_group_perf + groups write)
+                        _eg_tav = _get_tav_for_batteries(cfg, _eg_resolved, _eg_batys)
+                        _eg_perf = _compute_perf_values(_eg_ep_str, _eg_tav, _eg_batys)
+                        _eg_perf["hfsj_unit"] = "hour"
+                        _eg_sheet = (
+                            entry.model.strip()
+                            if _dm2k_model_up in _dm2k_no_ch
+                            else f"{entry.model.strip()} {str(_dm2k_eg['chuyen'] or '').strip()}"
+                        )
+                        _eg_fdfs_labels = _lr6_route_fdfs_labels(
+                            _eg_fdfs or _dm2k_eg["loai"], entry.model,
+                            _merge_bz_suffix_flags(_is_quarter, _is_15d, _eg_arch_bz)[1],
+                        )
+                        _eg_target = groups.setdefault(_eg_sheet, {}).setdefault(
+                            (_eg_row_label, _dm2k_eg["loai"]), {}
+                        )
+                        for _eg_fdfs_label in _eg_fdfs_labels:
+                            _eg_target[_eg_fdfs_label] = _eg_perf
+                continue  # per-group DMP-mirroring done; skip single-archive + DMP paths
+
+            # ── No explicit groups: single-archive path (unchanged) ─────────────────────────
+            # Read archive metadata from ls_jb_cs.
+            # Primary lookup: by bz/remarks column (the remark text the user enters).
+            # Fallback lookups: by cdid then by archname for backward compatibility.
+            _arch_rows: list[dict] = []
+            try:
+                _arch_rows = _read_dm2000_ls(
+                    "SELECT * FROM ls_jb_cs WHERE bz = ?", (_dm2k_arch,)
+                )
+            except pyodbc.Error:
+                pass
+            if not _arch_rows:
+                _bz_escaped = _escape_sql_wildcards(_dm2k_arch)
+                _bz_like = f"%{_bz_escaped}%"
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (_bz_like,)
+                    )
+                except pyodbc.Error:
+                    pass
+            if not _arch_rows:
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_dm2k_arch,)
+                    )
+                except pyodbc.Error:
+                    pass
+            if not _arch_rows:
+                try:
+                    _arch_rows = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE archname = ?", (_dm2k_arch,)
+                    )
+                except pyodbc.Error:
+                    pass
+            if not _arch_rows:
+                if skip_not_found:
+                    continue
+                _arch_meta: dict = {}
+                _dm2k_resolved = _dm2k_arch
+            else:
+                _arch_meta = _arch_rows[0]
+                _dm2k_resolved = (
+                    str(_dm2000_get_value(_arch_meta, "cdid", "archname") or _dm2k_arch).strip()
+                    or _dm2k_arch
+                )
+
+            _dm2k_fdfs_raw = str(_dm2000_get_value(_arch_meta, "fdfs") or "").strip()
+            _dm2k_load_res = str(_dm2000_get_value(
+                _arch_meta, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+            ) or "").strip()
+            _dm2k_ep_raw = _dm2000_get_value(
+                _arch_meta,
+                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+            )
+            _dm2k_ep_str = str(_dm2k_ep_raw or "").strip()
+            _dm2k_fdfs = _build_dm2000_condition_label(
+                _dm2k_fdfs_raw, _dm2k_load_res, _dm2k_ep_str, _dm2k_arch,
+            )
+
+            # Determine row label — prefer scrq (made/sample date) from ls_jb_cs over
+            # startdate/fdrq (start date), falling back to entry.report_date.
+            _dm2k_scrq_raw = _dm2000_get_value(_arch_meta, "scrq") or _dm2000_get_value(_arch_meta, "startdate", "fdrq")
+            _dm2k_fdrq = _to_date(_dm2k_scrq_raw) if _dm2k_scrq_raw else ""
+            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                _dm2k_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+            elif _dm2k_fdrq:
+                _dm2k_row_label = _dm2k_fdrq
+            elif entry.report_date:
+                _dm2k_row_label = _to_date(entry.report_date) or entry.report_date
+            else:
+                _dm2k_row_label = _dm2k_arch
+
+            # Get all active batteries for auto-assignment fallback
+            _dm2k_all_batys = _get_batys_for_archive(cfg, _dm2k_resolved)
+
+            # Auto-detect groups from the archive's bz/remarks when the entry's groups
+            # have no explicit tray assignments.  A bz like "LR6 UDP501 HP503" implies
+            # two groups with positional tray assignment (first 4 active trays for
+            # group-0, next 4 active trays for group-1).  Using all batteries for a
+            # single group would mix channels from different production lines and
+            # produce an incorrect average.
+            _dm2k_bz_raw = str(_dm2000_get_value(
+                _arch_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+            ) or "").strip()
+            _dm2k_bz_groups = _parse_bz_groups(_dm2k_bz_raw)
+            _dm2k_eff_groups = [
+                {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                for grp in entry.groups
+            ]
+            _dm2k_n = len(_dm2k_eff_groups)
+            if len(_dm2k_bz_groups) > len(_dm2k_eff_groups) and not any(g["trays"] for g in _dm2k_eff_groups):
+                # More groups in bz than entry specifies; use bz groups for full coverage
+                _dm2k_eff_groups = [
+                    {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                    for g in _dm2k_bz_groups
+                ]
+                _dm2k_n = len(_dm2k_eff_groups)
+            # Correct loai from the archive's bz field (matched by chuyen) so that
+            # entries whose groups_json was saved with an incorrect loai still
+            # display the right battery grade (e.g. bz "LR6 UDP501 HP503" →
+            # chuyen 501 → "UD+", chuyen 503 → "HP").
+            _dm2k_bz_loai_by_chuyen: dict[str, str] = {
+                str(g["chuyen"]): g["loai"]
+                for g in _dm2k_bz_groups
+                if g.get("chuyen")
+            }
+            if _dm2k_bz_loai_by_chuyen:
+                _dm2k_eff_groups = [
+                    {**eg, "loai": _dm2k_bz_loai_by_chuyen.get(
+                        str(eg.get("chuyen") or "").strip(), eg["loai"]
+                    )}
+                    for eg in _dm2k_eff_groups
+                ]
+            # Sort groups so UD/UD+ comes before HP when no explicit ordering
+            # is available from the archive remark.  This prevents the
+            # positional tray assignment from assigning HP batteries to the
+            # UD+ group (and vice-versa) when groups were stored in the wrong
+            # order (e.g. HP first because the remark said "HP503 UDP501").
+            _dm2k_eff_groups = _sort_eff_groups_for_tray_assignment(
+                _dm2k_eff_groups
+            )
+            _dm2k_auto_trays: list[list[int]] = _split_active_trays_for_group_count(
+                _dm2k_n, _dm2k_all_batys
+            )
+
+            model_upper = entry.model.strip().upper()
+            no_chuyen_models = {"LR61", "9V", "6LR61"}
+
+            # For no-chuyen models (LR61, 9V, 6LR61) with no configured groups,
+            # synthesize one empty group covering all batteries so the entry is
+            # not silently skipped.  Derive the loai from raw_remark when available
+            # so that entries saved without an explicit group still display the
+            # correct battery grade.
+            if not _dm2k_eff_groups and model_upper in no_chuyen_models:
+                _synth_loai_dm2k = ""
+                if _clean_remark:
+                    _synth_parsed_dm2k = _parse_bz_groups(_clean_remark)
+                    if _synth_parsed_dm2k:
+                        _synth_loai_dm2k = _synth_parsed_dm2k[0].get("loai", "")
+                _dm2k_eff_groups = [{"loai": _synth_loai_dm2k, "chuyen": "", "trays": [], "_orig_idx": None}]
+                _dm2k_auto_trays = [_dm2k_all_batys]
+
+            for _dm2k_g_idx, _dm2k_eff_grp in enumerate(_dm2k_eff_groups):
+                _dm2k_grp_trays = _dm2k_eff_grp.get("trays") or []
+                if _dm2k_grp_trays:
+                    _dm2k_batys = [b for b in _dm2k_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                else:
+                    _dm2k_batys = (
+                        _dm2k_auto_trays[_dm2k_g_idx]
+                        if _dm2k_g_idx < len(_dm2k_auto_trays)
+                        else _dm2k_all_batys
+                    )
+                if not _dm2k_batys:
+                    continue
+
+                _dm2k_tav_map = _get_tav_for_batteries(cfg, _dm2k_resolved, _dm2k_batys)
+                _dm2k_perf = _compute_perf_values(_dm2k_ep_str, _dm2k_tav_map, _dm2k_batys)
+                _dm2k_perf["hfsj_unit"] = "hour"
+
+                _dm2k_grp_chuyen = _dm2k_eff_grp.get("chuyen") or ""
+                _dm2k_grp_loai = _dm2k_eff_grp.get("loai") or ""
+                if model_upper in no_chuyen_models:
+                    _dm2k_sheet_key = entry.model.strip()
+                else:
+                    _dm2k_sheet_key = f"{entry.model.strip()} {_dm2k_grp_chuyen.strip()}"
+
+                _dm2k_fdfs_labels = _lr6_route_fdfs_labels(
+                    _dm2k_fdfs or _dm2k_grp_loai, entry.model,
+                    _merge_bz_suffix_flags(_is_quarter, _is_15d, _dm2k_bz_raw)[1],
+                )
+                _dm2k_row_key = (_dm2k_row_label, _dm2k_grp_loai)
+                _dm2k_target = groups.setdefault(_dm2k_sheet_key, {}).setdefault(_dm2k_row_key, {})
+                for _dm2k_fdfs_label in _dm2k_fdfs_labels:
+                    _dm2k_target[_dm2k_fdfs_label] = _dm2k_perf
+
+            continue  # Skip DMP lookup path for this entry
+
+        # Fetch batch metadata from DMPDATA.mdb.  Identify the matching
+        # para_pub row by raw_remark (bz LIKE) first since each test session
+        # has a unique remark; fall back to a literal id lookup so that
+        # entries whose batch_id is the actual para_pub.id still work.
+        batch_rows: list[dict] = []
+        # Priority 1: exact bz match on the original raw_remark (which
+        # preserves any "15"/"Q" suffix).  This prevents the broad LIKE
+        # search from resolving the most-recent composite batch (e.g.
+        # "LR6 UD501 UD502" with a later fdrq) instead of the batch that
+        # specifically matches the entry's own remark (e.g. "LR6 UD501 15").
+        # When multiple DMP batches share the same bz remark (e.g. two
+        # "LR6 UDP501 15" runs on different dates), all of them are returned
+        # and each one gets its own report row — see multi-batch processing
+        # below.
+        _raw_remark_trimmed = (entry.raw_remark or "").strip()
+        if _raw_remark_trimmed:
+            _exact_bz_sql = (
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                " WHERE bz = ? ORDER BY fdrq DESC"
+            )
+            try:
+                _exact_rows = _read_dmpdata(_exact_bz_sql, (_raw_remark_trimmed,))
+                if _exact_rows:
+                    batch_rows = _exact_rows
+            except pyodbc.Error:
+                pass
+        if not batch_rows and _clean_remark:
+            _remark_search = _clean_remark
+            # Leading wildcard tolerates legacy bz values that still carry an
+            # arbitrary prefix (e.g. older "160226 LR6 UD501") while the
+            # trailing wildcard matches composite remarks that include extra
+            # group tokens beyond the entry's own (e.g. bz = "LR6 UD501 UD502"
+            # for an entry whose remark is just "LR6 UD501").
+            # ``_clean_remark`` has any ``Q``/``15`` flag suffixes stripped so
+            # the existing master Remark records (which never carry suffixes)
+            # still match.
+            _bz_pattern = f"%{_remark_search}%"
+            _bz_sql = (
+                "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                " WHERE bz LIKE ? ORDER BY fdrq DESC"
+            )
+            try:
+                batch_rows = _read_dmpdata(_bz_sql, (_bz_pattern,))
+            except pyodbc.Error as exc:
+                logger.warning(
+                    "_compute_dmp_perf_groups: bz LIKE lookup failed '%s': %s",
+                    _remark_search, exc,
+                )
+
+        if not batch_rows and entry.batch_id and entry.batch_id.strip():
+            # Direct id lookup for entries whose batch_id is an actual para_pub.id.
+            try:
+                batch_rows = _read_dmpdata(
+                    "SELECT * FROM para_pub WHERE id = ?", (entry.batch_id,)
+                )
+            except pyodbc.Error:
+                try:
+                    batch_rows = _read_dmpdata(
+                        "SELECT id, dcxh, fdrq, fdfs, hfsj, zzdy, bz FROM para_pub WHERE id = ?",
+                        (entry.batch_id,),
+                    )
+                except pyodbc.Error as exc:
+                    logger.warning("_compute_dmp_perf_groups: batch read failed %s: %s", entry.batch_id, exc)
+
+        # CROSS-TOKEN SIBLING SEARCH: For multi-line entries (n_entry_groups >= 2),
+        # search for per-line sibling batches that may have been stored with the
+        # chuyen tokens in a different bz word order than the entry's raw_remark.
+        #
+        # Failure mode: entry raw_remark = "LR6 UD501 UD502 15" but the UD502
+        # per-line batch was stored with bz = "LR6 UD502 UD501 15" (reversed).
+        # The exact-bz query misses it (wrong order), the LIKE search with
+        # pattern "%LR6 UD501 UD502%" also misses it (reversed substring), and
+        # the old sibling search with batch.bz = "LR6 UD501 UD502 15" only finds
+        # the already-known batches.  Result: per-batch mode has no UD502 batch,
+        # the positional split assigns everything to slot 0, and the LR6 502 row
+        # disappears from the report.
+        #
+        # Fix: search para_pub once per canonical chuyen token (e.g. "%UD501%",
+        # "%UD502%").  Python-side, keep only batches whose bz contains ALL
+        # canonical tokens (so single-line archives don't sneak in) AND whose
+        # fdrq matches the main batch (same DMP session, not a historical daily
+        # batch from a different date that already has its own SQLite entry).
+        _n_entry_groups = len(entry.groups) if entry.groups else 0
+        if batch_rows and _n_entry_groups >= 2 and _clean_remark:
+            _main_fdrq_sib = str(_dm2000_get_value(batch_rows[0], "fdrq") or "").strip()
+            _canon_gs_sib = [g for g in _parse_bz_groups(_clean_remark) if g.get("chuyen")]
+            _canon_tokens_sib = [
+                t for t in (
+                    _group_to_bz_token(g["loai"], g["chuyen"]) for g in _canon_gs_sib
+                ) if t
+            ]
+            if _main_fdrq_sib and len(_canon_tokens_sib) >= 2:
+                _existing_ids_sib: set[str] = {
+                    str(_dm2000_get_value(r, "id") or "") for r in batch_rows
+                }
+                for _sib_tok in _canon_tokens_sib:
+                    try:
+                        _sib_tok_rows = _read_dmpdata(
+                            "SELECT id, dcxh, fdrq, fdfs, jstj, hfsj, zzdy, bz FROM para_pub"
+                            " WHERE bz LIKE ? ORDER BY fdrq DESC",
+                            (f"%{_sib_tok}%",),
+                        )
+                    except pyodbc.Error as exc:
+                        logger.debug(
+                            "_compute_dmp_perf_groups: sibling token search '%s' failed: %s",
+                            _sib_tok, exc,
+                        )
+                        continue
+                    for _sib_ar in _sib_tok_rows or []:
+                        _sib_ar_id = str(_dm2000_get_value(_sib_ar, "id") or "")
+                        if not _sib_ar_id or _sib_ar_id in _existing_ids_sib:
+                            continue
+                        _sib_ar_bz = str(_dm2000_get_value(_sib_ar, "bz") or "")
+                        _sib_ar_fdrq = str(_dm2000_get_value(_sib_ar, "fdrq") or "").strip()
+                        _sib_ar_bz_lower = _sib_ar_bz.lower()
+                        # Only add if same session (fdrq match) and bz contains
+                        # ALL canonical tokens (prevents unrelated single-line
+                        # batches from different sessions being included).
+                        if (
+                            _sib_ar_fdrq == _main_fdrq_sib
+                            and all(
+                                t.lower() in _sib_ar_bz_lower
+                                for t in _canon_tokens_sib
+                            )
+                        ):
+                            batch_rows = list(batch_rows) + [_sib_ar]
+                            _existing_ids_sib.add(_sib_ar_id)
+
+        # Save the entry-level routing flags before the per-batch merge so that
+        # each additional batch in the multi-batch loop can start from a clean
+        # baseline rather than accumulating flags across batches.
+        _iq_entry, _i15d_entry = _is_quarter, _is_15d
+
+        if batch_rows:
+            batch = batch_rows[0]
+            # Resolve the actual para_pub.id so that _dmp_compute_group_perf can look
+            # up the matching para_singl rows (which use sid = para_pub.id).
+            actual_batch_id = str(_dm2000_get_value(batch, "id") or entry.batch_id)
+
+            # para_singl.scrq (made/production date) is the sole source of truth
+            # for report row dates.  para_singl.sid is a TEXT column; always pass
+            # the string value so the Access ODBC driver does a proper text
+            # comparison (an int() cast sends BIGINT and always returns 0 rows).
+            scrq = ""
+
+            def _pick_first_scrq(rows: list) -> str:
+                for _r in rows or []:
+                    _v = _dm2000_get_value(_r, "scrq")
+                    if _v is not None and not _dmp_is_empty(str(_v)):
+                        _d = _to_date(_v)
+                        if _d:
+                            return _d
+                return ""
+
+            try:
+                _singl_scrq_rows = _read_dmpdata(
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (actual_batch_id,)
+                )
+                scrq = _pick_first_scrq(_singl_scrq_rows)
+            except pyodbc.Error as exc:
+                logger.debug(
+                    "_compute_dmp_perf_groups: could not fetch para_singl.scrq for sid=%s: %s",
+                    actual_batch_id, exc,
+                )
+            fdfs = str(_dm2000_get_value(batch, "fdfs") or "").strip()
+            # When para_pub.fdfs is empty (DMP often leaves it blank), fall back to
+            # para_pub.jstj (discharge test condition, e.g. "(1500mW2s,650mW28s)10T/h,24h/d").
+            # This allows _perf_fdfs_matches_header to find the correct column in the
+            # Excel template (e.g. "1500mW,(1500mW2s,650mW28s)10T/h,24h/d") instead of
+            # falling through to the position-based fallback that writes to the first
+            # RESULT column regardless of the actual test condition.
+            if not fdfs:
+                fdfs = str(_dm2000_get_value(batch, "jstj") or "").strip()
+            # The ``bz`` column on the matched para_pub row is the canonical
+            # source of truth for the ``Q`` / ``15`` routing flags (operators
+            # edit it via the DM management page).  Merge any flag suffix on
+            # bz into the entry-derived flags so that adding ``15`` to bz
+            # routes the result to the LR6 15D column, even when the original
+            # perf-entry's raw_remark predates the suffix edit.
+            _batch_bz = str(_dm2000_get_value(batch, "bz") or "").strip()
+            _is_quarter, _is_15d = _merge_bz_suffix_flags(
+                _is_quarter, _is_15d, _batch_bz
+            )
+            # Normalise the unit from para_pub.hfsj ("minute"/"hour"/"times")
+            _hfsj_raw = str(_dm2000_get_value(batch, "hfsj") or "").strip().lower()
+            _HFSJ_TIMES = {"times", "lần", "t", "lan", "count"}
+            _HFSJ_MINUTE = {"minute", "minutes", "phút", "m", "min", "phu"}
+            if _hfsj_raw in _HFSJ_TIMES:
+                hfsj_unit = "times"
+            elif _hfsj_raw in _HFSJ_MINUTE:
+                hfsj_unit = "minute"
+            else:
+                hfsj_unit = "hour"
+            zzdy_raw = str(_dm2000_get_value(batch, "zzdy") or "").strip()
+
+            # Parse endpoint voltage
+            ep_v: Optional[float] = None
+            if zzdy_raw:
+                tok = re.sub(r"[^0-9.\-]+$", "", zzdy_raw.split()[0])
+                try:
+                    ep_v = float(tok)
+                except (TypeError, ValueError):
+                    ep_v = None
+        else:
+            # DMP batch not found. Try DM2000 path using raw_remark as the bz key.
+            # This allows a single remark value (e.g. "LR6 UDP501 HP503") to match
+            # either a DMP batch or a DM2000 archive transparently.
+            if _clean_remark:
+                _fb_remark = _clean_remark
+                # ── DMP-mirroring per-group path for the _fb_ (DMP→DM2000 fallback) ──────
+                # Same structure as the dm2000_archname per-group path above.
+                # For each group: search archives by bz token → determine batys → compute perf.
+                if entry.groups:
+                    _fb_model_up = entry.model.strip().upper()
+                    _fb_no_ch_m = {"LR61", "9V", "6LR61"}
+                    _fb_loai_map: dict[str, str] = {
+                        str(_rg["chuyen"]): _rg["loai"]
+                        for _rg in _parse_bz_groups(_fb_remark)
+                        if _rg.get("chuyen")
+                    }
+                    _fb_eff_gs = [
+                        {
+                            "loai": _fb_loai_map.get(str(grp.chuyen or "").strip(), grp.loai),
+                            "chuyen": grp.chuyen,
+                            "trays": list(grp.trays or []),
+                        }
+                        for grp in entry.groups
+                    ]
+                    # Preserve remark-position order (same as dm2000_archname path above).
+                    def _fb_search_archname(key: str) -> list[dict]:
+                        for _sql2, _par2 in [
+                            ("SELECT * FROM ls_jb_cs WHERE bz = ?", (key,)),
+                            ("SELECT * FROM ls_jb_cs WHERE bz LIKE ?",
+                             (f"%{_escape_sql_wildcards(key)}%",)),
+                            ("SELECT * FROM ls_jb_cs WHERE cdid = ?", (key,)),
+                            ("SELECT * FROM ls_jb_cs WHERE archname = ?", (key,)),
+                        ]:
+                            try:
+                                _r2 = _read_dm2000_ls(_sql2, _par2)
+                                if _r2:
+                                    return _r2
+                            except (pyodbc.Error, HTTPException):
+                                pass
+                        return []
+                    _fb_seen_pairs: set[tuple] = set()
+                    for _fb_eg in _fb_eff_gs:
+                        _feg_token = _group_to_bz_token(_fb_eg["loai"], _fb_eg["chuyen"])
+                        # Search by full remark first (finds only the exact composite archives,
+                        # prevents per-grade archives from overwriting composite-archive data
+                        # when multiple archives from the same date match the token).
+                        _feg_rows: list[dict] = _fb_search_archname(_fb_remark)
+                        if not _feg_rows and _feg_token:
+                            # Token fallback: used when no archive matches the full remark
+                            # (e.g. remark was entered differently in DM2000 vs the UI form).
+                            _feg_esc = _escape_sql_wildcards(_feg_token)
+                            try:
+                                _feg_rows = _read_dm2000_ls(
+                                    "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_feg_esc}%",)
+                                )
+                            except (pyodbc.Error, HTTPException):
+                                pass
+                        if not _feg_rows:
+                            continue
+                        for _feg_arch in _feg_rows:
+                            _feg_resolved = (
+                                str(_dm2000_get_value(_feg_arch, "cdid", "archname") or _fb_remark).strip()
+                                or _fb_remark
+                            )
+                            _feg_dedup = (_feg_resolved, str(_fb_eg["chuyen"] or ""))
+                            if _feg_dedup in _fb_seen_pairs:
+                                continue
+                            _fb_seen_pairs.add(_feg_dedup)
+                            _feg_fdfs_raw = str(_dm2000_get_value(_feg_arch, "fdfs") or "").strip()
+                            _feg_load_res = str(_dm2000_get_value(
+                                _feg_arch, "load_resistance", "fzdz", "fzlkdz", "dw",
+                                "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                            ) or "").strip()
+                            _feg_ep_raw = _dm2000_get_value(
+                                _feg_arch,
+                                "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                                "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                                "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                            )
+                            _feg_ep_str = str(_feg_ep_raw or "").strip()
+                            _feg_fdfs = _build_dm2000_condition_label(
+                                _feg_fdfs_raw, _feg_load_res, _feg_ep_str, _fb_remark,
+                            )
+                            _feg_scrq_raw = _dm2000_get_value(_feg_arch, "scrq") or _dm2000_get_value(_feg_arch, "startdate", "fdrq")
+                            _feg_fdrq = _to_date(_feg_scrq_raw) if _feg_scrq_raw else ""
+                            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                                _feg_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                            elif _feg_fdrq:
+                                _feg_row_label = _feg_fdrq
+                            elif entry.report_date:
+                                _feg_row_label = _to_date(entry.report_date) or entry.report_date
+                            else:
+                                _feg_row_label = _fb_remark
+                            _feg_all_batys = _get_batys_for_archive(cfg, _feg_resolved)
+                            _feg_arch_bz = str(_dm2000_get_value(
+                                _feg_arch, "remarks", "remark", "bz", "note", "memo", "bzh",
+                            ) or "").strip()
+                            _feg_arch_bz_gs = _parse_bz_groups(_feg_arch_bz)
+                            if _fb_eg["trays"]:
+                                _feg_batys = [
+                                    b for b in _fb_eg["trays"]
+                                    if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER
+                                ]
+                            elif len(_feg_arch_bz_gs) <= 1:
+                                _feg_batys = _feg_all_batys
+                            else:
+                                # Composite archive: positional split by remark order.
+                                # _parse_bz_groups already returns groups in left-to-right
+                                # remark order (e.g. "LR6 UD502 HP503 UD501" → [502,503,501]),
+                                # which directly matches the physical tray arrangement.
+                                # Do NOT sort by chuyen number: that would give the wrong
+                                # slot for 3-line remarks where chuyen order ≠ remark order.
+                                _feg_chuyen_str = str(_fb_eg["chuyen"] or "").strip()
+                                _feg_g_idx = next(
+                                    (i for i, bg in enumerate(_feg_arch_bz_gs)
+                                     if str(bg.get("chuyen", "")) == _feg_chuyen_str),
+                                    0,
+                                )
+                                _feg_split = _split_active_trays_for_group_count(
+                                    len(_feg_arch_bz_gs), _feg_all_batys
+                                )
+                                _feg_batys = (
+                                    _feg_split[_feg_g_idx]
+                                    if _feg_g_idx < len(_feg_split) else _feg_all_batys
+                                )
+                            if not _feg_batys:
+                                continue
+                            _feg_tav = _get_tav_for_batteries(cfg, _feg_resolved, _feg_batys)
+                            _feg_perf = _compute_perf_values(_feg_ep_str, _feg_tav, _feg_batys)
+                            _feg_perf["hfsj_unit"] = "hour"
+                            _feg_sheet = (
+                                entry.model.strip()
+                                if _fb_model_up in _fb_no_ch_m
+                                else f"{entry.model.strip()} {str(_fb_eg['chuyen'] or '').strip()}"
+                            )
+                            _feg_fdfs_labels = _lr6_route_fdfs_labels(
+                                _feg_fdfs or _fb_eg["loai"], entry.model,
+                                _merge_bz_suffix_flags(_is_quarter, _is_15d, _feg_arch_bz)[1],
+                            )
+                            _feg_target = groups.setdefault(_feg_sheet, {}).setdefault(
+                                (_feg_row_label, _fb_eg["loai"]), {}
+                            )
+                            for _feg_fdfs_label in _feg_fdfs_labels:
+                                _feg_target[_feg_fdfs_label] = _feg_perf
+                    continue  # _fb_ per-group DMP-mirroring done; skip rest of DMP path
+
+                # No explicit groups: single-archive path
+                _fb_arch_rows2: list[dict] = []
+                try:
+                    _fb_arch_rows2 = _read_dm2000_ls(
+                        "SELECT * FROM ls_jb_cs WHERE bz = ?", (_fb_remark,)
+                    )
+                except (pyodbc.Error, HTTPException):
+                    pass
+                if not _fb_arch_rows2:
+                    _fb_esc2 = _escape_sql_wildcards(_fb_remark)
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE bz LIKE ?", (f"%{_fb_esc2}%",)
+                        )
+                    except (pyodbc.Error, HTTPException):
+                        pass
+                if not _fb_arch_rows2:
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE cdid = ?", (_fb_remark,)
+                        )
+                    except (pyodbc.Error, HTTPException):
+                        pass
+                if not _fb_arch_rows2:
+                    try:
+                        _fb_arch_rows2 = _read_dm2000_ls(
+                            "SELECT * FROM ls_jb_cs WHERE archname = ?", (_fb_remark,)
+                        )
+                    except (pyodbc.Error, HTTPException):
+                        pass
+                if _fb_arch_rows2:
+                    _fb_meta = _fb_arch_rows2[0]
+                    _fb_resolved = (
+                        str(_dm2000_get_value(_fb_meta, "cdid", "archname") or _fb_remark).strip()
+                        or _fb_remark
+                    )
+                    _fb_fdfs_raw = str(_dm2000_get_value(_fb_meta, "fdfs") or "").strip()
+                    _fb_load_res = str(_dm2000_get_value(
+                        _fb_meta, "load_resistance", "fzdz", "fzlkdz", "dw", "fddl", "fdz", "resistance", "load_r", "r_ohm",
+                    ) or "").strip()
+                    _fb_ep_raw = _dm2000_get_value(
+                        _fb_meta,
+                        "endpoint_voltage", "jzdy", "jzdianyi", "jzdv", "jz",
+                        "endpoint_v", "vcut", "cutoffv", "cutoff_v",
+                        "jzdian", "evy", "minv", "cutv", "jz_dy", "zzdy",
+                    )
+                    _fb_ep_str = str(_fb_ep_raw or "").strip()
+                    _fb_fdfs = _build_dm2000_condition_label(
+                        _fb_fdfs_raw, _fb_load_res, _fb_ep_str, _fb_remark,
+                    )
+                    # Determine row label — prefer scrq (made/sample date) over startdate/fdrq.
+                    _fb_scrq_raw = _dm2000_get_value(_fb_meta, "scrq") or _dm2000_get_value(_fb_meta, "startdate", "fdrq")
+                    _fb_fdrq = _to_date(_fb_scrq_raw) if _fb_scrq_raw else ""
+                    if entry.special_type in _SPECIAL_TYPE_LABEL:
+                        _fb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+                    elif _fb_fdrq:
+                        _fb_row_label = _fb_fdrq
+                    elif entry.report_date:
+                        _fb_row_label = _to_date(entry.report_date) or entry.report_date
+                    else:
+                        _fb_row_label = _fb_remark
+                    _fb_all_batys = _get_batys_for_archive(cfg, _fb_resolved)
+                    # Auto-detect groups from the archive's bz/remarks when the entry's
+                    # groups have no explicit tray assignments.  A bz like "LR6 UDP501
+                    # HP503" implies two groups with positional tray assignment (first
+                    # 4 active trays for group-0, next 4 active trays for group-1).
+                    # Using all batteries for a single group would mix channels from
+                    # different production lines.
+                    _fb_bz_raw = str(_dm2000_get_value(
+                        _fb_meta, "remarks", "remark", "bz", "note", "memo", "bzh",
+                    ) or "").strip()
+                    _fb_bz_groups = _parse_bz_groups(_fb_bz_raw)
+                    _fb_eff_groups = [
+                        {"loai": grp.loai, "chuyen": grp.chuyen, "trays": list(grp.trays or [])}
+                        for grp in entry.groups
+                    ]
+                    _fb_n = len(_fb_eff_groups)
+                    if len(_fb_bz_groups) > len(_fb_eff_groups) and not any(g["trays"] for g in _fb_eff_groups):
+                        _fb_eff_groups = [
+                            {"loai": g["loai"], "chuyen": g["chuyen"], "trays": []}
+                            for g in _fb_bz_groups
+                        ]
+                        _fb_n = len(_fb_eff_groups)
+                    # Preserve remark-position order — _parse_bz_groups and parseRemark both
+                    # return groups left-to-right which directly maps to physical tray slots
+                    # (first group → slot 0 → first active chunk, etc.).
+                    # Do NOT call _sort_eff_groups_for_tray_assignment here: sorting by chuyen
+                    # number gives the wrong assignment when chuyen order differs from remark
+                    # order (e.g. "LR6 UD502 HP503 UD501": 502 is physically first).
+                    _fb_auto_trays = _split_active_trays_for_group_count(_fb_n, _fb_all_batys)
+                    _fb_model_upper = entry.model.strip().upper()
+                    _fb_no_chuyen = {"LR61", "9V", "6LR61"}
+                    # For no-chuyen models with no configured groups, synthesize one
+                    # empty group covering all batteries so the entry is not skipped.
+                    if not _fb_eff_groups and _fb_model_upper in _fb_no_chuyen:
+                        _fb_eff_groups = [{"loai": "", "chuyen": "", "trays": [], "_orig_idx": None}]
+                        _fb_n = 1
+                        _fb_auto_trays = [_fb_all_batys]
+                    for _fb_g_idx, _fb_eff_grp in enumerate(_fb_eff_groups):
+                        _fb_grp_trays = _fb_eff_grp.get("trays") or []
+                        if _fb_grp_trays:
+                            _fb_batys = [b for b in _fb_grp_trays if isinstance(b, int) and 1 <= b <= MAX_BATTERY_NUMBER]
+                        else:
+                            _fb_batys = (
+                                _fb_auto_trays[_fb_g_idx]
+                                if _fb_g_idx < len(_fb_auto_trays)
+                                else _fb_all_batys
+                            )
+                        if not _fb_batys:
+                            continue
+                        _fb_tav = _get_tav_for_batteries(cfg, _fb_resolved, _fb_batys)
+                        _fb_perf = _compute_perf_values(_fb_ep_str, _fb_tav, _fb_batys)
+                        _fb_perf["hfsj_unit"] = "hour"
+                        _fb_grp_chuyen = _fb_eff_grp.get("chuyen") or ""
+                        _fb_grp_loai = _fb_eff_grp.get("loai") or ""
+                        _fb_sheet = (
+                            entry.model.strip()
+                            if _fb_model_upper in _fb_no_chuyen
+                            else f"{entry.model.strip()} {_fb_grp_chuyen.strip()}"
+                        )
+                        _fb_fdfs_labels = _lr6_route_fdfs_labels(
+                            _fb_fdfs or _fb_grp_loai, entry.model,
+                            _merge_bz_suffix_flags(_is_quarter, _is_15d, _fb_bz_raw)[1],
+                        )
+                        _fb_target = groups.setdefault(_fb_sheet, {}).setdefault(
+                            (_fb_row_label, _fb_grp_loai), {}
+                        )
+                        for _fb_fdfs_label in _fb_fdfs_labels:
+                            _fb_target[_fb_fdfs_label] = _fb_perf
+                    continue  # DM2000 path handled; skip rest of DMP path
+
+            # Both DMP and DM2000 lookups failed.
+            logger.warning("_compute_dmp_perf_groups: batch not found: %s", entry.batch_id)
+            # For the web JSON preview we skip entries with no data entirely
+            # so that spurious rows (empty date) and spurious columns (grp.loai
+            # used as fdfs_label instead of the real condition string) do not
+            # appear in the table.  The Excel report generator keeps the old
+            # behaviour (empty cells) so users can still review missing batches.
+            if skip_not_found:
+                continue
+            actual_batch_id = entry.batch_id
+            fdfs = ""
+            hfsj_unit = "hour"
+            ep_v = None
+
+            # In the not-found path there is no para_singl data, so use
+            # entry.report_date (operator-entered) as the row label when set.
+            if entry.report_date:
+                scrq = _to_date(entry.report_date) or entry.batch_id
+            else:
+                scrq = entry.batch_id
+
+        # Determine row label (date or special)
+        if entry.special_type in _SPECIAL_TYPE_LABEL:
+            row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+        else:
+            row_label = scrq or entry.batch_id
+
+        # Re-derive authoritative loai by chuyen so that stored entries with
+        # an incorrect or partial loai in groups_json still display the
+        # correct battery grade.  The matched batch's ``bz`` is the canonical
+        # source (master record); ``_clean_remark`` is the fallback when no
+        # batch matched (DMP-not-found path) or when the batch bz only
+        # mentions a subset of the entry's chuyen.
+        _matched_bz = _batch_bz if batch_rows else ""
+        _remark_loai_by_chuyen = _resolve_dmp_canonical_loai_map(
+            _matched_bz, _clean_remark
+        )
+
+        # Build eff_groups in entry order (which mirrors the bz remark order, since
+        # the frontend parses the remark left-to-right to create groups).  The bz
+        # remark order is the sole source of truth for physical tray slot assignment.
+        # Do NOT sort by chuyen number here: the old assumption "lower chuyen →
+        # lower slot" is incorrect — the operator controls which line goes into which
+        # physical slot by writing the remark in the desired order.
+        # _resolve_dmp_canonical_split builds chuyen_to_pos from the bz remark and
+        # _resolve_dmp_tray_list uses that map to look up the correct slot for every
+        # chuyen regardless of their numeric values.
+        _dmp_eff_groups = [
+            {
+                "loai": _remark_loai_by_chuyen.get(str(grp.chuyen or "").strip(), grp.loai),
+                "chuyen": grp.chuyen,
+                "trays": list(grp.trays or []),
+                "_orig_idx": i,
+            }
+            for i, grp in enumerate(entry.groups)
+        ]
+        n_groups = len(_dmp_eff_groups)
+        # Active trays MUST come from para_singl rows that actually contain
+        # valid measurement data.  When the batch lookup returned nothing
+        # there is no measurement to report, so the active list stays empty
+        # and downstream slot assignment yields empty groups (the loop below
+        # then skips rendering via ``if not trays: continue``).  Falling back
+        # to "all 9 trays" here would resurrect the legacy fixed-tray
+        # behaviour that the rewrite is meant to eliminate.
+        _dmp_active_trays = (
+            _get_dmp_active_trays(actual_batch_id) if batch_rows else []
+        )
+        # Canonical positional split: the matched batch's bz is the master
+        # record and dictates the multi-line structure.  Remark (bz) order
+        # is the sole source of truth for slot assignment.
+        #
+        # Per-batch positional mode: when (a) the bz describes multiple
+        # canonical lines, (b) len(batch_rows) >= _n_canonical, AND (c) all
+        # matched batches share the same bz value, the system has one separate
+        # para_pub record per production line (the DMP machine stores lines
+        # individually even though the operator typed a composite bz such as
+        # "LR6 UD501 UD502 15").  In that mode each batch is assigned to its
+        # corresponding canonical line by position:
+        # batch_rows[0] → line 0 (first in bz), batch_rows[1] → line 1, …
+        # The "same bz" guard prevents false activation when extra batches
+        # come from a LIKE fallback and carry different bz values (different
+        # sessions with different multi-line shapes must be split normally).
+        # This is determined purely from the bz order — scdw is not used.
+        _bz_for_n = _matched_bz or _clean_remark
+        _bz_for_n_stripped, _, _ = _strip_remark_suffixes(_bz_for_n)
+        _n_canonical = len(
+            [g for g in _parse_bz_groups(_bz_for_n_stripped) if g.get("chuyen")]
+        )
+        # _all_same_bz: True when all extra batches share the same canonical
+        # production-line set as the main batch (ignoring Q/15 suffix differences
+        # and any leading date prefixes that older bz values may carry).  Using
+        # chuyen-set equality instead of exact string match prevents LIKE-fallback
+        # batches that differ only in a Q/15 suffix (e.g. "LR6 UD501 UD502" vs
+        # "LR6 UD501 UD502 15") from disabling per-batch mode and causing the
+        # second production line to silently lose all its data.
+        def _bz_chuyen_key(bz_val: str) -> frozenset:
+            _c, _, _ = _strip_remark_suffixes(str(bz_val or "").strip())
+            return frozenset(
+                str(g.get("chuyen", ""))
+                for g in _parse_bz_groups(_c)
+                if g.get("chuyen")
+            )
+        _matched_bz_chuyens = _bz_chuyen_key(_matched_bz)
+        _all_same_bz = len(batch_rows) < 2 or (
+            bool(_matched_bz_chuyens) and all(
+                _bz_chuyen_key(str(_dm2000_get_value(_b, "bz") or "")) == _matched_bz_chuyens
+                for _b in batch_rows[1:]
+            )
+        )
+        _per_batch_mode = (
+            _n_canonical > 1
+            and len(batch_rows) >= _n_canonical
+            and _all_same_bz
+        )
+        # Pre-initialise so the extra-batches loop can reference these
+        # variables regardless of which branch below is taken.
+        _pb_all_active: dict[str, list[int]] = {}
+        _pb_split: list[list[int]] = []
+        _main_batch_line_idx: Optional[int] = None
+
+        # In per-batch mode, assign each batch to its canonical slot based on
+        # the physical tray positions of its batteries rather than its index in
+        # batch_rows.  The database can return batches in any order (e.g. 502's
+        # batch before 501's batch because of Access MDB insertion order), so
+        # the old positional assumption "batch_rows[0] → slot 0, …" is wrong.
+        #
+        # Instead: collect all active trays from all matched batches, compute
+        # the combined sequential split (remark-order slots), then identify
+        # which slot exclusively contains each batch's active trays.  A batch
+        # whose trays are a subset of split[s] is assigned to canonical slot s.
+        # When a batch's trays span multiple slots it is treated as a combined
+        # batch and receives the normal positional split (batch_line_idx=None).
+        if _per_batch_mode:
+            _pb_all_active = {actual_batch_id: _dmp_active_trays}
+            for _pb_idx, _pb in enumerate(batch_rows[1:], start=1):
+                _pb_id = str(_dm2000_get_value(_pb, "id") or "")
+                # Use an index-based synthetic key when the batch has no usable
+                # id so it gets its own entry and never borrows trays from a
+                # different batch through an accidental id collision (e.g. when
+                # both batches have null id and would otherwise both resolve to
+                # entry.batch_id as the fallback key).
+                _pb_key = _pb_id if _pb_id else f"__pb_idx_{_pb_idx}__"
+                if _pb_key not in _pb_all_active:
+                    _pb_all_active[_pb_key] = _get_dmp_active_trays(_pb_id) or []
+            _pb_combined = sorted({
+                t for ts in _pb_all_active.values()
+                for t in ts if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+            })
+            _pb_split = _split_active_trays_for_group_count(_n_canonical, _pb_combined)
+
+            def _pb_canonical_slot(trays: list[int]) -> Optional[int]:
+                tray_set = {
+                    t for t in trays if isinstance(t, int) and 1 <= t <= MAX_BATTERY_NUMBER
+                }
+                if not tray_set:
+                    return None
+                for _s, _st in enumerate(_pb_split):
+                    if tray_set <= set(_st):
+                        return _s
+                return None
+
+            _main_batch_line_idx = _pb_canonical_slot(_dmp_active_trays)
+        auto_trays, _remark_chuyen_to_pos = _resolve_dmp_canonical_split(
+            _matched_bz, _clean_remark, _dmp_eff_groups, _dmp_active_trays,
+            batch_line_idx=_main_batch_line_idx,
+        )
+
+        # Hoist model/no-chuyen check outside the loop so the synthetic-group
+        # path (LR61/9V with no configured groups) shares the same variable.
+        _dmp_model_upper = entry.model.strip().upper()
+        _dmp_no_chuyen_models = {"LR61", "9V", "6LR61"}
+        # For no-chuyen models with no configured groups, synthesize one empty
+        # group covering all batteries so the entry is not silently skipped.
+        # Derive the loai from raw_remark when available so that entries saved
+        # without an explicit group still display the correct battery grade.
+        if not _dmp_eff_groups and _dmp_model_upper in _dmp_no_chuyen_models:
+            _synth_loai = ""
+            if _clean_remark:
+                _synth_parsed = _parse_bz_groups(_clean_remark)
+                if _synth_parsed:
+                    _synth_loai = _synth_parsed[0].get("loai", "")
+            _dmp_eff_groups = [{"loai": _synth_loai, "chuyen": "", "trays": [], "_orig_idx": None}]
+            n_groups = 1
+            _remark_chuyen_to_pos = {}
+            # Single-line synth group: use ONLY the trays that actually
+            # contain valid measurement data — never default to "all 9
+            # trays".  When the batch has no measured trays the group falls
+            # through ``if not trays: continue`` below and the entry is
+            # skipped cleanly.
+            auto_trays = _split_active_trays_for_group_count(1, _dmp_active_trays)
+
+        for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
+            _orig_idx = _dmp_grp.get("_orig_idx")
+            if _orig_idx is not None:
+                orig_grp = entry.groups[_orig_idx]
+                trays = _resolve_dmp_tray_list(
+                    orig_grp, _dmp_grp, g_idx, auto_trays, _remark_chuyen_to_pos
+                )
+            else:
+                # Synthetic group for no-chuyen model with no configured
+                # groups: trays come exclusively from the active-tray slot
+                # built above.  No hardcoded fallback.
+                trays = auto_trays[g_idx] if g_idx < len(auto_trays) else []
+            if not trays:
+                continue
+
+            # Compute performance values for this group's trays using the resolved
+            # para_pub.id (actual_batch_id) so that the para_singl lookup succeeds.
+            perf = _dmp_compute_group_perf(actual_batch_id, trays, ep_v)
+            perf["hfsj_unit"] = hfsj_unit
+
+            # Determine sheet name
+            model_upper = _dmp_model_upper
+            # Models without production-line requirement use only the model name
+            no_chuyen_models = _dmp_no_chuyen_models
+            if model_upper in no_chuyen_models:
+                sheet_key = entry.model.strip()
+            else:
+                sheet_key = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
+
+            # Use loai from raw_remark (re-parsed) when available so that entries
+            # whose groups_json was saved with an incorrect loai are displayed with
+            # the correct battery grade derived from the remark token (UDP→UD+,
+            # HP→HP, UD→UD) matched by chuyen.
+            effective_loai = _dmp_grp["loai"]
+
+            # fdfs label(s) for column matching, with LR6 daily/15-day routing
+            # applied for the special ``(1500mW2s,650mW28s)10T/h,24h/d`` case.
+            # 15-day measurements emit ONLY the 15D label, so the row
+            # appears exclusively in the dedicated 15-day column on the
+            # right (it does not also overwrite the daily column).
+            fdfs_labels = _lr6_route_fdfs_labels(
+                fdfs if fdfs else effective_loai, entry.model, _is_15d
+            )
+
+            row_key = (row_label, effective_loai)
+            _row_target = groups.setdefault(sheet_key, {}).setdefault(row_key, {})
+            for fdfs_label in fdfs_labels:
+                _row_target[fdfs_label] = perf
+
+        # Process every additional matched DMP batch so repeated runs with the
+        # same remark (including LIKE fallback matches where bz lacks a "15"/"Q"
+        # suffix) each produce their own report row.
+        for _xb_abs_idx, _xb in enumerate(batch_rows[1:], start=1):
+            _is_quarter, _is_15d = _iq_entry, _i15d_entry
+            _xb_raw_id = str(_dm2000_get_value(_xb, "id") or "")
+            # Unique key matching the one used in _pb_all_active setup: use the
+            # actual id when available, otherwise an index-based synthetic key.
+            # This prevents a null-id extra batch from accidentally resolving to
+            # entry.batch_id (= actual_batch_id) and borrowing the MAIN batch's
+            # tray list from _pb_all_active, which would cause both batches to
+            # route to slot 0 and leave the second production line empty.
+            _xb_pb_key = _xb_raw_id if _xb_raw_id else f"__pb_idx_{_xb_abs_idx}__"
+            # For para_singl scrq/scdw lookups use the actual id when set,
+            # otherwise fall back to entry.batch_id as a best-effort last resort.
+            _xb_id = _xb_raw_id or str(entry.batch_id or "")
+            # Re-use pre-fetched trays when in per-batch mode (avoids a redundant
+            # DB call; trays were already fetched during _pb_all_active setup above).
+            # Active trays come straight from the active-tray filter for
+            # this extra batch.  When the batch has no measured trays the
+            # downstream split returns empty slots and the per-group loop
+            # below skips rendering — never fall back to "all 9 trays".
+            _xb_active_trays = (
+                _pb_all_active.get(_xb_pb_key)
+                if _per_batch_mode and _xb_pb_key in _pb_all_active
+                else None
+            ) or _get_dmp_active_trays(_xb_raw_id) or []
+            _xb_bz = str(_dm2000_get_value(_xb, "bz") or "").strip()
+            # Tray-slot-based per-batch assignment: find which canonical slot
+            # this batch's active trays exclusively belong to.  Uses the same
+            # _pb_canonical_slot helper and combined split computed above so
+            # assignment is stable regardless of database row order.
+            _xb_batch_line_idx: Optional[int] = (
+                _pb_canonical_slot(_xb_active_trays) if _per_batch_mode else None
+            )
+            _xb_auto_trays, _xb_chuyen_to_pos = _resolve_dmp_canonical_split(
+                _xb_bz, _clean_remark, _dmp_eff_groups, _xb_active_trays,
+                batch_line_idx=_xb_batch_line_idx,
+            )
+
+            # Resolve made date (para_singl.scrq) for the extra batch.
+            # scrq is the sole source of truth for report row dates — no fdrq fallback.
+            _xb_scrq = ""
+            # Use string id for the ACCESS TEXT sid column.
+            try:
+                _xb_scrq_rows = _read_dmpdata(
+                    "SELECT scrq FROM para_singl WHERE sid = ?", (_xb_id,)
+                )
+                for _xb_r in _xb_scrq_rows or []:
+                    _xv = _dm2000_get_value(_xb_r, "scrq")
+                    if _xv is not None and not _dmp_is_empty(str(_xv)):
+                        _d = _to_date(_xv)
+                        if _d:
+                            _xb_scrq = _d
+                            break
+            except pyodbc.Error:
+                pass
+
+            _xb_fdfs = str(_dm2000_get_value(_xb, "fdfs") or "").strip()
+            if not _xb_fdfs:
+                _xb_fdfs = str(_dm2000_get_value(_xb, "jstj") or "").strip()
+            _is_quarter, _is_15d = _merge_bz_suffix_flags(_is_quarter, _is_15d, _xb_bz)
+            _xb_hfsj_raw = str(_dm2000_get_value(_xb, "hfsj") or "").strip().lower()
+            if _xb_hfsj_raw in {"times", "lần", "t", "lan", "count"}:
+                _xb_hfsj_unit = "times"
+            elif _xb_hfsj_raw in {"minute", "minutes", "phút", "m", "min", "phu"}:
+                _xb_hfsj_unit = "minute"
+            else:
+                _xb_hfsj_unit = "hour"
+            _xb_zzdy_raw = str(_dm2000_get_value(_xb, "zzdy") or "").strip()
+            _xb_ep_v: Optional[float] = None
+            if _xb_zzdy_raw:
+                _xb_tok = re.sub(r"[^0-9.\-]+$", "", _xb_zzdy_raw.split()[0])
+                try:
+                    _xb_ep_v = float(_xb_tok)
+                except (TypeError, ValueError):
+                    _xb_ep_v = None
+
+            if entry.special_type in _SPECIAL_TYPE_LABEL:
+                _xb_row_label = _SPECIAL_TYPE_LABEL[entry.special_type]
+            else:
+                _xb_row_label = _xb_scrq or entry.batch_id
+
+            for g_idx, _dmp_grp in enumerate(_dmp_eff_groups):
+                _orig_idx = _dmp_grp.get("_orig_idx")
+                if _orig_idx is not None:
+                    orig_grp = entry.groups[_orig_idx]
+                    _xb_trays = _resolve_dmp_tray_list(
+                        orig_grp, _dmp_grp, g_idx, _xb_auto_trays, _xb_chuyen_to_pos
+                    )
+                else:
+                    _xb_trays = _xb_auto_trays[g_idx] if g_idx < len(_xb_auto_trays) else []
+                if not _xb_trays:
+                    continue
+                _xb_perf = _dmp_compute_group_perf(_xb_id, _xb_trays, _xb_ep_v)
+                _xb_perf["hfsj_unit"] = _xb_hfsj_unit
+                if _dmp_model_upper in _dmp_no_chuyen_models:
+                    _xb_sheet = entry.model.strip()
+                else:
+                    _xb_sheet = f"{entry.model.strip()} {_dmp_grp['chuyen'].strip()}"
+                _xb_eff_loai = _dmp_grp["loai"]
+                _xb_fdfs_labels = _lr6_route_fdfs_labels(
+                    _xb_fdfs if _xb_fdfs else _xb_eff_loai, entry.model, _is_15d
+                )
+                _xb_row_key = (_xb_row_label, _xb_eff_loai)
+                _xb_target = groups.setdefault(_xb_sheet, {}).setdefault(_xb_row_key, {})
+                for _xb_ffl in _xb_fdfs_labels:
+                    _xb_target[_xb_ffl] = _xb_perf
+
+    return groups
+
+
+@app.post("/dmp-perf-report/generate")
+def generate_dmp_perf_report(payload: DmpPerfReportRequest):
+    """Generate a DMP battery performance report (Bảng theo dõi hiệu suất pin).
+
+    Each entry maps a DMP batch (batch_id) to one or more production-line groups.
+    The result is written into the appropriate sheet/row/column of the Excel template.
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    groups = _compute_dmp_perf_groups(payload)
+
+    if not groups:
+        raise HTTPException(
+            status_code=422, detail="No data could be extracted for any entry"
+        )
+
+    if not payload.template_name:
+        raise HTTPException(
+            status_code=400,
+            detail="template_name is required for DMP perf report generation"
+        )
+
+    template_path = _resolve_dmp_perf_template_path(payload.template_name)
+    workbook_bytes = _render_perf_template(template_path, groups)
+    filename = payload.template_name
+    return StreamingResponse(
+        BytesIO(workbook_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/dmp-perf-data")
+def get_dmp_perf_data(payload: DmpPerfReportRequest):
+    """Return DMP performance data as JSON for web visualization.
+
+    Same computation as ``/dmp-perf-report/generate`` but returns JSON instead
+    of filling an Excel template, enabling the web UI to render an interactive
+    preview table.
+
+    Response shape::
+
+        {
+          "sheets": {
+            "LR6 501": {
+              "rows": [
+                {
+                  "date": "2026-01-01",
+                  "loai": "UD",
+                  "conditions": {
+                    "<fdfs_label>": {
+                      "avg_hours": 25.3,
+                      "avg_minutes": 1518.0,
+                      "avg_count": 12,
+                      "uniform_rate": 96.5
+                    }
+                  }
+                }
+              ],
+              "conditions": ["<fdfs_label1>", ...]
+            }
+          }
+        }
+    """
+    if not payload.entries:
+        raise HTTPException(status_code=400, detail="entries must not be empty")
+
+    # skip_not_found=True: entries with no matching DMP data are omitted from the
+    # web preview so the table does not show spurious empty rows or columns whose
+    # header is the battery grade (e.g. "UD+") rather than the real test condition.
+    try:
+        groups = _compute_dmp_perf_groups(payload, skip_not_found=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("get_dmp_perf_data: unexpected error computing perf groups")
+        raise HTTPException(
+            status_code=500, detail=f"Error computing performance data: {exc}"
+        ) from exc
+
+    sheets: dict = {}
+    for sheet_key, date_type_map in groups.items():
+        # Collect all unique condition labels for this sheet (preserving insertion order)
+        all_conditions: list[str] = []
+        seen: set[str] = set()
+        for row_data in date_type_map.values():
+            for lbl in row_data:
+                if lbl not in seen:
+                    seen.add(lbl)
+                    all_conditions.append(lbl)
+
+        # Build a per-sheet units dict: fdfs_label → "hour"|"minute"|"times".
+        # Built before sorting so unit type can be used as a primary sort key.
+        # Take the first non-null value seen across all rows for each condition.
+        units: dict[str, str] = {}
+        for row_data in date_type_map.values():
+            for lbl, perf in row_data.items():
+                if lbl not in units and perf.get("hfsj_unit"):
+                    units[lbl] = perf["hfsj_unit"]
+
+        # Sort conditions: use IEC template order for the detected battery family as
+        # the primary sort key.  Conditions not found in the template fall back to the
+        # legacy unit-type ordering (times → minute → hour) so that reports for
+        # non-standard battery types are still reasonable.
+        # Battery type is the first whitespace-separated token of the sheet key
+        # (e.g. "LR6" from "LR6 501"; "|" candidates are stripped first).
+        _sheet_key_clean = sheet_key.split("|")[0].strip()
+        _battery_type = _sheet_key_clean.split()[0] if _sheet_key_clean else ""
+        _template = _TEMPLATE_CONDITION_ORDER.get(_battery_type.upper(), [])
+        _cond_first: dict[str, str] = {}
+        for (row_lbl, _), rd in date_type_map.items():
+            for lbl in rd:
+                if lbl not in _cond_first or row_lbl < _cond_first[lbl]:
+                    _cond_first[lbl] = row_lbl
+        _UNIT_ORDER = {"times": 0, "minute": 1, "hour": 2}
+        _tmpl_len = len(_template)
+
+        def _sort_key(c: str) -> tuple:
+            tmpl_pos = _template_condition_sort_key(c, _battery_type)[0]
+            if tmpl_pos < _tmpl_len:
+                # Found in template: primary key is template position, tie-break by label.
+                # The unit-order slot is kept for tuple-length parity with the fallback branch.
+                return (0, tmpl_pos, _UNIT_ORDER.get(units.get(c, "hour"), 2), c)
+            # Not in template: sort after template conditions using unit-type then first-date.
+            # The constant 0 in slot 2 is a parity placeholder (same tuple length as above).
+            return (
+                1,
+                _UNIT_ORDER.get(units.get(c, "hour"), 2),
+                0,  # parity placeholder — slot unused when group=1
+                _cond_first.get(c, "9999-99-99"),
+            )
+
+        all_conditions.sort(key=_sort_key)
+
+        # Build frequency-group map: condition label → "everyday"|"everyweek"|"everymonth"|"other"
+        freq_groups: dict[str, str] = {
+            c: _get_condition_freq_group(c, _battery_type)
+            for c in all_conditions
+        }
+
+        rows = []
+        for (row_label, loai), conditions in sorted(date_type_map.items(), key=lambda x: x[0]):
+            rows.append({
+                "date": row_label,
+                "loai": loai,
+                "conditions": {
+                    fdfs_label: {
+                        "avg_hours": perf.get("avg_hours"),
+                        "avg_minutes": perf.get("avg_minutes"),
+                        "avg_count": perf.get("avg_count"),
+                        "uniform_rate": perf.get("uniform_rate"),
+                    }
+                    for fdfs_label, perf in conditions.items()
+                },
+            })
+
+        sheets[sheet_key] = {
+            "rows": rows,
+            "conditions": all_conditions,
+            "units": units,
+            "freq_groups": freq_groups,
+        }
+
+    # Sort sheets in standard model-family order: LR6 → LR03 → LR61 → 9V → others,
+    # then by production-line (chuyen) number within each family.
+    sheets = dict(sorted(sheets.items(), key=lambda x: _sheet_model_sort_key(x[0])))
+    return {"sheets": sheets}

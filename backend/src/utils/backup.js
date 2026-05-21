@@ -7,6 +7,12 @@ const logger = require('./logger');
 const { getDb } = require('../models/database');
 const BACKUP_METADATA_FILE = 'backup-meta.json';
 
+function isSameOrSubPath(candidate, target) {
+  const resolvedCandidate = path.resolve(candidate);
+  const resolvedTarget = path.resolve(target);
+  return resolvedCandidate === resolvedTarget || resolvedCandidate.startsWith(`${resolvedTarget}${path.sep}`);
+}
+
 function getBackupDir() {
   return config.backupDir;
 }
@@ -25,9 +31,7 @@ function copyDirRecursive(src, dest, excludePaths = []) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     const resolvedSrcPath = path.resolve(srcPath);
-    if (resolvedExcludes.some((excluded) => (
-      resolvedSrcPath === excluded || resolvedSrcPath.startsWith(`${excluded}${path.sep}`)
-    ))) {
+    if (resolvedExcludes.some((excluded) => isSameOrSubPath(resolvedSrcPath, excluded))) {
       continue;
     }
     if (entry.isDirectory()) {
@@ -87,6 +91,7 @@ function runBackup() {
   const dataDir = path.resolve(config.dataDir);
   const backupDir = path.resolve(getBackupDir());
   const zipBackupDir = path.resolve(config.zipBackupDir);
+  const uploadDir = path.resolve(config.uploadDir);
 
   // Copy the entire data directory except backup destinations to avoid recursion.
   if (fs.existsSync(dataDir)) {
@@ -105,10 +110,17 @@ function runBackup() {
     }
   }
 
+  // If uploads live outside dataDir on this server, snapshot them explicitly so
+  // managed file contents are present in the backup viewer/restore flow.
+  if (!isSameOrSubPath(uploadDir, dataDir) && fs.existsSync(uploadDir)) {
+    copyDirRecursive(uploadDir, path.join(backupPath, 'uploads'), [backupDir, zipBackupDir]);
+  }
+
   writeBackupMetadata(backupPath, {
     name: backupName,
     createdAt: now.toISOString(),
     sourceDataDir: dataDir,
+    sourceUploadDir: uploadDir,
     format: 'full-data-snapshot-v1',
   });
 
@@ -283,6 +295,7 @@ function createZipBackup() {
     const dataDir = path.resolve(config.dataDir);
     const backupSubDir = path.resolve(config.backupDir);
     const zipBackupSubDir = path.resolve(config.zipBackupDir);
+    const uploadDir = path.resolve(config.uploadDir);
 
     // Add the entire data directory, excluding the directory-based backup
     // folder and the zip_backups folder to avoid redundancy.
@@ -301,6 +314,10 @@ function createZipBackup() {
           archive.file(fullPath, { name: entry.name });
         }
       }
+    }
+
+    if (!isSameOrSubPath(uploadDir, dataDir) && fs.existsSync(uploadDir)) {
+      archive.directory(uploadDir, 'uploads');
     }
 
     archive.finalize();

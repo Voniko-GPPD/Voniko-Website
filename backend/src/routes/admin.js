@@ -127,14 +127,38 @@ router.get('/backups/:name/files', authenticateToken, requireAdmin, (req, res) =
     ).all();
 
     const files = backupFiles.map(f => {
-      const versions = backupDb.prepare(
-        `SELECT v.id, v.version_number, v.size, v.commit_message, v.created_at,
+      const versionRows = backupDb.prepare(
+        `SELECT v.id, v.version_number, v.size, v.storage_path, v.commit_message, v.created_at,
                 u.display_name as uploaded_by_name
          FROM versions v
          LEFT JOIN users u ON v.uploaded_by = u.id
          WHERE v.file_id = ?
          ORDER BY v.version_number ASC`
       ).all(f.id);
+
+      const versions = versionRows.map((v) => {
+        const srcPath = resolveBackupFilePath(backupPath, f.id, v.storage_path || '');
+        let actualSize = 0;
+        let physicalExists = false;
+        if (fs.existsSync(srcPath)) {
+          physicalExists = true;
+          try {
+            actualSize = fs.statSync(srcPath).size;
+          } catch {
+            actualSize = 0;
+          }
+        }
+        return {
+          id: v.id,
+          versionNumber: v.version_number,
+          size: actualSize,
+          expectedSize: v.size || 0,
+          physicalExists,
+          commitMessage: v.commit_message,
+          createdAt: v.created_at,
+          uploadedBy: v.uploaded_by_name,
+        };
+      });
 
       const totalSize = versions.reduce((sum, v) => sum + (v.size || 0), 0);
 
@@ -163,14 +187,7 @@ router.get('/backups/:name/files', authenticateToken, requireAdmin, (req, res) =
         isDeleted: false,
         versionCount: versions.length,
         totalSize,
-        versions: versions.map(v => ({
-          id: v.id,
-          versionNumber: v.version_number,
-          size: v.size,
-          commitMessage: v.commit_message,
-          createdAt: v.created_at,
-          uploadedBy: v.uploaded_by_name,
-        })),
+        versions,
         existsInCurrent,
         currentVersionCount,
       };

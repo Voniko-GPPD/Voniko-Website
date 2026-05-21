@@ -160,6 +160,7 @@ export default function BackupViewerPage() {
               <Button
                 size="small"
                 icon={<DownloadOutlined />}
+                disabled={!ver.physicalExists}
                 onClick={() => handleDownload(record.id, ver.id, record.name)}
               >
                 {t('download')}
@@ -171,6 +172,7 @@ export default function BackupViewerPage() {
                 type="primary"
                 danger
                 icon={<RollbackOutlined />}
+                disabled={!ver.physicalExists}
                 onClick={() => openRestoreModal(record.id, ver.id, record.name, ver.versionNumber)}
               >
                 {t('restore')}

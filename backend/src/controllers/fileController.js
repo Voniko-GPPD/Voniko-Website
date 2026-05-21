@@ -39,6 +39,12 @@ function getDirSize(dir, excludePaths = []) {
   return total;
 }
 
+function isSameOrSubPath(candidate, target) {
+  const resolvedCandidate = path.resolve(candidate);
+  const resolvedTarget = path.resolve(target);
+  return resolvedCandidate === resolvedTarget || resolvedCandidate.startsWith(`${resolvedTarget}${path.sep}`);
+}
+
 // If newName has no extension but originalName does, append the original extension.
 // path.extname handles hidden files (e.g. '.gitignore') correctly — it returns ''.
 function preserveExtension(newName, originalName) {
@@ -511,6 +517,9 @@ async function getActivityLog(req, res) {
 async function getDashboardStats(req, res) {
   const db = getDb();
   const liveDataSize = getDirSize(config.dataDir, [config.backupDir, config.zipBackupDir]);
+  const uploadDirSize = (!isSameOrSubPath(config.uploadDir, config.dataDir) && fs.existsSync(config.uploadDir))
+    ? getDirSize(config.uploadDir)
+    : 0;
 
   const stats = {
     totalFiles: db.prepare('SELECT COUNT(*) as cnt FROM files WHERE is_deleted = 0').get().cnt,
@@ -518,7 +527,7 @@ async function getDashboardStats(req, res) {
       'SELECT COUNT(*) as cnt FROM versions v INNER JOIN files f ON v.file_id = f.id WHERE f.is_deleted = 0'
     ).get().cnt,
     totalUsers: db.prepare('SELECT COUNT(*) as cnt FROM users WHERE is_active = 1').get().cnt,
-    totalSize: liveDataSize,
+    totalSize: liveDataSize + uploadDirSize,
   };
 
   const recentActivity = db.prepare(`

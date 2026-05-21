@@ -2,9 +2,16 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const archiver = require('archiver');
+const Database = require('better-sqlite3');
 const config = require('../config');
 const logger = require('./logger');
 const { getDb } = require('../models/database');
+const {
+  getVersionStorageFileName,
+  resolveBackupVersionFilePath,
+  resolveVersionStoragePathFromBackups,
+  resolveVersionStoragePath,
+} = require('./versionStorage');
 const BACKUP_METADATA_FILE = 'backup-meta.json';
 
 function isSameOrSubPath(candidate, target) {
@@ -66,6 +73,94 @@ function writeBackupMetadata(backupPath, metadata) {
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 }
 
+function getFileSizeSafe(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return null;
+  }
+}
+
+function versionFileSizeMatches(row, filePath) {
+  if (!filePath) return false;
+  const actualSize = getFileSizeSafe(filePath);
+  if (actualSize === null) return false;
+
+  const expectedSize = Number(row.size || 0);
+  return expectedSize <= 0 || actualSize === expectedSize;
+}
+
+function copyManagedVersionFilesToBackup(backupPath) {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT v.id, v.file_id, v.version_number, v.storage_path, v.size
+    FROM versions v
+    INNER JOIN files f ON v.file_id = f.id
+    WHERE f.is_deleted = 0
+  `).all();
+  let copied = 0;
+  let missing = 0;
+  let recoveredFromBackups = 0;
+  const missingFiles = [];
+
+  for (const row of rows) {
+    let sourcePath = resolveVersionStoragePath(row);
+    if (!versionFileSizeMatches(row, sourcePath)) {
+      sourcePath = resolveVersionStoragePathFromBackups(
+        row,
+        backupPath,
+        (candidate) => versionFileSizeMatches(row, candidate)
+      );
+      if (sourcePath) recoveredFromBackups += 1;
+    }
+
+    if (!sourcePath) {
+      missing += 1;
+      missingFiles.push({
+        versionId: row.id,
+        fileId: row.file_id,
+        versionNumber: row.version_number,
+        storagePath: row.storage_path,
+      });
+      logger.warn('Backup skipped missing version file', { versionId: row.id, storagePath: row.storage_path });
+      continue;
+    }
+
+    const destDir = path.join(backupPath, 'uploads', row.file_id);
+    ensureDir(destDir);
+    fs.copyFileSync(sourcePath, path.join(destDir, getVersionStorageFileName(row)));
+    copied += 1;
+  }
+
+  return { copied, missing, total: rows.length, recoveredFromBackups, missingFiles };
+}
+
+function addManagedVersionFilesToArchive(archive, archivedRoots = []) {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT v.id, v.file_id, v.version_number, v.storage_path, v.size
+    FROM versions v
+    INNER JOIN files f ON v.file_id = f.id
+    WHERE f.is_deleted = 0
+  `).all();
+  for (const row of rows) {
+    let sourcePath = resolveVersionStoragePath(row);
+    if (!versionFileSizeMatches(row, sourcePath)) {
+      sourcePath = resolveVersionStoragePathFromBackups(
+        row,
+        null,
+        (candidate) => versionFileSizeMatches(row, candidate)
+      );
+    }
+    if (!sourcePath) {
+      logger.warn('ZIP backup skipped missing version file', { versionId: row.id, storagePath: row.storage_path });
+      continue;
+    }
+    if (archivedRoots.some((root) => isSameOrSubPath(sourcePath, root))) continue;
+    archive.file(sourcePath, { name: `uploads/${row.file_id}/${getVersionStorageFileName(row)}` });
+  }
+}
+
 function runBackup() {
   const now = new Date();
   const timestamp = now.toISOString()
@@ -116,11 +211,27 @@ function runBackup() {
     copyDirRecursive(uploadDir, path.join(backupPath, 'uploads'), [backupDir, zipBackupDir]);
   }
 
+  const managedFiles = copyManagedVersionFilesToBackup(backupPath);
+  if (managedFiles.missing > 0) {
+    deleteDirRecursive(backupPath);
+    const firstMissing = managedFiles.missingFiles[0];
+    const detail = firstMissing
+      ? ` First missing: fileId=${firstMissing.fileId}, version=${firstMissing.versionNumber}, storage=${firstMissing.storagePath}`
+      : '';
+    const err = new Error(
+      `Backup aborted: ${managedFiles.missing}/${managedFiles.total} version files were not found in live uploads or existing backups.${detail}`
+    );
+    err.status = 409;
+    err.missingFiles = managedFiles.missingFiles;
+    throw err;
+  }
+
   writeBackupMetadata(backupPath, {
     name: backupName,
     createdAt: now.toISOString(),
     sourceDataDir: dataDir,
     sourceUploadDir: uploadDir,
+    managedFiles,
     format: 'full-data-snapshot-v1',
   });
 
@@ -152,6 +263,61 @@ function getDirSize(dir) {
   return total;
 }
 
+function inspectBackupManagedFiles(backupPath) {
+  const backupDbPath = path.join(backupPath, 'plc_control.db');
+  if (!fs.existsSync(backupDbPath)) {
+    return { backupStatus: 'unknown', expectedManagedSize: 0, physicalManagedSize: 0, missingVersionFiles: 0, versionCount: 0 };
+  }
+
+  let backupDb;
+  try {
+    backupDb = new Database(backupDbPath, { readonly: true });
+    const hasVersions = backupDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='versions'").get();
+    const hasFiles = backupDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='files'").get();
+    if (!hasVersions || !hasFiles) {
+      return { backupStatus: 'unknown', expectedManagedSize: 0, physicalManagedSize: 0, missingVersionFiles: 0, versionCount: 0 };
+    }
+
+    const rows = backupDb.prepare(`
+      SELECT v.id, v.file_id, v.version_number, v.storage_path, v.size
+      FROM versions v
+      INNER JOIN files f ON v.file_id = f.id
+      WHERE f.is_deleted = 0
+    `).all();
+
+    let expectedManagedSize = 0;
+    let physicalManagedSize = 0;
+    let missingVersionFiles = 0;
+    for (const row of rows) {
+      expectedManagedSize += row.size || 0;
+      const found = resolveBackupVersionFilePath(backupPath, row);
+      if (!found) {
+        missingVersionFiles += 1;
+        continue;
+      }
+      try {
+        const actualSize = fs.statSync(found).size;
+        physicalManagedSize += actualSize;
+        if ((row.size || 0) > 0 && actualSize !== row.size) {
+          missingVersionFiles += 1;
+        }
+      } catch {
+        missingVersionFiles += 1;
+      }
+    }
+
+    const backupStatus = missingVersionFiles === 0
+      ? 'complete'
+      : (missingVersionFiles === rows.length ? 'missing' : 'partial');
+    return { backupStatus, expectedManagedSize, physicalManagedSize, missingVersionFiles, versionCount: rows.length };
+  } catch (err) {
+    logger.warn('Failed to inspect backup managed files', { path: backupPath, error: err.message });
+    return { backupStatus: 'unknown', expectedManagedSize: 0, physicalManagedSize: 0, missingVersionFiles: 0, versionCount: 0 };
+  } finally {
+    if (backupDb) backupDb.close();
+  }
+}
+
 function listBackups() {
   const backupDir = getBackupDir();
   ensureDir(backupDir);
@@ -163,10 +329,12 @@ function listBackups() {
     const stat = fs.statSync(fullPath);
     const metadata = readBackupMetadata(fullPath);
     const size = getDirSize(fullPath);
+    const managed = inspectBackupManagedFiles(fullPath);
     backups.push({
       name: entry.name,
       path: fullPath,
       size,
+      ...managed,
       createdAt: metadata?.createdAt || parseBackupCreatedAtFromName(entry.name) || stat.birthtime.toISOString(),
     });
   }
@@ -319,6 +487,8 @@ function createZipBackup() {
     if (!isSameOrSubPath(uploadDir, dataDir) && fs.existsSync(uploadDir)) {
       archive.directory(uploadDir, 'uploads');
     }
+
+    addManagedVersionFilesToArchive(archive, [dataDir, uploadDir]);
 
     archive.finalize();
   });

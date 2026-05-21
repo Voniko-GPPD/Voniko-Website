@@ -222,6 +222,10 @@ export default {
   backupName: '备份名称',
   backupDate: '创建时间',
   backupSize: '大小',
+  backupPhysicalSize: '物理大小',
+  backupComplete: '完整',
+  backupPartial: '部分缺失',
+  backupMissingFiles: '缺少文件',
   noBackups: '暂无备份',
   backupCreating: '正在创建备份...',
 

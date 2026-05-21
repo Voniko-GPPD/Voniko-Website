@@ -20,10 +20,10 @@ function formatBytes(bytes) {
   return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${units[i]}`;
 }
 
-function ExistsTag({ status, t }) {
-  if (status === 'yes') return <Tag color="success">{t('existsYes')}</Tag>;
-  if (status === 'deleted') return <Tag color="warning">{t('existsDeleted')}</Tag>;
-  return <Tag color="default">{t('existsNo')}</Tag>;
+function BackupStatusTag({ status, t }) {
+  if (status === 'complete') return <Tag color="success">{t('backupComplete')}</Tag>;
+  if (status === 'partial') return <Tag color="warning">{t('backupPartial')}</Tag>;
+  return <Tag color="error">{t('backupMissingFiles')}</Tag>;
 }
 
 export default function BackupViewerPage() {
@@ -218,10 +218,10 @@ export default function BackupViewerPage() {
       render: (v) => formatBytes(v),
     },
     {
-      title: t('existsInCurrent'),
-      dataIndex: 'existsInCurrent',
+      title: t('status'),
+      dataIndex: 'backupStatus',
       width: 150,
-      render: (v) => <ExistsTag status={v} t={t} />,
+      render: (v) => <BackupStatusTag status={v} t={t} />,
     },
     {
       title: t('actions'),
@@ -235,7 +235,7 @@ export default function BackupViewerPage() {
               <Button
                 size="small"
                 icon={<DownloadOutlined />}
-                disabled={!latestVer}
+                disabled={!latestVer?.physicalExists}
                 onClick={() => latestVer && handleDownload(record.id, latestVer.id, record.name, latestVer.versionNumber)}
               >
                 {t('download')}
@@ -247,7 +247,7 @@ export default function BackupViewerPage() {
                 type="primary"
                 danger
                 icon={<RollbackOutlined />}
-                disabled={!latestVer}
+                disabled={!latestVer?.physicalExists}
                 onClick={() => latestVer && openRestoreModal(record.id, latestVer.id, record.name, latestVer.versionNumber)}
               >
                 {t('restore')}

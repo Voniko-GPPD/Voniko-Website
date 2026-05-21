@@ -222,6 +222,10 @@ export default {
   backupName: 'Backup Name',
   backupDate: 'Date',
   backupSize: 'Size',
+  backupPhysicalSize: 'Physical Size',
+  backupComplete: 'Complete',
+  backupPartial: 'Partial',
+  backupMissingFiles: 'Missing files',
   noBackups: 'No backups yet',
   backupCreating: 'Creating backup...',
 

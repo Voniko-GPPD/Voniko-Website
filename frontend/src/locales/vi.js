@@ -222,6 +222,10 @@ export default {
   backupName: 'Tên backup',
   backupDate: 'Ngày tạo',
   backupSize: 'Dung lượng',
+  backupPhysicalSize: 'Dung lượng vật lý',
+  backupComplete: 'Đầy đủ',
+  backupPartial: 'Thiếu một phần',
+  backupMissingFiles: 'Thiếu file',
   noBackups: 'Chưa có backup nào',
   backupCreating: 'Đang tạo backup...',
 

@@ -46,6 +46,13 @@ function formatBytes(bytes) {
   return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${units[i]}`;
 }
 
+function BackupStatusTag({ status, t }) {
+  if (status === 'complete') return <Tag color="success">{t('backupComplete')}</Tag>;
+  if (status === 'partial') return <Tag color="warning">{t('backupPartial')}</Tag>;
+  if (status === 'missing') return <Tag color="error">{t('backupMissingFiles')}</Tag>;
+  return <Tag>{t('status')}</Tag>;
+}
+
 export default function DashboardPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
@@ -343,14 +350,14 @@ export default function DashboardPage() {
               </Button>
             </ResponsiveToolbar>
           ) : null}
-          <ResponsiveTableWrapper minWidth={760}>
+          <ResponsiveTableWrapper minWidth={900}>
             <Table
               dataSource={backups}
               rowKey="name"
               loading={backupsLoading}
               pagination={false}
               size="small"
-              scroll={{ x: 760 }}
+              scroll={{ x: 900 }}
               locale={{ emptyText: t('noBackups') }}
               columns={[
                 {
@@ -367,8 +374,18 @@ export default function DashboardPage() {
                 {
                   title: t('backupSize'),
                   dataIndex: 'size',
-                  width: 120,
-                  render: (v) => formatBytes(v),
+                  width: 180,
+                  render: (v, record) => (
+                    record.backupStatus && record.backupStatus !== 'complete' && record.expectedManagedSize
+                      ? `${formatBytes(v)} / ${formatBytes(record.expectedManagedSize)}`
+                      : formatBytes(v)
+                  ),
+                },
+                {
+                  title: t('status'),
+                  dataIndex: 'backupStatus',
+                  width: 130,
+                  render: (v) => <BackupStatusTag status={v} t={t} />,
                 },
                 {
                   title: t('actions'),

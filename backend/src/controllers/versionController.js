@@ -4,6 +4,28 @@ const { getDb } = require('../models/database');
 const { createUnifiedDiff } = require('../utils/diff');
 const { extractTextFromFile, isOfficeFile } = require('../utils/officeExtractor');
 const logger = require('../utils/logger');
+const { resolveVersionStoragePath, resolveVersionStoragePathFromBackups } = require('../utils/versionStorage');
+
+function versionFileSizeMatches(version, filePath) {
+  if (!filePath) return false;
+  try {
+    const actualSize = fs.statSync(filePath).size;
+    const expectedSize = Number(version.size || 0);
+    return expectedSize <= 0 || actualSize === expectedSize;
+  } catch {
+    return false;
+  }
+}
+
+function resolveReadableVersionPath(version) {
+  const livePath = resolveVersionStoragePath(version);
+  if (versionFileSizeMatches(version, livePath)) return livePath;
+  return resolveVersionStoragePathFromBackups(
+    version,
+    null,
+    (candidate) => versionFileSizeMatches(version, candidate)
+  );
+}
 
 async function getVersion(req, res) {
   const db = getDb();
@@ -41,18 +63,19 @@ async function downloadVersion(req, res) {
 
   if (!version) return res.status(404).json({ message: 'Version not found' });
 
-  if (!fs.existsSync(version.storage_path)) {
+  const storagePath = resolveReadableVersionPath(version);
+  if (!storagePath) {
     return res.status(410).json({ message: 'Version file not found on disk' });
   }
 
   const downloadName = version.file_name || 'download';
-  const fileStat = fs.statSync(version.storage_path);
+  const fileStat = fs.statSync(storagePath);
 
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadName)}"`);
   res.setHeader('Content-Type', version.mime_type || 'application/octet-stream');
   res.setHeader('Content-Length', fileStat.size);
 
-  const stream = fs.createReadStream(version.storage_path);
+  const stream = fs.createReadStream(storagePath);
   stream.on('error', (err) => {
     logger.error('Failed to stream version download', { error: err.message, versionId: version.id });
     if (!res.headersSent) {
@@ -83,6 +106,12 @@ async function diffVersions(req, res) {
     return res.status(400).json({ message: 'Versions must belong to the same file' });
   }
 
+  const fromStoragePath = resolveReadableVersionPath(fromVersion);
+  const toStoragePath = resolveReadableVersionPath(toVersion);
+  if (!fromStoragePath || !toStoragePath) {
+    return res.status(410).json({ message: 'One or both version files were not found on disk' });
+  }
+
   // For binary files, try Office text extraction first
   if (fromVersion.is_binary || toVersion.is_binary) {
     const fromMime = fromVersion.mime_type || '';
@@ -91,8 +120,8 @@ async function diffVersions(req, res) {
     if (isOfficeFile(fromMime) && isOfficeFile(toMime)) {
       try {
         const [fromText, toText] = await Promise.all([
-          extractTextFromFile(fromVersion.storage_path, fromMime),
-          extractTextFromFile(toVersion.storage_path, toMime),
+          extractTextFromFile(fromStoragePath, fromMime),
+          extractTextFromFile(toStoragePath, toMime),
         ]);
 
         if (fromText !== null && toText !== null) {
@@ -147,8 +176,8 @@ async function diffVersions(req, res) {
 
   // Text diff
   try {
-    const fromContent = fs.readFileSync(fromVersion.storage_path, 'utf8');
-    const toContent = fs.readFileSync(toVersion.storage_path, 'utf8');
+    const fromContent = fs.readFileSync(fromStoragePath, 'utf8');
+    const toContent = fs.readFileSync(toStoragePath, 'utf8');
 
     const diff = createUnifiedDiff(
       fromContent,
@@ -189,6 +218,8 @@ async function restoreVersion(req, res) {
   const db = getDb();
   const version = db.prepare('SELECT * FROM versions WHERE id = ?').get(req.params.id);
   if (!version) return res.status(404).json({ message: 'Version not found' });
+  const storagePath = resolveReadableVersionPath(version);
+  if (!storagePath) return res.status(410).json({ message: 'Version file not found on disk' });
 
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND is_deleted = 0').get(version.file_id);
   if (!file) return res.status(404).json({ message: 'File not found' });
@@ -209,9 +240,12 @@ async function restoreVersion(req, res) {
   const newVersionNumber = (latestVersionRow?.max_ver ?? 0) + 1;
   const newVersionId = uuidv4();
   const storageDir = path.join(config.uploadDir, file.id);
+  if (!fs.existsSync(storageDir)) {
+    fs.mkdirSync(storageDir, { recursive: true });
+  }
   const newStoragePath = path.join(storageDir, `v${newVersionNumber}_${newVersionId}`);
 
-  fs.copyFileSync(version.storage_path, newStoragePath);
+  fs.copyFileSync(storagePath, newStoragePath);
 
   db.prepare(`
     INSERT INTO versions (id, file_id, version_number, storage_path, size, checksum, mime_type, is_binary, commit_message, uploaded_by)
@@ -273,11 +307,12 @@ async function previewVersion(req, res) {
     return res.status(415).json({ message: 'Unsupported Media Type: not previewable' });
   }
 
-  if (!fs.existsSync(version.storage_path)) {
+  const storagePath = resolveReadableVersionPath(version);
+  if (!storagePath) {
     return res.status(410).json({ message: 'Version file not found on disk' });
   }
 
-  const fileStat = fs.statSync(version.storage_path);
+  const fileStat = fs.statSync(storagePath);
 
   // Support Range requests for video/audio streaming
   const range = req.headers.range;
@@ -301,7 +336,7 @@ async function previewVersion(req, res) {
       'Content-Type': mime,
       'Content-Disposition': `inline; filename="${encodeURIComponent(version.file_name || 'preview')}"`,
     });
-    const stream = fs.createReadStream(version.storage_path, { start, end });
+    const stream = fs.createReadStream(storagePath, { start, end });
     stream.on('error', (err) => {
       logger.error('Failed to stream preview', { error: err.message, versionId: version.id });
       if (!res.headersSent) res.status(500).json({ message: 'Failed to stream preview' });
@@ -314,7 +349,7 @@ async function previewVersion(req, res) {
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(version.file_name || 'preview')}"`);
     res.setHeader('Content-Length', fileStat.size);
 
-    const stream = fs.createReadStream(version.storage_path);
+    const stream = fs.createReadStream(storagePath);
     stream.on('error', (err) => {
       logger.error('Failed to stream preview', { error: err.message, versionId: version.id });
       if (!res.headersSent) res.status(500).json({ message: 'Failed to stream preview' });

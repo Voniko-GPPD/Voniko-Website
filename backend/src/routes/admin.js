@@ -10,6 +10,7 @@ const { runBackup, listBackups, deleteBackup, getDirSize, createZipBackup, listZ
 const { getDb } = require('../models/database');
 const config = require('../config');
 const logger = require('../utils/logger');
+const { getBackupVersionFileCandidates, resolveBackupVersionFilePath } = require('../utils/versionStorage');
 
 // Validate backup name and resolve its path safely
 function resolveBackupPath(name) {
@@ -35,9 +36,15 @@ function resolveBackupPath(name) {
 }
 
 // Resolve and validate a physical file path within the backup uploads directory
-function resolveBackupFilePath(backupPath, fileId, storagePath) {
-  const srcFileName = path.basename(storagePath);
-  const srcPath = path.join(backupPath, 'uploads', fileId, srcFileName);
+function resolveBackupFilePath(backupPath, fileId, storagePath, version = {}) {
+  const versionInfo = { ...version, file_id: fileId, storage_path: storagePath };
+  const foundPath = resolveBackupVersionFilePath(backupPath, versionInfo);
+  const srcPath = foundPath || getBackupVersionFileCandidates(backupPath, versionInfo)[0];
+  if (!srcPath) {
+    const err = new Error('Invalid file path in backup');
+    err.status = 400;
+    throw err;
+  }
   const resolvedSrc = path.resolve(srcPath);
   if (!resolvedSrc.startsWith(path.resolve(backupPath) + path.sep)) {
     const err = new Error('Invalid file path in backup');
@@ -62,7 +69,11 @@ router.post('/backup', authenticateToken, requireAdmin, (req, res) => {
     });
   } catch (err) {
     logger.error('Manual backup failed', { error: err.message });
-    res.status(500).json({ message: 'Backup failed', error: err.message });
+    res.status(err.status || 500).json({
+      message: err.message || 'Backup failed',
+      error: err.message,
+      missingFiles: err.missingFiles || undefined,
+    });
   }
 });
 
@@ -74,6 +85,10 @@ router.get('/backups', authenticateToken, requireAdmin, (req, res) => {
       data: backups.map(b => ({
         name: b.name,
         size: b.size,
+        expectedManagedSize: b.expectedManagedSize,
+        physicalManagedSize: b.physicalManagedSize,
+        missingVersionFiles: b.missingVersionFiles,
+        backupStatus: b.backupStatus,
         createdAt: b.createdAt,
       })),
     });
@@ -137,13 +152,13 @@ router.get('/backups/:name/files', authenticateToken, requireAdmin, (req, res) =
       ).all(f.id);
 
       const versions = versionRows.map((v) => {
-        const srcPath = resolveBackupFilePath(backupPath, f.id, v.storage_path || '');
+        const srcPath = resolveBackupFilePath(backupPath, f.id, v.storage_path || '', v);
         let actualSize = 0;
         let physicalExists = false;
         if (fs.existsSync(srcPath)) {
-          physicalExists = true;
           try {
             actualSize = fs.statSync(srcPath).size;
+            physicalExists = !v.size || actualSize === v.size;
           } catch {
             actualSize = 0;
           }
@@ -161,6 +176,10 @@ router.get('/backups/:name/files', authenticateToken, requireAdmin, (req, res) =
       });
 
       const totalSize = versions.reduce((sum, v) => sum + (v.size || 0), 0);
+      const missingVersionCount = versions.filter((v) => !v.physicalExists).length;
+      const backupStatus = missingVersionCount === 0
+        ? 'complete'
+        : (missingVersionCount === versions.length ? 'missing' : 'partial');
 
       // Compare with current system
       const currentFile = mainDb.prepare(
@@ -187,6 +206,9 @@ router.get('/backups/:name/files', authenticateToken, requireAdmin, (req, res) =
         isDeleted: false,
         versionCount: versions.length,
         totalSize,
+        totalExpectedSize: versions.reduce((sum, v) => sum + (v.expectedSize || 0), 0),
+        missingVersionCount,
+        backupStatus,
         versions,
         existsInCurrent,
         currentVersionCount,
@@ -240,10 +262,14 @@ router.post('/backups/:name/restore-file', authenticateToken, requireAdmin, asyn
     }
 
     // Resolve source file path from backup uploads directory
-    const srcPath = resolveBackupFilePath(backupPath, fileId, backupVersion.storage_path);
+    const srcPath = resolveBackupFilePath(backupPath, fileId, backupVersion.storage_path, backupVersion);
 
     if (!fs.existsSync(srcPath)) {
       return res.status(404).json({ message: 'Physical file not found in backup' });
+    }
+    const srcStat = fs.statSync(srcPath);
+    if (backupVersion.size && srcStat.size !== backupVersion.size) {
+      return res.status(409).json({ message: 'Backup file size does not match database metadata' });
     }
 
     // Find or create file in current DB
@@ -354,14 +380,17 @@ router.post('/backups/:name/download-file', authenticateToken, requireAdmin, (re
     backupDb.close();
     backupDb = null;
 
-    const srcPath = resolveBackupFilePath(backupPath, fileId, backupVersion.storage_path);
+    const srcPath = resolveBackupFilePath(backupPath, fileId, backupVersion.storage_path, backupVersion);
 
     if (!fs.existsSync(srcPath)) {
       return res.status(404).json({ message: 'Physical file not found in backup' });
     }
+    const fileStat = fs.statSync(srcPath);
+    if (backupVersion.size && fileStat.size !== backupVersion.size) {
+      return res.status(409).json({ message: 'Backup file size does not match database metadata' });
+    }
 
     const downloadName = backupFile.name || 'download';
-    const fileStat = fs.statSync(srcPath);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadName)}"`);
     if (backupVersion.mime_type) {
       res.setHeader('Content-Type', backupVersion.mime_type);

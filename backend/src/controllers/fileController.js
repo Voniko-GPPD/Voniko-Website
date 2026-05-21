@@ -8,42 +8,7 @@ const logger = require('../utils/logger');
 const { runCleanup } = require('../utils/cleanup');
 const { broadcast } = require('../utils/notifications');
 const { notifyFileSubscribers } = require('./subscriptionController');
-
-function getDirSize(dir, excludePaths = []) {
-  if (!dir || !fs.existsSync(dir)) return 0;
-
-  const resolvedDir = path.resolve(dir);
-  const resolvedExcludes = excludePaths.map((item) => path.resolve(item));
-  const isExcluded = (candidate) => {
-    const resolvedCandidate = path.resolve(candidate);
-    return resolvedExcludes.some((excluded) => (
-      resolvedCandidate === excluded || resolvedCandidate.startsWith(`${excluded}${path.sep}`)
-    ));
-  };
-
-  if (isExcluded(resolvedDir)) return 0;
-
-  let total = 0;
-  const entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(resolvedDir, entry.name);
-    if (isExcluded(fullPath)) continue;
-    if (entry.isDirectory()) {
-      total += getDirSize(fullPath, excludePaths);
-    } else {
-      try {
-        total += fs.statSync(fullPath).size;
-      } catch {}
-    }
-  }
-  return total;
-}
-
-function isSameOrSubPath(candidate, target) {
-  const resolvedCandidate = path.resolve(candidate);
-  const resolvedTarget = path.resolve(target);
-  return resolvedCandidate === resolvedTarget || resolvedCandidate.startsWith(`${resolvedTarget}${path.sep}`);
-}
+const { resolveVersionStoragePath } = require('../utils/versionStorage');
 
 // If newName has no extension but originalName does, append the original extension.
 // path.extname handles hidden files (e.g. '.gitignore') correctly — it returns ''.
@@ -516,10 +481,29 @@ async function getActivityLog(req, res) {
 
 async function getDashboardStats(req, res) {
   const db = getDb();
-  const liveDataSize = getDirSize(config.dataDir, [config.backupDir, config.zipBackupDir]);
-  const uploadDirSize = (!isSameOrSubPath(config.uploadDir, config.dataDir) && fs.existsSync(config.uploadDir))
-    ? getDirSize(config.uploadDir)
-    : 0;
+  const totalSize = db.prepare(
+    'SELECT COALESCE(SUM(v.size), 0) as total FROM versions v INNER JOIN files f ON v.file_id = f.id WHERE f.is_deleted = 0'
+  ).get().total || 0;
+  const versionRows = db.prepare(`
+    SELECT v.id, v.file_id, v.version_number, v.storage_path
+    FROM versions v
+    INNER JOIN files f ON v.file_id = f.id
+    WHERE f.is_deleted = 0
+  `).all();
+  let physicalTotalSize = 0;
+  let missingVersionFiles = 0;
+  for (const row of versionRows) {
+    const storagePath = resolveVersionStoragePath(row);
+    if (!storagePath) {
+      missingVersionFiles += 1;
+      continue;
+    }
+    try {
+      physicalTotalSize += fs.statSync(storagePath).size;
+    } catch {
+      missingVersionFiles += 1;
+    }
+  }
 
   const stats = {
     totalFiles: db.prepare('SELECT COUNT(*) as cnt FROM files WHERE is_deleted = 0').get().cnt,
@@ -527,7 +511,9 @@ async function getDashboardStats(req, res) {
       'SELECT COUNT(*) as cnt FROM versions v INNER JOIN files f ON v.file_id = f.id WHERE f.is_deleted = 0'
     ).get().cnt,
     totalUsers: db.prepare('SELECT COUNT(*) as cnt FROM users WHERE is_active = 1').get().cnt,
-    totalSize: liveDataSize + uploadDirSize,
+    totalSize,
+    physicalTotalSize,
+    missingVersionFiles,
   };
 
   const recentActivity = db.prepare(`

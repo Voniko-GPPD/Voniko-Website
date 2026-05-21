@@ -13,12 +13,17 @@ backend/.env
 backend/.env.*
 qc-system/.env
 *.env.local
+!backend/.env.example
 
 # Database and uploaded files
-backend/data/avatars/
-backend/data/qc-uploads/
-backend/data/logs/
-backend/data/backups/
+backend/data/avatars/*
+!backend/data/avatars/.gitkeep
+backend/data/qc-uploads/*
+!backend/data/qc-uploads/.gitkeep
+backend/data/logs/*
+!backend/data/logs/.gitkeep
+backend/data/backups/*
+!backend/data/backups/.gitkeep
 backend/data/*.db
 backend/data/*.db-shm
 backend/data/*.db-wal
@@ -26,7 +31,8 @@ backend/data/dm2000_cache/*.mdb
 backend/data/dm3000_cache/*.mdb
 backend/data/dmpdata_cache/*.mdb
 backend/uploads/
-data/
+data/logs/*
+!data/logs/.gitkeep
 
 # Logs
 *.log

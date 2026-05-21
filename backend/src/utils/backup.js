@@ -5,6 +5,7 @@ const archiver = require('archiver');
 const config = require('../config');
 const logger = require('./logger');
 const { getDb } = require('../models/database');
+const BACKUP_METADATA_FILE = 'backup-meta.json';
 
 function getBackupDir() {
   return config.backupDir;
@@ -16,18 +17,49 @@ function ensureDir(dir) {
   }
 }
 
-function copyDirRecursive(src, dest) {
+function copyDirRecursive(src, dest, excludePaths = []) {
   ensureDir(dest);
   const entries = fs.readdirSync(src, { withFileTypes: true });
+  const resolvedExcludes = excludePaths.map((item) => path.resolve(item));
   for (const entry of entries) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    const resolvedSrcPath = path.resolve(srcPath);
+    if (resolvedExcludes.some((excluded) => (
+      resolvedSrcPath === excluded || resolvedSrcPath.startsWith(`${excluded}${path.sep}`)
+    ))) {
+      continue;
+    }
     if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
+      copyDirRecursive(srcPath, destPath, excludePaths);
     } else {
       fs.copyFileSync(srcPath, destPath);
     }
   }
+}
+
+function parseBackupCreatedAtFromName(name) {
+  const match = /^backup_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$/.exec(name || '');
+  if (!match) return null;
+  const [, datePart, hour, minute, second] = match;
+  const parsed = new Date(`${datePart}T${hour}:${minute}:${second}.000Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function readBackupMetadata(backupPath) {
+  const metadataPath = path.join(backupPath, BACKUP_METADATA_FILE);
+  if (!fs.existsSync(metadataPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+  } catch (err) {
+    logger.warn('Failed to read backup metadata', { path: metadataPath, error: err.message });
+    return null;
+  }
+}
+
+function writeBackupMetadata(backupPath, metadata) {
+  const metadataPath = path.join(backupPath, BACKUP_METADATA_FILE);
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 }
 
 function runBackup() {
@@ -50,14 +82,35 @@ function runBackup() {
     } catch (err) {
       logger.warn('WAL checkpoint failed before backup', { error: err.message });
     }
-    fs.copyFileSync(dbPath, path.join(backupPath, 'plc_control.db'));
   }
 
-  // Backup uploads directory
-  const uploadsDir = path.resolve(config.uploadDir);
-  if (fs.existsSync(uploadsDir)) {
-    copyDirRecursive(uploadsDir, path.join(backupPath, 'uploads'));
+  const dataDir = path.resolve(config.dataDir);
+  const backupDir = path.resolve(getBackupDir());
+  const zipBackupDir = path.resolve(config.zipBackupDir);
+
+  // Copy the entire data directory except backup destinations to avoid recursion.
+  if (fs.existsSync(dataDir)) {
+    const entries = fs.readdirSync(dataDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(dataDir, entry.name);
+      const resolvedSrc = path.resolve(srcPath);
+      if (resolvedSrc === backupDir || resolvedSrc === zipBackupDir) continue;
+
+      const destPath = path.join(backupPath, entry.name);
+      if (entry.isDirectory()) {
+        copyDirRecursive(srcPath, destPath, [backupDir, zipBackupDir]);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
+    }
   }
+
+  writeBackupMetadata(backupPath, {
+    name: backupName,
+    createdAt: now.toISOString(),
+    sourceDataDir: dataDir,
+    format: 'full-data-snapshot-v1',
+  });
 
   // Calculate backup size
   const size = getDirSize(backupPath);
@@ -96,12 +149,13 @@ function listBackups() {
     if (!entry.isDirectory() || !entry.name.startsWith('backup_')) continue;
     const fullPath = path.join(backupDir, entry.name);
     const stat = fs.statSync(fullPath);
+    const metadata = readBackupMetadata(fullPath);
     const size = getDirSize(fullPath);
     backups.push({
       name: entry.name,
       path: fullPath,
       size,
-      createdAt: stat.birthtime.toISOString(),
+      createdAt: metadata?.createdAt || parseBackupCreatedAtFromName(entry.name) || stat.birthtime.toISOString(),
     });
   }
   backups.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

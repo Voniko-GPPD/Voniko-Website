@@ -44,6 +44,7 @@ const MONTH_OPTIONS = Array.from({ length: 12 }, (_, index) => ({
   value: index + 1,
   label: `${index + 1}`,
 }));
+const PPM_DECIMALS = 4;
 
 function defaultDateRange() {
   return [dayjs().startOf('year'), dayjs()];
@@ -51,6 +52,11 @@ function defaultDateRange() {
 
 function buildSectionTitle(label) {
   return <Typography.Text strong style={{ fontSize: 16 }}>{label}</Typography.Text>;
+}
+
+function formatPpmValue(value) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue.toFixed(PPM_DECIMALS) : '0.0000';
 }
 
 export default function QCDashboard() {
@@ -282,11 +288,25 @@ export default function QCDashboard() {
     });
 
     return {
-      tooltip: { trigger: 'axis' },
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params) => {
+          const rows = Array.isArray(params) ? params : [params];
+          const axisValue = rows[0]?.axisValueLabel || rows[0]?.name || '';
+          return [
+            axisValue,
+            ...rows.map((item) => `${item.marker}${item.seriesName}: ${formatPpmValue(item.value)}`),
+          ].join('<br/>');
+        },
+      },
       legend: { type: 'scroll', bottom: 0 },
       grid: { left: 48, right: 16, top: 24, bottom: 56 },
       xAxis: { type: 'category', data: yearMonths, axisLabel: { rotate: 30 } },
-      yAxis: { type: 'value', name: 'PPM' },
+      yAxis: {
+        type: 'value',
+        name: 'PPM',
+        axisLabel: { formatter: (value) => formatPpmValue(value) },
+      },
       series: Object.keys(seriesMap).length
         ? Object.keys(seriesMap).map((key) => ({
             name: key,

@@ -9,6 +9,36 @@ const { runCleanup } = require('../utils/cleanup');
 const { broadcast } = require('../utils/notifications');
 const { notifyFileSubscribers } = require('./subscriptionController');
 
+function getDirSize(dir, excludePaths = []) {
+  if (!dir || !fs.existsSync(dir)) return 0;
+
+  const resolvedDir = path.resolve(dir);
+  const resolvedExcludes = excludePaths.map((item) => path.resolve(item));
+  const isExcluded = (candidate) => {
+    const resolvedCandidate = path.resolve(candidate);
+    return resolvedExcludes.some((excluded) => (
+      resolvedCandidate === excluded || resolvedCandidate.startsWith(`${excluded}${path.sep}`)
+    ));
+  };
+
+  if (isExcluded(resolvedDir)) return 0;
+
+  let total = 0;
+  const entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(resolvedDir, entry.name);
+    if (isExcluded(fullPath)) continue;
+    if (entry.isDirectory()) {
+      total += getDirSize(fullPath, excludePaths);
+    } else {
+      try {
+        total += fs.statSync(fullPath).size;
+      } catch {}
+    }
+  }
+  return total;
+}
+
 // If newName has no extension but originalName does, append the original extension.
 // path.extname handles hidden files (e.g. '.gitignore') correctly — it returns ''.
 function preserveExtension(newName, originalName) {
@@ -480,6 +510,7 @@ async function getActivityLog(req, res) {
 
 async function getDashboardStats(req, res) {
   const db = getDb();
+  const liveDataSize = getDirSize(config.dataDir, [config.backupDir, config.zipBackupDir]);
 
   const stats = {
     totalFiles: db.prepare('SELECT COUNT(*) as cnt FROM files WHERE is_deleted = 0').get().cnt,
@@ -487,9 +518,7 @@ async function getDashboardStats(req, res) {
       'SELECT COUNT(*) as cnt FROM versions v INNER JOIN files f ON v.file_id = f.id WHERE f.is_deleted = 0'
     ).get().cnt,
     totalUsers: db.prepare('SELECT COUNT(*) as cnt FROM users WHERE is_active = 1').get().cnt,
-    totalSize: db.prepare(
-      'SELECT COALESCE(SUM(v.size), 0) as total FROM versions v INNER JOIN files f ON v.file_id = f.id WHERE f.is_deleted = 0'
-    ).get().total || 0,
+    totalSize: liveDataSize,
   };
 
   const recentActivity = db.prepare(`

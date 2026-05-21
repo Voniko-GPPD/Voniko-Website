@@ -69,6 +69,7 @@ _BASE = Path(__file__).resolve().parent.parent.parent
 _DATA_DIR = _BASE / "backend" / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 _QC_MEDIA_BASE_URL = os.getenv("QC_MEDIA_BASE_URL", "/uploads/qc").rstrip("/")
+_PPM_DECIMALS = 4
 
 app.add_middleware(
     CORSMiddleware,
@@ -99,6 +100,10 @@ def _ensure_column(conn, table_name: str, column_name: str, ddl: str) -> None:
     cols = {c["name"] for c in inspect(conn).get_columns(table_name)}
     if column_name not in cols:
         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+
+
+def _round_ppm(value: float) -> float:
+    return float(f"{value:.{_PPM_DECIMALS}f}")
 
 
 def _apply_runtime_migrations() -> None:
@@ -1274,7 +1279,7 @@ def monthly_ppm(
                 battery_model=item.battery_model,
                 defect_count=defect_count,
                 output_qty=item.output_qty,
-                ppm=round(ppm, 2),
+                ppm=_round_ppm(ppm),
             )
         )
 
@@ -1406,7 +1411,7 @@ def range_ppm(
                 "battery_model": item.battery_model,
                 "defect_count": defect_count,
                 "output_qty": item.output_qty,
-                "ppm": round(ppm, 2),
+                "ppm": _round_ppm(ppm),
             })
 
     return sorted(result, key=lambda x: (x["year_month"], x["line_code"]))

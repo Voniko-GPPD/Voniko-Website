@@ -212,7 +212,7 @@ export default function FilesPage() {
       setUploadFileName(null);
       fetchFiles();
     } catch (err) {
-      message.error(err.response?.data?.message || t('error'));
+      message.error(err.response?.data?.message || err.message || t('error'));
     } finally {
       setUploadLoading(false);
     }

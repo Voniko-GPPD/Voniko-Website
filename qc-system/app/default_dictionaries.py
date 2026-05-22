@@ -21,7 +21,7 @@ DEFAULT_DICTIONARIES = {
         {"code": "M", "year_value": 2023, "status": True},
         {"code": "N", "year_value": 2024, "status": True},
         {"code": "P", "year_value": 2025, "status": True},
-        {"code": "Q", "year_value": 2025, "status": True},
+        {"code": "Q", "year_value": 2026, "status": True},
         {"code": "S", "year_value": 2027, "status": True},
     ],
     "month_mappings": [

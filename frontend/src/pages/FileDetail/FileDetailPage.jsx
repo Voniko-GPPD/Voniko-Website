@@ -365,7 +365,7 @@ export default function FileDetailPage() {
       setFileList([]);
       fetchFile();
     } catch (err) {
-      message.error(err.response?.data?.message || t('error'));
+      message.error(err.response?.data?.message || err.message || t('error'));
     } finally {
       setUploadLoading(false);
     }

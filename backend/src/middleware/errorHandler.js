@@ -12,6 +12,14 @@ function errorHandler(err, req, res, next) {
     return res.status(413).json({ message: 'File too large. Maximum file size is 5GB.' });
   }
 
+  if (err.code === 'ENOSPC') {
+    return res.status(507).json({ message: 'Upload failed: not enough disk space on the server temporary or data drive.' });
+  }
+
+  if (err.code === 'EACCES' || err.code === 'EPERM') {
+    return res.status(500).json({ message: 'Upload failed: the server does not have permission to write upload files.' });
+  }
+
   // Handle upstream HTTP errors forwarded from axios proxy routes.
   // err.response is set by axios when the upstream service returns a non-2xx status.
   // The response body may be an ArrayBuffer (when responseType:'arraybuffer' was used),

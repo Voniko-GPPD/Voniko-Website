@@ -37,6 +37,7 @@ import {
   listQualityRecords,
   updateProductionOutput,
 } from '../api/qcSystem';
+import { formatServerUtcDateTime } from '../utils/dateTime';
 import { resolveQcPhotoUrl } from '../utils/qcMedia';
 
 const { RangePicker } = DatePicker;
@@ -341,11 +342,15 @@ export default function QCDashboard() {
       { title: t('qc.detected_date'), dataIndex: 'detected_date', width: 120 },
       { title: t('qc.upper_code'), dataIndex: 'upper_code', width: 150 },
       { title: t('qc.lower_code'), dataIndex: 'lower_code', width: 110 },
+      { title: t('qc.found_department'), dataIndex: 'found_department', width: 140 },
+      { title: t('qc.ocv'), dataIndex: 'ocv', width: 110 },
+      { title: t('qc.building_no'), dataIndex: 'building_no', width: 110 },
       { title: t('qc.line_code'), dataIndex: 'parsed_line_code', width: 90 },
       { title: t('qc.battery_model'), dataIndex: 'parsed_battery_model', width: 110 },
       { title: t('qc.station'), dataIndex: 'parsed_station_no', width: 90 },
       { title: t('qc.grade'), dataIndex: 'parsed_grade', width: 110 },
       { title: t('qc.defect_type'), dataIndex: 'defect_type_name', width: 120 },
+      { title: t('qc.defect_description'), dataIndex: 'defect_description', width: 220 },
       { title: t('qc.operator_name'), dataIndex: 'operator_name', width: 110 },
       {
         title: t('qc.upload_photo'),
@@ -366,7 +371,12 @@ export default function QCDashboard() {
           );
         },
       },
-      { title: t('qc.record_time'), dataIndex: 'record_time', width: 170 },
+      {
+        title: t('qc.record_time'),
+        dataIndex: 'record_time',
+        width: 170,
+        render: (value) => formatServerUtcDateTime(value),
+      },
       {
         title: t('qc.actions'),
         key: 'actions',
@@ -474,7 +484,12 @@ export default function QCDashboard() {
       { title: t('qc.battery_model'), dataIndex: 'battery_model', width: 130 },
       { title: t('qc.output_qty'), dataIndex: 'output_qty', width: 120 },
       { title: t('qc.note'), dataIndex: 'note', width: 160 },
-      { title: t('qc.updated_at'), dataIndex: 'updated_at', width: 170 },
+      {
+        title: t('qc.updated_at'),
+        dataIndex: 'updated_at',
+        width: 170,
+        render: (value) => formatServerUtcDateTime(value),
+      },
       {
         title: t('qc.actions'),
         key: 'actions',
@@ -637,7 +652,7 @@ export default function QCDashboard() {
             </Col>
           </Row>
 
-          <ResponsiveTableWrapper minWidth={1400}>
+          <ResponsiveTableWrapper minWidth={1980}>
             <Table
               rowKey="id"
               size={isMobile ? 'small' : 'middle'}
@@ -645,7 +660,7 @@ export default function QCDashboard() {
               dataSource={historyRows}
               columns={historyColumns}
               pagination={{ pageSize: 10, showSizeChanger: false }}
-              scroll={{ x: 1400 }}
+              scroll={{ x: 1980 }}
               locale={{ emptyText: t('qc.no_data') }}
             />
           </ResponsiveTableWrapper>

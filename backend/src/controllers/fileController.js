@@ -18,6 +18,18 @@ function preserveExtension(newName, originalName) {
   return (!newExt && oldExt) ? newName + oldExt : newName;
 }
 
+function moveUploadedFile(sourcePath, targetPath) {
+  try {
+    fs.renameSync(sourcePath, targetPath);
+    return;
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+  }
+
+  fs.copyFileSync(sourcePath, targetPath);
+  try { fs.unlinkSync(sourcePath); } catch {}
+}
+
 async function listFiles(req, res) {
   const db = getDb();
   const { search, page = 1, limit = 50, folderId } = req.query;
@@ -219,8 +231,7 @@ async function uploadFile(req, res) {
     fs.mkdirSync(storageDir, { recursive: true });
   }
   const storagePath = path.join(storageDir, `v${versionNumber}_${versionId}`);
-  fs.copyFileSync(req.file.path, storagePath);
-  try { fs.unlinkSync(req.file.path); } catch {}
+  moveUploadedFile(req.file.path, storagePath);
 
   // Create version record
   db.prepare(`

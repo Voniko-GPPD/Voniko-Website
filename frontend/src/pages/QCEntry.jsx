@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -16,16 +16,16 @@ import {
   Space,
   Tag,
   Typography,
-  Upload,
   message,
 } from 'antd';
-import { CalendarOutlined, CameraOutlined, CheckCircleOutlined, InfoCircleOutlined, ScanOutlined, UploadOutlined } from '@ant-design/icons';
+import { CalendarOutlined, CameraOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined, ScanOutlined, UploadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import QCModuleTabs from '../components/QC/QCModuleTabs';
 import ResponsiveToolbar from '../components/common/ResponsiveToolbar';
 import { useAuth } from '../contexts/AuthContext';
 import { useLang } from '../contexts/LangContext';
 import { createQualityRecordWithPhoto, listDictionary, parseCodes } from '../api/qcSystem';
+import { formatLocalDateTime } from '../utils/dateTime';
 import { resolveQcPhotoUrl } from '../utils/qcMedia';
 
 function emptyForm(defaultOperator = '') {
@@ -33,6 +33,9 @@ function emptyForm(defaultOperator = '') {
     detected_date: dayjs(),
     upper_code: '',
     lower_code: '',
+    found_department: '',
+    ocv: '',
+    building_no: '',
     defect_type_id: null,
     defect_description: '',
     operator_name: defaultOperator,
@@ -68,6 +71,7 @@ export default function QCEntry() {
   const [parsedCard, setParsedCard] = useState(null);
   const [photoFile, setPhotoFile] = useState(null);
   const [form, setForm] = useState(() => emptyForm(defaultOperator));
+  const photoInputRef = useRef(null);
 
   useEffect(() => {
     setForm((prev) => ({
@@ -91,6 +95,16 @@ export default function QCEntry() {
     () => defectTypes.find((item) => item.id === form.defect_type_id) || null,
     [defectTypes, form.defect_type_id],
   );
+
+  const handlePhotoChange = useCallback((event) => {
+    const [file] = event.target.files || [];
+    setPhotoFile(file || null);
+    event.target.value = '';
+  }, []);
+
+  const openPhotoPicker = useCallback(() => {
+    photoInputRef.current?.click();
+  }, []);
 
   const handleParse = async () => {
     if (!form.upper_code || !form.lower_code) {
@@ -124,6 +138,9 @@ export default function QCEntry() {
       body.append('detected_date', form.detected_date.format('YYYY-MM-DD'));
       body.append('upper_code', form.upper_code);
       body.append('lower_code', form.lower_code);
+      if (form.found_department) body.append('found_department', form.found_department);
+      if (form.ocv) body.append('ocv', form.ocv);
+      if (form.building_no) body.append('building_no', form.building_no);
       body.append('defect_type_id', String(form.defect_type_id));
       body.append('operator_name', form.operator_name);
       if (form.defect_description) body.append('defect_description', form.defect_description);
@@ -142,6 +159,10 @@ export default function QCEntry() {
   };
 
   const suffixTokens = parsedCard?.suffix_tokens || (parsedCard?.suffix ? [parsedCard.suffix] : []);
+  const analysisDefectDescription = parsedCard?.defect_description || form.defect_description || '-';
+  const analysisFoundDepartment = parsedCard?.found_department || form.found_department || '-';
+  const analysisOcv = parsedCard?.ocv || form.ocv || '-';
+  const analysisBuildingNo = parsedCard?.building_no || form.building_no || '-';
 
   return (
     <div style={{ padding: isMobile ? '4px 0 20px' : '8px 16px 24px', background: '#f5f7fa', minHeight: 'calc(100vh - 96px)' }}>
@@ -168,7 +189,7 @@ export default function QCEntry() {
               }
             >
               <Row gutter={[16, 20]}>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={12} xl={6}>
                   {fieldBlock(
                     t('qc.detected_date'),
                     <DatePicker
@@ -180,7 +201,7 @@ export default function QCEntry() {
                     />,
                   )}
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={12} xl={6}>
                   {fieldBlock(
                     t('qc.upper_code'),
                     <Input
@@ -191,7 +212,7 @@ export default function QCEntry() {
                     />,
                   )}
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={12} xl={6}>
                   {fieldBlock(
                     t('qc.lower_code'),
                     <Input
@@ -202,8 +223,19 @@ export default function QCEntry() {
                     />,
                   )}
                 </Col>
+                <Col xs={24} md={12} xl={6}>
+                  {fieldBlock(
+                    t('qc.found_department'),
+                    <Input
+                      size="large"
+                      value={form.found_department}
+                      placeholder={t('qc.found_department_placeholder')}
+                      onChange={(event) => setForm((prev) => ({ ...prev, found_department: event.target.value }))}
+                    />,
+                  )}
+                </Col>
 
-                <Col xs={24} md={8}>
+                <Col xs={24} md={12} xl={6}>
                   {fieldBlock(
                     t('qc.operator_name'),
                     <Input
@@ -214,58 +246,90 @@ export default function QCEntry() {
                     />,
                   )}
                 </Col>
-                <Col xs={24} md={16}>
+                <Col xs={24} md={12} xl={6}>
+                  {fieldBlock(
+                    t('qc.ocv'),
+                    <Input
+                      size="large"
+                      value={form.ocv}
+                      placeholder={t('qc.ocv_placeholder')}
+                      onChange={(event) => setForm((prev) => ({ ...prev, ocv: event.target.value }))}
+                    />,
+                  )}
+                </Col>
+                <Col xs={24} md={12} xl={6}>
+                  {fieldBlock(
+                    t('qc.building_no'),
+                    <Input
+                      size="large"
+                      value={form.building_no}
+                      placeholder={t('qc.building_no_placeholder')}
+                      onChange={(event) => setForm((prev) => ({ ...prev, building_no: event.target.value }))}
+                    />,
+                  )}
+                </Col>
+                <Col xs={24} md={24} xl={24}>
                   {fieldBlock(
                     t('qc.upload_photo_optional'),
                     <div
                       style={{
                         display: 'flex',
                         alignItems: 'center',
-                        gap: 12,
-                        minHeight: 48,
-                        flexWrap: 'wrap',
+                        gap: 8,
+                        width: '100%',
+                        minWidth: 0,
+                        height: 48,
                       }}
                     >
-                      <Upload
-                        beforeUpload={(file) => {
-                          setPhotoFile(file);
-                          return false;
-                        }}
-                        onRemove={() => setPhotoFile(null)}
-                        fileList={photoFile ? [photoFile] : []}
-                        maxCount={1}
+                      <input
+                        ref={photoInputRef}
+                        type="file"
                         accept="image/*"
-                        showUploadList={false}
+                        onChange={handlePhotoChange}
+                        style={{ display: 'none' }}
+                      />
+                      <Button
+                        size="large"
+                        icon={<UploadOutlined />}
+                        onClick={openPhotoPicker}
+                        style={{ flexShrink: 0, minWidth: isMobile ? 118 : 132 }}
                       >
-                        <Button size="large" icon={<UploadOutlined />}>
-                          {t('qc.select_photo')}
-                        </Button>
-                      </Upload>
-                      {photoFile ? (
-                        <div
-                          style={{
-                            minWidth: 0,
-                            flex: '1 1 260px',
-                            border: '1px solid #e8eef5',
-                            borderRadius: 8,
-                            padding: '10px 12px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            background: '#fafcff',
-                          }}
+                        {t('qc.select_photo')}
+                      </Button>
+                      <div
+                        style={{
+                          minWidth: 0,
+                          flex: 1,
+                          border: '1px solid #e8eef5',
+                          borderRadius: 8,
+                          padding: '0 12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          background: '#fafcff',
+                          height: 48,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <CameraOutlined style={{ fontSize: 18, color: '#1677ff', flexShrink: 0 }} />
+                        <Typography.Text
+                          strong
+                          ellipsis={{ tooltip: photoFile ? `${photoFile.name} (${Math.round(photoFile.size / 1024)} KB)` : false }}
+                          style={{ display: 'block', minWidth: 0, flex: 1 }}
                         >
-                          <CameraOutlined style={{ fontSize: 18, color: '#1677ff', flexShrink: 0 }} />
-                          <div style={{ minWidth: 0 }}>
-                            <Typography.Text strong ellipsis style={{ display: 'block' }}>
-                              {photoFile.name}
-                            </Typography.Text>
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                              {Math.round(photoFile.size / 1024)} KB
-                            </Typography.Text>
-                          </div>
-                        </div>
-                      ) : null}
+                          {photoFile ? `${photoFile.name} (${Math.round(photoFile.size / 1024)} KB)` : t('qc.no_photo_selected')}
+                        </Typography.Text>
+                        {photoFile ? (
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<CloseCircleOutlined />}
+                            onClick={() => setPhotoFile(null)}
+                            style={{ flexShrink: 0 }}
+                            aria-label={t('qc.clear_photo')}
+                          />
+                        ) : null}
+                      </div>
                     </div>,
                   )}
                 </Col>
@@ -378,14 +442,26 @@ export default function QCEntry() {
                     <Descriptions.Item label={t('qc.station')}>
                       {parsedCard.parsed_station_no || parsedCard.station_no || '-'}
                     </Descriptions.Item>
+                    <Descriptions.Item label={t('qc.found_department')}>
+                      {analysisFoundDepartment}
+                    </Descriptions.Item>
+                    <Descriptions.Item label={t('qc.ocv')}>
+                      {analysisOcv}
+                    </Descriptions.Item>
+                    <Descriptions.Item label={t('qc.building_no')}>
+                      {analysisBuildingNo}
+                    </Descriptions.Item>
                     <Descriptions.Item label={t('qc.parsed_time')}>
-                      {parsedCard.parsed_production_time || parsedCard.production_time || '-'}
+                      {formatLocalDateTime(parsedCard.parsed_production_time || parsedCard.production_time)}
                     </Descriptions.Item>
                     <Descriptions.Item label={t('qc.grade')}>
                       {parsedCard.parsed_grade || parsedCard.grade || '-'}
                     </Descriptions.Item>
                     <Descriptions.Item label={t('qc.special_status')}>
                       {parsedCard.parsed_special_status || parsedCard.special_status || '-'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label={t('qc.defect_description')}>
+                      {analysisDefectDescription}
                     </Descriptions.Item>
                     <Descriptions.Item label={t('qc.suffix_tag')}>
                       {suffixTokens.length ? suffixTokens.map((token) => <Tag key={token}>{token}</Tag>) : '-'}

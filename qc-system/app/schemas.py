@@ -166,6 +166,9 @@ class QualityRecordCreate(BaseModel):
     detected_date: date
     upper_code: str
     lower_code: str
+    found_department: Optional[str] = Field(default=None, max_length=64)
+    ocv: Optional[str] = Field(default=None, max_length=32)
+    building_no: Optional[str] = Field(default=None, max_length=32)
     defect_type_id: int
     defect_description: Optional[str] = Field(default=None, max_length=255)
     operator_name: str = Field(..., max_length=64)
@@ -177,6 +180,9 @@ class QualityRecordOut(BaseModel):
     detected_date: date
     upper_code: str
     lower_code: str
+    found_department: Optional[str] = None
+    ocv: Optional[str] = None
+    building_no: Optional[str] = None
     parsed_line: str
     parsed_line_code: str
     parsed_line_desc: str
@@ -198,6 +204,9 @@ class OCRIngestRequest(BaseModel):
     upper_code: str
     lower_code: str
     detected_date: Optional[date] = None
+    found_department: Optional[str] = Field(default=None, max_length=64)
+    ocv: Optional[str] = Field(default=None, max_length=32)
+    building_no: Optional[str] = Field(default=None, max_length=32)
     defect_type_id: Optional[int] = None
     operator_name: Optional[str] = None
     auto_save: bool = False

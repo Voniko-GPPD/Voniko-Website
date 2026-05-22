@@ -2,8 +2,9 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
-const os = require('os');
+const fs = require('fs');
 const { authenticateToken, requireEngineerOrAbove } = require('../middleware/auth');
+const config = require('../config');
 const {
   listFiles, uploadFile, getFile, deleteFile,
   getActivityLog, getDashboardStats, lockFile, unlockFile, exportActivityLog, renameFile,
@@ -11,9 +12,16 @@ const {
 const { addFileTags, removeFileTag } = require('../controllers/tagController');
 const { subscribeFile, unsubscribeFile, getSubscribeStatus } = require('../controllers/subscriptionController');
 
-// Use OS temp dir for initial upload
+// Use an application-owned temp dir instead of the OS temp directory.
+// On Windows Server, the OS temp volume is often smaller or more restricted
+// than the data volume used for permanent uploads.
+const uploadTempDir = path.resolve(config.dataDir, 'uploads_tmp');
+if (!fs.existsSync(uploadTempDir)) {
+  fs.mkdirSync(uploadTempDir, { recursive: true });
+}
+
 const upload = multer({
-  dest: os.tmpdir(),
+  dest: uploadTempDir,
   limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5 GB max
 });
 

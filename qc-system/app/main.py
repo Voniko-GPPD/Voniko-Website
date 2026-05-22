@@ -120,6 +120,9 @@ def _apply_runtime_migrations() -> None:
             _ensure_column(conn, "quality_records", "parsed_station_no", "parsed_station_no VARCHAR(2)")
             _ensure_column(conn, "quality_records", "photo_url", "photo_url VARCHAR(255)")
             _ensure_column(conn, "quality_records", "defect_description", "defect_description VARCHAR(255)")
+            _ensure_column(conn, "quality_records", "found_department", "found_department VARCHAR(64)")
+            _ensure_column(conn, "quality_records", "ocv", "ocv VARCHAR(32)")
+            _ensure_column(conn, "quality_records", "building_no", "building_no VARCHAR(32)")
 
         # Safe index creation
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_quality_records_line_code ON quality_records(parsed_line_code)"))
@@ -253,6 +256,9 @@ def build_record_out(record: QualityRecord) -> QualityRecordOut:
         detected_date=record.detected_date,
         upper_code=record.upper_code,
         lower_code=record.lower_code,
+        found_department=record.found_department,
+        ocv=record.ocv,
+        building_no=record.building_no,
         parsed_line=record.parsed_line,
         parsed_line_code=line_code,
         parsed_line_desc=line_desc,
@@ -276,6 +282,9 @@ def _create_quality_record_entity(
     lower_code: str,
     defect_type_id: int,
     operator_name: str,
+    found_department: str | None = None,
+    ocv: str | None = None,
+    building_no: str | None = None,
     defect_description: str | None = None,
     photo_url: str | None = None,
 ) -> QualityRecord:
@@ -292,6 +301,9 @@ def _create_quality_record_entity(
         detected_date=detected_date,
         upper_code=upper_code.strip().upper(),
         lower_code=lower_code.strip(),
+        found_department=found_department.strip() if found_department else None,
+        ocv=ocv.strip() if ocv else None,
+        building_no=building_no.strip() if building_no else None,
         parsed_line=parsed["production_line"],
         parsed_line_code=parsed["line_code"],
         parsed_line_desc=parsed["line_desc"],
@@ -341,9 +353,13 @@ def _apply_record_filters(
             or_(
                 QualityRecord.upper_code.ilike(kw),
                 QualityRecord.lower_code.ilike(kw),
+                QualityRecord.found_department.ilike(kw),
+                QualityRecord.ocv.ilike(kw),
+                QualityRecord.building_no.ilike(kw),
                 QualityRecord.parsed_line.ilike(kw),
                 QualityRecord.parsed_grade.ilike(kw),
                 QualityRecord.parsed_special_status.ilike(kw),
+                QualityRecord.defect_description.ilike(kw),
                 QualityRecord.operator_name.ilike(kw),
                 DefectType.name.ilike(kw),
             )
@@ -871,6 +887,9 @@ def create_quality_record(payload: QualityRecordCreate, db: Session = Depends(ge
         detected_date=payload.detected_date,
         upper_code=payload.upper_code,
         lower_code=payload.lower_code,
+        found_department=payload.found_department,
+        ocv=payload.ocv,
+        building_no=payload.building_no,
         defect_type_id=payload.defect_type_id,
         defect_description=payload.defect_description,
         operator_name=payload.operator_name,
@@ -883,6 +902,9 @@ def create_quality_record_with_photo(
     detected_date: date = Form(...),
     upper_code: str = Form(...),
     lower_code: str = Form(...),
+    found_department: str | None = Form(None),
+    ocv: str | None = Form(None),
+    building_no: str | None = Form(None),
     defect_type_id: int = Form(...),
     defect_description: str | None = Form(None),
     operator_name: str = Form(...),
@@ -896,6 +918,9 @@ def create_quality_record_with_photo(
             detected_date=detected_date,
             upper_code=upper_code,
             lower_code=lower_code,
+            found_department=found_department,
+            ocv=ocv,
+            building_no=building_no,
             defect_type_id=defect_type_id,
             defect_description=defect_description,
             operator_name=operator_name,
@@ -997,6 +1022,9 @@ def ingest_ocr(payload: OCRIngestRequest, db: Session = Depends(get_db)):
             detected_date=payload.detected_date or date.today(),
             upper_code=payload.upper_code,
             lower_code=payload.lower_code,
+            found_department=payload.found_department,
+            ocv=payload.ocv,
+            building_no=payload.building_no,
             defect_type_id=payload.defect_type_id,
             operator_name=payload.operator_name,
         )
